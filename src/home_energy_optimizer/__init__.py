@@ -1,8 +1,11 @@
-"""home-energy-optimizer: a value-function tier for home energy management.
+"""home-energy-optimizer: makes a home's energy devices cooperate.
 
-Solves per-device dynamic programs and exposes the resulting value function as
-a fast policy, a marginal price of stored energy, and cheap counterfactual
-evaluation - the three things a MILP planner structurally cannot provide.
+Each device (battery, EV, water heater, heat pump) plans itself with its own
+solver behind one interface, and a coordinator makes the plans agree at the
+meter: Dantzig-Wolfe (`plan()`, the default) or ADMM (`coordinate()`). The
+saving can then be split fairly among the devices (`dw.attribution`). A battery
+solved by dynamic programming also gives an action and a marginal value of
+stored energy at any state, for acting between plans (`policy`).
 """
 
 from .coordinate import baseline_solution, coordinate, net_cost, total_objective

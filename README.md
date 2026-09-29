@@ -1,25 +1,54 @@
 # home-energy-optimizer
 
-Home energy optimisation that produces a **price signal**, not just a schedule.
+**Makes a home's energy devices work together.**
 
-The Python package in this repository is `home-energy-optimizer` (import `home_energy_optimizer`); it
-feeds [Home Assistant](https://www.home-assistant.io) and [evcc](https://evcc.io).
-Try the planner in your browser:
+A home's distributed energy resources (DERs) — a battery, an EV charger, a
+hot-water tank, a heat pump, solar panels — often come from different makers,
+and each optimises for itself. Planned one at a time they work against each
+other: two batteries charge into the same solar surplus and import to do it;
+the water heater runs from the grid while the battery could have covered it.
+
+home-energy-optimizer lets them cooperate. Each device keeps its own model and
+its own optimiser — a linear or quadratic programme, a dynamic programme, a
+manufacturer's black box — and answers the same few questions through one
+interface. A coordinator turns the answers into one plan for the whole house,
+around solar output, tariffs and grid limits:
+
+- **Dantzig–Wolfe**, the default, blends the devices' plans in a small linear
+  programme and bounds how far the result can be from the best possible plan.
+- **ADMM** steers the devices with one shared price, and needs no LP solver.
+
+The house reaches a better outcome than its devices would alone, and the saving
+is split among the solar and each device by what it contributed, so every
+device is fairly rewarded for cooperating. No single solver is the point: each
+device uses whichever answers its questions best. A dynamic programme, for
+instance, suits a device with one state variable and also gives a policy for
+every state; a linear programme solves a battery exactly.
+
+```mermaid
+flowchart LR
+  M["Dantzig–Wolfe coordinator<br/>an LP over the meter, the grid limits and the batteries<br/>picks the cheapest blend of offers"]
+  D["Each other device (tank, heat pump, EV)<br/>its best plan at those prices,<br/>by its own solver"]
+  M -- "prices, one per slot" --> D
+  D -- "offers: a plan and its private cost" --> M
+  M -.-> R(["one plan per device,<br/>with a bound on how far it is from the best"])
+```
+
+```mermaid
+flowchart LR
+  T["Every device, in parallel<br/>its cheapest plan near a target,<br/>by its own solver"]
+  H["ADMM coordinator (the house)<br/>averages the imbalance,<br/>raises the price where it persists"]
+  T -- "plans" --> H
+  H -- "imbalance and price" --> T
+  H -.-> R(["the best runnable plan, polished"])
+```
+
+It feeds [Home Assistant](https://www.home-assistant.io) and
+[evcc](https://evcc.io). Try it in your browser:
 [Smart Home Energy Optimizer](https://ameetdesh.github.io/multi_device_optimizer_standalone.html).
-
-It plans a day of battery, hot-water and HVAC operation against a tariff and a
-PV forecast — and because it solves by dynamic programming rather than linear
-programming, it also answers questions a schedule cannot:
-
-- **What is a stored kWh worth right now?** (λ)
-- **At what grid price should I import, or export?** (a bid/ask band)
-- **What would one more kWh of consumption actually cost me?** (often far below
-  the tariff, because storage serves it)
-- **What if I'm not in the state the plan predicted?** (there is an optimal
-  action for every state, not only the planned one)
-
-Those come from the value function, so they are lookups rather than re-solves —
-microseconds, no solver in the loop.
+The theory, with the evidence behind every number, is in
+[docs/theory.pdf](docs/theory.pdf). The Python package is
+`home-energy-optimizer` (import `home_energy_optimizer`).
 
 ---
 
@@ -35,16 +64,17 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/pip install -e ".[test]" scipy
-.venv/bin/python -m pytest          # 210 tests (182 without scipy)
+.venv/bin/python -m pytest          # the full suite; a few reference checks skip without scipy or osqp
 ```
 
 ## Theory notes
 
-`docs/theory.tex` sets out the problem, the device interface and both
-coordinators, with the evidence behind every number. Build the PDF with
+[docs/theory.pdf](docs/theory.pdf) sets out the problem, the device interface
+and both coordinators, with the evidence behind every number. It is built from
+`docs/theory.tex`:
 
 ```bash
-tools/build-theory          # -> docs/theory.pdf (not committed)
+tools/build-theory          # -> docs/theory.pdf
 tools/build-theory --figs   # regenerate docs/figs/ first (needs the bench extras)
 ```
 
@@ -63,6 +93,10 @@ since the source is here.
 ## Three ways to use it
 
 ### 1. As a library
+
+Plan a site, then act between plans from the battery's own solver - here its
+dynamic programme, whose value function answers "what now, from this state?"
+without a re-solve. `plan()` (below) picks the coordinator.
 
 ```python
 from home_energy_optimizer import (
@@ -222,8 +256,8 @@ smoke test. Then open <http://localhost:8123/home-energy-optimizer>.
 
 | entity | meaning |
 |---|---|
-| `sensor.hems_import_below` | **import while the grid price is below this** |
-| `sensor.hems_export_above` | **export while the grid price is above this** |
+| `sensor.hems_import_below` | import while the grid price is below this (from the battery's DP) |
+| `sensor.hems_export_above` | export while the grid price is above this (from the battery's DP) |
 | `sensor.hems_lambda` | λ, the value of a stored kWh, with a `forecast` array |
 | `sensor.hems_worth_running` | run a flexible load while its value/kWh exceeds this |
 | `sensor.hems_battery_action` | battery setpoint now (kW, + = charge) |
@@ -292,9 +326,13 @@ series:
 
 ---
 
-## The three prices, and which to use
+## Prices from a battery's dynamic programme
 
-Easy to conflate, and not interchangeable.
+A convenience of one device solver, not the heart of the method. When the
+battery is solved by a dynamic programme, its value function gives three prices
+at whatever state the battery is in, which the Home Assistant path publishes
+between plans (a battery solved as an LP gives its plan, and λ only along it).
+They are easy to conflate, and not interchangeable.
 
 | | formula | answers |
 |---|---|---|
@@ -360,34 +398,28 @@ docs/PLAN.md       state and next steps
 
 ---
 
-## Validation
+## Evidence
 
-All measured; method in `docs/NOTES.md`.
+All measured; each number and the script behind it is in
+[docs/theory.pdf](docs/theory.pdf), Appendix C.
 
-**λ is a real shadow price**, checked against two independent ground truths — an
-LP dual computed by HiGHS, and an exact joint dynamic program:
+**Cooperation pays.** For a battery and an on/off water heater over a day,
+against a mixed-integer solver over the same model (exact, 15–39 s),
+Dantzig–Wolfe captures 99.5–99.7% of the available savings in 0.6–0.7 s and
+ADMM 98.1–99.7% in 4–8 s. On the Home Assistant demo site (battery, water
+heater, HVAC) Dantzig–Wolfe captures 98–99% and ADMM 97–98%, and every
+Dantzig–Wolfe plan carries its certified gap.
 
-| compared against | worst mean error | correlation |
-|---|---|---|
-| LP dual (the exact costate) | 0.031 /kWh | 0.75–0.91 |
-| exact joint 2-D DP costate | 0.039 /kWh | 0.83–0.95 |
+**Grid limits hold.** Dantzig–Wolfe meets a limit exactly or prices and reports
+the breach; ADMM left at most 5 W over on 72 test sites.
 
-It is published with a **±0.04/kWh uncertainty band**, because that is what the
-measurement supports. Decisions inside that band are not reliable.
+**The split is fair.** Against the Shapley value, which needs a plan for every
+coalition, the savings split came within 0.46 (within 0.13 for the batteries)
+on six test cases, from one extra plan.
 
-**Reservation prices predict the optimiser's own actions** in 89.6–94.8% of
-slots across three tariffs.
-
-**The discretisation cost is small and tunable**: 94.3% of available savings on
-a 50×21 state grid, 98.4–99.7% on 200×81 (37 ms).
-
-**Multi-device coordination costs 2–8%** against an exact joint solve, and
-**9–17%** against a mixed-integer solver over the same model. The exact joint
-solve is only 3.8× slower, so at one or two devices it is worth doing directly.
-
-**Grid import limits are met** down to about 20% above the physically achievable
-floor; below that the result reports the breach rather than shipping an
-infeasible plan.
+**The device solvers are accurate.** A battery's dynamic programme captures
+98.4–99.2% of what its exact LP does; its λ lies within 0.007–0.032/kWh of the
+LP's dual, and is published with a ±0.04/kWh band.
 
 ---
 
