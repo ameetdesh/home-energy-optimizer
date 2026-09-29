@@ -10,7 +10,7 @@ The output still FETCHES the bundle at runtime, which is what
 tools/make_standalone.py needs in order to find its insertion
 point. Run that afterwards to inline the payload into a single file.
 
-Run:  admm/wasm/make_page.py       # -> admm/wasm/hems_policy.html
+Run:  admm/wasm/make_page.py       # -> admm/wasm/admm_page.html
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ function _status(msg, bad){
     void pyodide;
 
     _status('Loading the solver\u2026');
-    const code = await (await fetch(`hemspolicy_bundle.py?t=${Date.now()}`)).text();
+    const code = await (await fetch(`admm_bundle.py?t=${Date.now()}`)).text();
 
     await send({cmd: 'run', src: code});
     await send({cmd: 'ready'});
@@ -151,7 +151,7 @@ function _status(msg, bad){
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", type=pathlib.Path, default=GUI)
-    ap.add_argument("-o", "--out", type=pathlib.Path, default=HERE / "hems_policy.html")
+    ap.add_argument("-o", "--out", type=pathlib.Path, default=HERE / "admm_page.html")
     args = ap.parse_args()
 
     html = args.src.read_text()

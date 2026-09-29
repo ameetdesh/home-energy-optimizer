@@ -1,4 +1,4 @@
-"""Local GUI for the Dantzig-Wolfe coordinator (dw/coordinator.py).
+"""Local GUI for the Dantzig-Wolfe coordinator (src/home_energy_optimizer/dw/coordinator.py).
 
 Run:  python3 dw/gui/server.py        then open http://127.0.0.1:8766
 
@@ -21,10 +21,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-from dw import webapi  # noqa: E402
+from home_energy_optimizer.dw import webapi  # noqa: E402
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,7 +62,7 @@ def main() -> None:
     port = next((int(a) for a in sys.argv[1:] if a.isdigit()), 8766)
     url = f"http://127.0.0.1:{port}"
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"hems-policy DW GUI on {url}   (Ctrl-C to stop)")
+    print(f"home-energy-optimizer DW GUI on {url}   (Ctrl-C to stop)")
     try:
         if "--no-browser" not in sys.argv:
             threading.Timer(0.5, lambda: webbrowser.open(url)).start()

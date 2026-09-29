@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hems-policy"
+name = "home-energy-optimizer"
 version = "0.1.0"
-description = "Value-function tier for home energy management: fast policy, marginal energy price, cheap counterfactuals."
+description = "Home energy optimisation: batteries, EV, hot water and heating planned by Dantzig-Wolfe or ADMM, for Home Assistant and evcc."
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.24"]
 
@@ -13,12 +13,12 @@ dependencies = ["numpy>=1.24"]
 test = ["pytest>=7"]
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
 
-# The two coordinators, `dw` (Dantzig-Wolfe) and `admm`, sit at the repo root,
-# each beside its GUI and wasm build; they ship with the library so
-# hemspolicy.plan() and hemspolicy.coordinate() work.
+# One package: the core, and the two coordinators as home_energy_optimizer.dw and
+# home_energy_optimizer.admm. Their apps (GUI, browser page) live at the repo
+# root in dw/ and admm/, outside the package.
 [tool.setuptools.packages.find]
-where = ["src", "."]
-include = ["hemspolicy*", "dw", "admm"]
+where = ["src"]
+include = ["home_energy_optimizer*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -23,16 +23,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from dw.coordinator import DWCoordinator, DWResult
-from hemspolicy.coordinate import (
+from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult
+from home_energy_optimizer.coordinate import (
     apply_curtailment,
     baseline_solution,
     device_sell_price,
     net_cost,
     total_objective,
 )
-from hemspolicy.dp_battery import solve_battery
-from hemspolicy.types import CoordinationResult, DeviceSolution, Forecasts, SiteConfig
+from home_energy_optimizer.dp_battery import solve_battery
+from home_energy_optimizer.types import CoordinationResult, DeviceSolution, Forecasts, SiteConfig
 
 _EMPTY2 = np.empty((0, 0))
 _EMPTY1 = np.empty(0)

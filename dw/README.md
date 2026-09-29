@@ -1,21 +1,22 @@
-# Dantzig–Wolfe coordination: an alternative to the ADMM loop
+# Dantzig–Wolfe coordination: the default planner
 
-This folder holds a column-generation coordinator, kept separate from the ADMM
-coordinator in `src/hemspolicy/coordinate.py` so that the two can be run side by
-side on the same instances. Nothing under `src/` is modified.
+The Dantzig–Wolfe (column-generation) coordinator is `home_energy_optimizer.dw`,
+the default behind `home_energy_optimizer.plan()`. This folder holds its app and
+these design notes, which record how it was designed and measured.
 
 ```
-dw/coordinator.py   the DW coordinator (master LP + the existing DPs as pricing oracles)
-dw/compare.py       ADMM vs DW vs exact references, one objective, one table per scenario
-dw/webapi.py        JSON backend for the DW app (same payload shape as admm.webapi)
-dw/gui/             the DW app: server.py (stdlib HTTP, port 8766) + index.html
-tests/test_dw.py    bound ordering, parity with ADMM, exact grid limit (skips without scipy)
+src/home_energy_optimizer/dw/coordinator.py   the DW coordinator (master LP + the device solvers as pricing oracles)
+src/home_energy_optimizer/dw/webapi.py        JSON backend for the DW app (same payload shape as the ADMM app's)
+bench/dw_compare.py                           ADMM vs DW vs exact references, one objective, one table per scenario
+dw/gui/                                       the DW app: server.py (stdlib HTTP, port 8766) + index.html
+dw/wasm/                                      the app as one self-contained browser page (build.sh)
+tests/test_dw.py                              bound ordering, parity with ADMM, exact grid limit
 ```
 
 ```bash
 .venv/bin/pip install scipy            # optional: only for HiGHS cross-checks, bench/ and the MILP reference
-.venv/bin/python dw/compare.py         # scenarios A-F, ~4 min
-.venv/bin/python dw/compare.py --only A --milp   # adds the HiGHS MILP reference (~70 s more)
+.venv/bin/python bench/dw_compare.py         # scenarios A-F, ~4 min
+.venv/bin/python bench/dw_compare.py --only A --milp   # adds the HiGHS MILP reference (~70 s more)
 .venv/bin/python -m pytest tests/test_dw.py
 .venv/bin/python dw/gui/server.py     # the DW app on http://127.0.0.1:8766 (numpy only)
 .venv/bin/python admm/gui/server.py   # the ADMM app on http://127.0.0.1:8765, for comparison
@@ -72,7 +73,7 @@ own discretisation (§6.3).
 > **Since replaced.** The ADMM loop described in this section and compared in
 > §6 (Jacobi rounds against the others' last plans, a z-step on the kink, dual
 > ascent on limit multipliers) has been removed. The package's ADMM is now
-> proximal message passing (`admm/coordinator.py`); `docs/theory.tex` describes
+> proximal message passing (`src/home_energy_optimizer/admm/coordinator.py`); `docs/theory.tex` describes
 > both coordinators as they are and compares them.
 
 The previous sessions finished with PR #8: compiled DP kernels and a wasm
@@ -342,7 +343,7 @@ the one ADMM returns.
 
 ## 4. The algorithm, step by step
 
-As implemented in `dw/coordinator.py::DWCoordinator.run`.
+As implemented in `src/home_energy_optimizer/dw/coordinator.py::DWCoordinator.run`.
 
 ```
 INPUT  site config, forecasts; max_iter=40, gap_tol=1e-3, smoothing α=0.5
@@ -665,7 +666,7 @@ It is the same pipeline as the ADMM app's `admm/wasm/build.sh`:
 
 | step | from | to |
 |---|---|---|
-| `dw/wasm/make_bundle.py` | `dw/` + `admm/` + `src/hemspolicy/` | `dw_bundle.py`: one flat module; `dw.*`/`admm.*`/`hemspolicy.*` imports removed (aliases become assignments); only `build_site` taken from `hemspolicy.webapi`, whose other names would collide; any collision fails the build |
+| `dw/wasm/make_bundle.py` | `dw/` + `admm/` + `src/home_energy_optimizer/` | `dw_bundle.py`: one flat module; `dw.*`/`admm.*`/`home_energy_optimizer.*` imports removed (aliases become assignments); only `build_site` taken from `home_energy_optimizer.webapi`, whose other names would collide; any collision fails the build |
 | `dw/wasm/make_page.py` | `dw/gui/index.html` | `dw_page.html`: the ADMM page's Pyodide-worker bootstrap, retargeted; the solver choice dropped (no scipy in the browser) |
 | `tools/make_standalone.py` | page + bundle + `wasm/build/dist/*.whl` | the standalone, with names kept per `wasm/keep_names.py` |
 
@@ -679,7 +680,7 @@ Pyodide download.
 ## 7½. Variants implemented
 
 `DWCoordinator(site, fc, battery_in_master=..., tank_in_master=...).run(pool=..., seed_admm=...)`.
-Every option is also a control in the app. `dw/compare.py --only E` compares them.
+Every option is also a control in the app. `bench/dw_compare.py --only E` compares them.
 
 | variant | option | what it does |
 |---|---|---|
@@ -704,7 +705,7 @@ The ADMM seed certifies ADMM's own plan as within 0.24 / 0.35 / 0.86 of the opti
 ### Device response: price sensitivity from the DP (`response=`; app: Device response)
 
 This is the idea of a device sending not only its plan but how it would
-respond to a change. The DP already holds the answer (`dw/sensitivity.py`):
+respond to a change. The DP already holds the answer (`src/home_energy_optimizer/dw/sensitivity.py`):
 
 1. Solve the pricing DP at the master's price, as before.
 2. For every hour t, force one step more (and, separately, one step less):
@@ -730,7 +731,7 @@ flexible there. For the tank, heating *less* is expensive around 06:00–08:00
 and 17:00–19:00 (the hot-water draws), and heating *more* is cheap almost
 everywhere.
 
-Measured (`compare.py --only F`: 2 batteries in the master + tank + HVAC,
+Measured (`bench/dw_compare.py --only F`: 2 batteries in the master + tank + HVAC,
 7 kW import limit):
 
 | | proposals | + sensitivity | sensitivity only |
@@ -781,7 +782,7 @@ means:
 
 These are now the defaults of `DWCoordinator.run` and of the app.
 
-**Built-in solver (`dw/lpsolver.py`, numpy only).** The master is solved by a
+**Built-in solver (`src/home_energy_optimizer/dw/lpsolver.py`, numpy only).** The master is solved by a
 primal-dual interior-point method (Mehrotra predictor-corrector), which
 returns the equality duals (the meter prices) with HiGHS' sign convention.
 Details:
@@ -821,8 +822,8 @@ longer needs scipy.
 2. **Add `ref_price` / `terminal_price` arguments to the solvers**, replacing
    the prototype's `_PriceVector` workaround.
 3. ~~**Add `method="dw"` as a first-class coordinator**, returning a
-   `CoordinationResult`.~~ Done: `hemspolicy.plan(site, fc, method="dw")`
-   (via `dw/integrate.py`) is now the default for Home Assistant and evcc.
+   `CoordinationResult`.~~ Done: `home_energy_optimizer.plan(site, fc, method="dw")`
+   (via `src/home_energy_optimizer/dw/integrate.py`) is now the default for Home Assistant and evcc.
    Batteries with EV extras (charge floor, SoC goal, charger minimum, SoC
    gates) bid plans instead of sitting in the master; see `is_plain_battery`.
 4. **Validate λ from the master SoE duals** against `bench/duals.py`

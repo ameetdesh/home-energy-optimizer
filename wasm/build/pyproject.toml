@@ -10,4 +10,4 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dp_kernels"
 version = "0.1.0"
-description = "Compiled DP backward recursions for hems-policy"
+description = "Compiled DP backward recursions for home-energy-optimizer"

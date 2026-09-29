@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -26,7 +26,7 @@ from hemspolicy import (
     demo_forecasts,
     net_cost,
 )
-from hemspolicy.coordinate import comfort_penalty, total_objective
+from home_energy_optimizer.coordinate import comfort_penalty, total_objective
 
 
 @pytest.fixture
@@ -286,8 +286,8 @@ def test_a_breaching_round_does_not_win_by_having_a_smaller_bill(site):
     This is the property the pricing exists for: ranking on the raw bill picks
     the plan that overdraws hardest, because overdrawing is what made it cheap.
     """
-    from hemspolicy import GridLimits
-    from hemspolicy.coordinate import grid_penalty
+    from home_energy_optimizer import GridLimits
+    from home_energy_optimizer.coordinate import grid_penalty
 
     limited = SiteConfig(
         horizon=site.horizon,
@@ -318,7 +318,7 @@ def test_the_breach_price_is_what_stops_the_trade(site):
     The contrast is the argument for pricing it at all: at multiplier 0 the
     objective is blind to the limit, so selection reverts to the raw bill.
     """
-    from hemspolicy import GridLimits
+    from home_energy_optimizer import GridLimits
 
     def solve(mult):
         cfg = SiteConfig(

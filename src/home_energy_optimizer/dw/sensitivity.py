@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from hemspolicy.dp_battery import _feasible_actions
-from hemspolicy.dp_thermal import (
+from home_energy_optimizer.dp_battery import _feasible_actions
+from home_energy_optimizer.dp_thermal import (
     HVAC_ACTIONS,
     _hvac_duty_cap,
     _hvac_heat_flow,

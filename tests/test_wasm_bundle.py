@@ -1,6 +1,6 @@
 """The flattened browser bundle must not drift from the package.
 
-`admm/wasm/hemspolicy_bundle.py` is generated and committed, which is a standing
+`admm/wasm/admm_bundle.py` is generated and committed, which is a standing
 invitation for the two to diverge. These tests close that: the bundle is
 regenerated here and compared, and then actually exercised.
 """
@@ -16,7 +16,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAKER = ROOT / "admm" / "wasm" / "make_bundle.py"
-BUNDLE = ROOT / "admm" / "wasm" / "hemspolicy_bundle.py"
+BUNDLE = ROOT / "admm" / "wasm" / "admm_bundle.py"
 
 pytestmark = pytest.mark.skipif(not MAKER.exists(), reason="admm/wasm/ not present")
 
@@ -31,9 +31,9 @@ def fresh(tmp_path_factory) -> str:
 
 def test_the_committed_bundle_is_current(fresh):
     """Regenerate and compare. If this fails, run admm/wasm/build.sh."""
-    assert BUNDLE.exists(), "admm/wasm/hemspolicy_bundle.py is missing; run admm/wasm/build.sh"
+    assert BUNDLE.exists(), "admm/wasm/admm_bundle.py is missing; run admm/wasm/build.sh"
     assert BUNDLE.read_text() == fresh, (
-        "admm/wasm/hemspolicy_bundle.py is stale relative to src/hemspolicy and admm/; "
+        "admm/wasm/admm_bundle.py is stale relative to src/home_energy_optimizer and admm/; "
         "run admm/wasm/build.sh and commit the result"
     )
 
@@ -46,14 +46,14 @@ def test_the_bundle_carries_no_package_imports(fresh):
     """
     for i, line in enumerate(fresh.splitlines(), 1):
         assert not line.lstrip().startswith("from ."), f"relative import at line {i}: {line!r}"
-        assert not line.lstrip().startswith(("from hemspolicy", "from admm", "from dw")), f"package import at line {i}"
+        assert not line.lstrip().startswith(("from home_energy_optimizer", "from admm", "from dw")), f"package import at line {i}"
 
 
 def test_the_bundle_solves_and_answers_every_route(tmp_path, fresh):
     """Exec the bundle in a bare namespace - the way Pyodide does - and drive
     it through the same `_api` entry point the page uses."""
     ns: dict = {}
-    exec(compile(fresh, "hemspolicy_bundle.py", "exec"), ns)
+    exec(compile(fresh, "admm_bundle.py", "exec"), ns)
     api = ns["_api"]
 
     plan = json.loads(api("solve", json.dumps(
@@ -80,12 +80,12 @@ def test_the_bundle_solves_and_answers_every_route(tmp_path, fresh):
 
 def test_the_bundle_matches_the_package_numerically(fresh):
     """Same inputs, same objective. Flattening must not change an answer."""
-    from admm import webapi
+    from home_energy_optimizer.admm import webapi
 
     params = {"hours": 24, "grid": 60, "tariff": "day_night",
               "solar_peak": 9, "max_import_kw": 2.0}
     ns: dict = {}
-    exec(compile(fresh, "hemspolicy_bundle.py", "exec"), ns)
+    exec(compile(fresh, "admm_bundle.py", "exec"), ns)
 
     flat = json.loads(ns["_api"]("solve", json.dumps(params)))
     pkg = webapi.call("solve", dict(params))
@@ -100,7 +100,7 @@ def test_the_bundle_matches_the_package_numerically(fresh):
 # the shipped artifact, not just its inputs
 # --------------------------------------------------------------------------
 
-STANDALONE = ROOT / "admm" / "wasm" / "hems_policy_standalone.html"
+STANDALONE = ROOT / "admm" / "wasm" / "admm_standalone.html"
 
 
 def _payload() -> str:
@@ -151,7 +151,7 @@ def test_the_shipped_payload_still_answers_every_route():
     a page that loads fine and dies on the first solve, so the artifact itself
     has to be executed - checking its inputs is not enough.
     """
-    from admm import webapi
+    from home_energy_optimizer.admm import webapi
 
     ns: dict = {}
     exec(compile(_payload(), "standalone", "exec"), ns)

@@ -1,9 +1,9 @@
 # cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True
 """
-dp_kernels.pyx -- compiled backward recursions for hems-policy.
+dp_kernels.pyx -- compiled backward recursions for home-energy-optimizer.
 
 C translations of the inner loops of `solve_battery`, `solve_water_heater` and
-`solve_hvac`. The Python in src/hemspolicy remains the reference and the
+`solve_hvac`. The Python in src/home_energy_optimizer remains the reference and the
 fallback; these must stay numerically IDENTICAL to it, which
 build/verify_kernels.py asserts against the shipped fixtures.
 

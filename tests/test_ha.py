@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -19,7 +19,7 @@ from hemspolicy import (
     coordinate,
     demo_forecasts,
 )
-from hemspolicy.ha import (
+from home_energy_optimizer.ha import (
     LAMBDA_UNCERTAINTY,
     HomeAssistant,
     _jsonable,
@@ -144,7 +144,7 @@ def test_forecast_is_priced_at_a_fixed_state(snap):
     b = lambda_forecast(snap, 8.0, ahead=8)
     assert [p["lambda"] for p in a] != [p["lambda"] for p in b]
     # ...and each is internally consistent with marginal_value at that state.
-    from hemspolicy import marginal_value
+    from home_energy_optimizer import marginal_value
 
     assert a[5]["lambda"] == pytest.approx(marginal_value(snap, 5, 3.0), abs=1e-5)
 
@@ -208,8 +208,8 @@ def test_everything_published_is_json_serialisable(snap):
 
 def test_publish_policy_is_unclamped_by_default(snap):
     """Default behaviour must not change: no limits, no clamping."""
-    from hemspolicy.ha import publish_policy
-    from hemspolicy.policy import action
+    from home_energy_optimizer.ha import publish_policy
+    from home_energy_optimizer.policy import action
 
     ha = FakeHA()
     out = publish_policy(ha, snap, t=0, soe=5.0)
@@ -223,8 +223,8 @@ def test_publish_policy_clamps_against_a_measured_load_spike(snap):
     This is the gap the value function cannot close on its own: dp_load is
     frozen at plan time, so only this clamp reacts within a planning cycle.
     """
-    from hemspolicy.ha import publish_policy
-    from hemspolicy.policy import HardLimits, action
+    from home_energy_optimizer.ha import publish_policy
+    from home_energy_optimizer.policy import HardLimits, action
 
     raw = action(snap, 0, 5.0)
     ha = FakeHA()
@@ -240,8 +240,8 @@ def test_publish_policy_clamps_against_a_measured_load_spike(snap):
 
 
 def test_published_setpoint_sensor_records_why_it_was_clamped(snap):
-    from hemspolicy.ha import publish_policy
-    from hemspolicy.policy import HardLimits
+    from home_energy_optimizer.ha import publish_policy
+    from home_energy_optimizer.policy import HardLimits
 
     ha = FakeHA()
     publish_policy(

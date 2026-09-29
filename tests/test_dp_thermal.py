@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     Horizon,
     HvacConfig,
     WaterHeaterConfig,
@@ -15,8 +15,8 @@ from hemspolicy import (
     solve_hvac,
     solve_water_heater,
 )
-from hemspolicy.dp_thermal import _draw_factor, _relaxation, _usable_outflow
-from hemspolicy.profiles import (
+from home_energy_optimizer.dp_thermal import _draw_factor, _relaxation, _usable_outflow
+from home_energy_optimizer.profiles import (
     day_night_tariff,
     hot_water_demand_profile,
     outdoor_temp_profile,
@@ -336,7 +336,7 @@ def test_fractional_hvac_duty_never_costs_more(horizon):
     it takes is one of its duty levels."""
     from dataclasses import replace
 
-    from hemspolicy.dp_thermal import hvac_discomfort
+    from home_energy_optimizer.dp_thermal import hvac_discomfort
 
     buy, sell = day_night_tariff(horizon)
     out = outdoor_temp_profile(horizon)

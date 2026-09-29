@@ -13,11 +13,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from dw.webapi import _site_fc, solve  # noqa: E402
-from hemspolicy.coordinate import coordinate  # noqa: E402
-from admm.coordinator import _Grid  # noqa: E402
-from hemspolicy.types import CoordinationConfig  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc, solve  # noqa: E402
+from home_energy_optimizer.coordinate import coordinate  # noqa: E402
+from home_energy_optimizer.admm.coordinator import _Grid  # noqa: E402
+from home_energy_optimizer.types import CoordinationConfig  # noqa: E402
 
 
 @pytest.mark.parametrize("delta", [0.0, 0.25])
@@ -99,7 +99,7 @@ def test_the_page_plans_with_admm():
 def test_a_paused_run_resumes_exactly():
     """Run in chunks, looking at the paused plan between them, and it ends where
     one uninterrupted run ends - pausing changes nothing."""
-    from admm.coordinator import ExchangeRun
+    from home_energy_optimizer.admm.coordinator import ExchangeRun
 
     site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24})
     site = replace(site, coordination=CoordinationConfig(exchange_rounds=25))
@@ -120,7 +120,7 @@ def test_a_paused_run_resumes_exactly():
 def test_the_page_can_pause_and_resume_a_solve():
     """The page's route: a few iterations per call, a pause that returns the
     best plan so far, and a resume that ends where an unpaused solve ends."""
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
 
     p = {"method": "admm", "tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24, "max_iter": 20}
     whole = webapi.call("solve", {**p, "_progress_id": "w"})
@@ -143,8 +143,8 @@ def test_the_lp_battery_step_is_the_exact_prox():
     sys.path.insert(0, str(ROOT / "bench"))
     from prior_art import Battery
 
-    from admm.battery_qp import battery_prox
-    from hemspolicy.types import BatteryConfig
+    from home_energy_optimizer.admm.battery_qp import battery_prox
+    from home_energy_optimizer.types import BatteryConfig
 
     rng = np.random.default_rng(3)
     for _ in range(20):
@@ -190,8 +190,8 @@ def test_the_page_offers_lp_battery_steps():
 
 
 def test_a_warm_started_battery_step_gives_the_same_answer_sooner():
-    from admm.battery_qp import battery_prox
-    from hemspolicy.types import BatteryConfig
+    from home_energy_optimizer.admm.battery_qp import battery_prox
+    from home_energy_optimizer.types import BatteryConfig
 
     b = BatteryConfig(capacity_kwh=12.0, terminal_price=0.2)
     rng = np.random.default_rng(5)
@@ -208,7 +208,7 @@ def test_a_solve_can_start_where_the_last_one_stood():
     """After a setting changes, a solve started from the last one's best state
     reaches a good plan in far fewer iterations; a state for other devices is
     ignored."""
-    from admm.coordinator import ExchangeRun
+    from home_energy_optimizer.admm.coordinator import ExchangeRun
 
     base = {"tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24, "max_import_kw": 7}
     cc = CoordinationConfig(exchange_rounds=40)
@@ -228,7 +228,7 @@ def test_a_solve_can_start_where_the_last_one_stood():
 
 
 def test_a_warm_state_moves_with_the_horizon():
-    from admm.coordinator import WarmStart
+    from home_energy_optimizer.admm.coordinator import WarmStart
 
     p = np.arange(12.0).reshape(3, 4)
     w = WarmStart(("battery",), p, np.array([1.0, 2.0, 3.0, 4.0]), 0.1, {}).shift(1)
@@ -237,7 +237,7 @@ def test_a_warm_state_moves_with_the_horizon():
 
 
 def test_the_page_starts_warm_only_when_asked():
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
 
     p = {"method": "admm", "tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24, "max_iter": 15}
     assert webapi.call("solve", {**p, "_progress_id": "w1"})["summary"]["warm_started"] is False

@@ -218,7 +218,7 @@ const f3 = v => v == null ? '–' : (+v).toFixed(3);
 const f4 = v => v == null ? '–' : (+v).toFixed(4);
 let DATA = null, VIEW = 'plan';
 /* User-edited inputs: one point per hour (0..H) for import, export and load,
-   interpolated onto the slots by the backend (dw/webapi.py apply_edits).
+   interpolated onto the slots by the backend (src/home_energy_optimizer/dw/webapi.py apply_edits).
    null = use the preset tariff and load. */
 let EDIT = null;
 const EDITABLE_W = 3;   // draggable lines are drawn bold

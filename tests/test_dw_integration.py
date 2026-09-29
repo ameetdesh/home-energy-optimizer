@@ -1,6 +1,6 @@
 """Dantzig-Wolfe behind the Home Assistant and evcc integrations.
 
-`hemspolicy.plan()` must hand both integrations the same object ADMM does - a
+`home_energy_optimizer.plan()` must hand both integrations the same object ADMM does - a
 CoordinationResult a PolicySnapshot can be built from - plus the certificate
 and the meter price. And an EV must stay an EV under DW: its charge floor
 (p_demand), charger minimum (c_min) and SoC goal (s_goal) are honoured by the
@@ -19,14 +19,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dw.coordinator import DWCoordinator, dw_coordinate  # noqa: E402
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer.dw.coordinator import DWCoordinator, dw_coordinate  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig, GridLimits, Horizon, HvacConfig, PolicySnapshot, SiteConfig, SocGate,
     WaterHeaterConfig, demo_forecasts, marginal_value, plan,
 )
-from hemspolicy.coordinate import apply_curtailment  # noqa: E402
-from hemspolicy.evcc import ContractError, optimize_charge_schedule  # noqa: E402
-from hemspolicy.ha import publish_policy, publish_site  # noqa: E402
+from home_energy_optimizer.coordinate import apply_curtailment  # noqa: E402
+from home_energy_optimizer.evcc import ContractError, optimize_charge_schedule  # noqa: E402
+from home_energy_optimizer.ha import publish_policy, publish_site  # noqa: E402
 from test_evcc_contract import make_request  # noqa: E402
 from test_ha import FakeHA  # noqa: E402
 
@@ -277,12 +277,12 @@ def test_numpy_master_solves_the_shipped_grid_dynamic_day():
 
 
 # --------------------------------------------------------------------------
-# The app's dragged prices and load (dw/webapi.py apply_edits)
+# The app's dragged prices and load (src/home_energy_optimizer/dw/webapi.py apply_edits)
 # --------------------------------------------------------------------------
 
 
 def test_dragged_points_reach_the_solve_and_export_stays_below_import():
-    from dw.webapi import solve
+    from home_energy_optimizer.dw.webapi import solve
 
     buy = [0.3] * 12 + [0.6] * 13
     r = solve({"hours": 24, "grid": 60, "tariff": "flat", "buy_h": buy,
@@ -297,7 +297,7 @@ def test_dragged_points_reach_the_solve_and_export_stays_below_import():
 def test_export_equal_to_import_everywhere_solves():
     """Import-then-export costs nothing then, so the master's optimal set is
     unbounded without finite meter bounds - the numpy master used to stall."""
-    from dw.webapi import solve
+    from home_energy_optimizer.dw.webapi import solve
 
     r = solve({"hours": 24, "grid": 60, "tariff": "flat", "buy_h": [0.3] * 12 + [0.6] * 13,
                "sell_h": [0.9] * 25, "load_h": [1.0] * 25})
@@ -334,7 +334,7 @@ def test_a_free_or_negative_price_does_not_buy_a_breach(method, price):
 
 
 def test_the_breach_price_is_constant_and_scales_with_the_currency():
-    from hemspolicy.coordinate import breach_price
+    from home_energy_optimizer.coordinate import breach_price
 
     buy = np.array([0.1, -0.2, 0.4])
     assert breach_price(GridLimits(max_import_kw=3.0), buy) == pytest.approx(4.0)
@@ -346,7 +346,7 @@ def test_the_breach_price_is_constant_and_scales_with_the_currency():
 def test_the_app_reports_each_iteration_then_finishing():
     """The Solve button reads these: pushed to a callback (the in-browser
     worker) and kept for polling under the request's id (the served page)."""
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
 
     seen, polled = [], []
 
@@ -373,7 +373,7 @@ def test_the_app_reports_each_iteration_then_finishing():
 def test_batteries_bidding_plans_get_the_fast_preset():
     """Keep every plan and smooth harder when a plain battery bids plans
     (bench/dw_accel.py); otherwise the lean defaults stay."""
-    from dw.webapi import build_site
+    from home_energy_optimizer.dw.webapi import build_site
     site = build_site({"n_batteries": 2, "terminal_mode": "linear", "grid": 60})
     fc = demo_forecasts(site.horizon)
     off = DWCoordinator(site, fc, battery_in_master=False, tank_in_master=True)
@@ -385,7 +385,7 @@ def test_batteries_bidding_plans_get_the_fast_preset():
 
 
 def test_progress_carries_the_live_metrics():
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
     seen = []
     webapi.call("solve", {"grid": 60, "max_iter": 6, "battery_in_master": False, "_progress_id": "m"},
                 lambda *a: seen.append(a))
@@ -396,7 +396,7 @@ def test_progress_carries_the_live_metrics():
 
 
 def test_the_dashboard_can_plan_with_admm_and_its_rho():
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
     seen = []
     tight = webapi.call("solve", {"method": "admm", "grid": 60, "xrho": 0.5, "rho_adapt": False, "max_iter": 15,
                                   "_progress_id": "a"}, lambda *a: seen.append(a))
@@ -413,7 +413,7 @@ def test_the_dashboard_can_plan_with_admm_and_its_rho():
 def test_a_dragged_hot_water_draw_reaches_the_tank():
     """draw_h (kW of heat, one point per hour) replaces the draw forecast; a
     bigger evening draw makes the tank heat more."""
-    from dw.webapi import solve
+    from home_energy_optimizer.dw.webapi import solve
     base = {"hours": 24, "grid": 60, "tariff": "flat", "tank_levels": 2, "enable_hvac": False}
     r0 = solve(base)
     heavy = [0.0] * 18 + [6.0, 6.0] + [0.0] * 5
@@ -425,7 +425,7 @@ def test_a_dragged_hot_water_draw_reaches_the_tank():
 
 
 # --------------------------------------------------------------------------
-# Who saves what (dw/attribution.py)
+# Who saves what (src/home_energy_optimizer/dw/attribution.py)
 # --------------------------------------------------------------------------
 
 
@@ -435,9 +435,9 @@ def test_the_ledger_adds_up(method):
     after; the load keeps its bill; solar starts at zero and has no private
     cost; the net gains are the total saving, and the coordination part is the
     saving over thermostats with PV, on the objective."""
-    from dw.attribution import baseline
-    from dw.coordinator import Column
-    from dw.webapi import _site_fc, solve
+    from home_energy_optimizer.dw.attribution import baseline
+    from home_energy_optimizer.dw.coordinator import Column
+    from home_energy_optimizer.dw.webapi import _site_fc, solve
     p = {"method": method, "grid": 60, "tariff": "day_night", "n_batteries": 2, "tank_levels": 2,
          "max_export_kw": 2.0, "ledger": True, "hours": 24, "max_iter": 30}
     r = solve(p)
@@ -463,7 +463,7 @@ def test_the_ledger_adds_up(method):
 @pytest.mark.parametrize("method", ["dw", "admm"])
 def test_min_soe_is_a_floor(method):
     """The reserve holds in every plan, and the page is told where it is."""
-    from dw.webapi import solve
+    from home_energy_optimizer.dw.webapi import solve
     r = solve({"method": method, "grid": 60, "tariff": "dynamic", "n_batteries": 2, "soe_min": 30,
                "hours": 24, "max_iter": 30})
     for k, cap, floor in zip(r["battery_keys"], r["battery_capacities"], r["battery_floors"]):
@@ -472,7 +472,7 @@ def test_min_soe_is_a_floor(method):
 
 
 def test_stored_energy_is_valued_at_the_average_import_price():
-    from dw.webapi import _site_fc
+    from home_energy_optimizer.dw.webapi import _site_fc
     site, fc, _ = _site_fc({"tariff": "day_night", "n_batteries": 2})
     assert all(b.terminal_price == pytest.approx(float(np.mean(fc.buy))) for b in site.battery_list)
 

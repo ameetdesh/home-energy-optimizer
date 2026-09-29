@@ -5,7 +5,7 @@
 
 Each argument is a set of CoordinationConfig overrides (JSON); no argument runs
 ADMM with its defaults. The sites are the
-testbed's (dw/webapi.py _site_fc): the three tariffs x 1-3 batteries x a 7 kW
+testbed's (src/home_energy_optimizer/dw/webapi.py _site_fc): the three tariffs x 1-3 batteries x a 7 kW
 import limit or none x 5 or 8 kW of PV x 10 or 20 kWh per battery, a 50-state
 battery grid, 48 hours (the site builder's default).
 
@@ -34,10 +34,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from dw.webapi import _site_fc  # noqa: E402
-from hemspolicy.coordinate import coordinate  # noqa: E402
-from hemspolicy.types import CoordinationConfig  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc  # noqa: E402
+from home_energy_optimizer.coordinate import coordinate  # noqa: E402
+from home_energy_optimizer.types import CoordinationConfig  # noqa: E402
 
 SITES = list(itertools.product(("dynamic", "day_night", "flat"), (1, 2, 3), (7, None), (5, 8), (10, 20)))
 

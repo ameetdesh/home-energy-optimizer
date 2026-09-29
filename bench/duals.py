@@ -17,7 +17,7 @@ they are different failures:
 Sign convention: the DP maximises reward, so V is a value and dV/ds > 0 means
 "more stored energy is better". The LP minimises cost, so its costate carries
 the opposite sign; `lp_costate` flips it so everything in this module is a
-positive currency/kWh price directly comparable to `hemspolicy.marginal_value`.
+positive currency/kWh price directly comparable to `home_energy_optimizer.marginal_value`.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import linprog
 
-from hemspolicy.dp_battery import terminal_price
-from hemspolicy.interp import interp_grid
-from hemspolicy.types import BatteryConfig, Horizon
+from home_energy_optimizer.dp_battery import terminal_price
+from home_energy_optimizer.interp import interp_grid
+from home_energy_optimizer.types import BatteryConfig, Horizon
 
 
 def lp_battery_with_duals(
@@ -177,7 +177,7 @@ def joint_costate(
 
 def decomposed_costate(snap, soe_traj: np.ndarray) -> np.ndarray:
     """dV/ds from the decomposed battery solve, along a given trajectory."""
-    from hemspolicy import marginal_value
+    from home_energy_optimizer import marginal_value
 
     n = snap.horizon.steps
     return np.array([marginal_value(snap, t, float(soe_traj[t])) for t in range(n)])

@@ -1,8 +1,8 @@
-# hems-optim
+# home-energy-optimizer
 
 Home energy optimisation that produces a **price signal**, not just a schedule.
 
-The Python package in this repository is `hems-policy` (import `hemspolicy`); it
+The Python package in this repository is `home-energy-optimizer` (import `home_energy_optimizer`); it
 feeds [Home Assistant](https://www.home-assistant.io) and [evcc](https://evcc.io).
 Try the planner in your browser:
 [Smart Home Energy Optimizer](https://ameetdesh.github.io/multi_device_optimizer_standalone.html).
@@ -26,7 +26,7 @@ microseconds, no solver in the loop.
 ## Install
 
 ```bash
-git clone https://github.com/ameetdesh/hems-optim && cd hems-optim
+git clone https://github.com/ameetdesh/home-energy-optimizer && cd home-energy-optimizer
 python3 -m venv .venv
 .venv/bin/pip install -e .          # numpy only
 ```
@@ -65,7 +65,7 @@ since the source is here.
 ### 1. As a library
 
 ```python
-from hemspolicy import (
+from home_energy_optimizer import (
     SiteConfig, BatteryConfig, Horizon, PolicySnapshot,
     coordinate, demo_forecasts, action, marginal_value, reservation_prices,
 )
@@ -92,7 +92,7 @@ reservation_prices(snap, t, soe=4.2)        # {'import_below':…, 'export_above
 Safety limits are clamped **outside** the solver, never left to a penalty term:
 
 ```python
-from hemspolicy import clamp, HardLimits
+from home_energy_optimizer import clamp, HardLimits
 safe, bound_by = clamp(action(snap, t, soe), other_load_kw=3.1,
                        limits=HardLimits(max_import_kw=17.25))
 ```
@@ -106,7 +106,7 @@ both can run at once and be compared on the same settings.
 |---|---|---|
 | start | `.venv/bin/python admm/gui/server.py` | `.venv/bin/python dw/gui/server.py` |
 | opens | <http://127.0.0.1:8765> | <http://127.0.0.1:8766> |
-| needs | numpy | numpy (the DW master uses the built-in solver in `dw/lpsolver.py`; scipy only for the optional HiGHS cross-check) |
+| needs | numpy | numpy (the DW master uses the built-in solver in `src/home_energy_optimizer/dw/lpsolver.py`; scipy only for the optional HiGHS cross-check) |
 | shows | ADMM iterations, λ, policy replay on hover | column-generation iterations, lower bound, meter price π, λ from the master |
 
 ```bash
@@ -153,7 +153,7 @@ Publishes the plan and the price signals as HA sensors. Walkthrough below.
 ### Which coordinator plans
 
 ```python
-from hemspolicy import plan
+from home_energy_optimizer import plan
 res = plan(site, fc)                  # Dantzig-Wolfe (default)
 res = plan(site, fc, method="admm")   # ADMM (proximal message passing)
 res.gap, res.lower_bound              # DW only: the plan is within `gap` of the best
@@ -198,7 +198,7 @@ only once.
 
 ```bash
 HA_TOKEN=<your token> .venv/bin/python tools/ha-lambda-demo/setup_dashboard.py
-# -> dashboard ready at http://127.0.0.1:8123/hems-policy
+# -> dashboard ready at http://127.0.0.1:8123/home-energy-optimizer
 ```
 
 Doing this explicitly matters: entities published through the REST API are
@@ -216,7 +216,7 @@ HA_TOKEN=<your token> .venv/bin/python tools/ha-lambda-demo/run.py --speed 2
 The slow tier plans with Dantzig–Wolfe; add `--method admm` for ADMM (each re-solve starts from the last one's state).
 `--speed 2` runs a simulated day in about 12 real minutes, slow enough for the
 history graphs to draw curves. `--speed 400` is a day in 4 seconds, useful as a
-smoke test. Then open <http://localhost:8123/hems-policy>.
+smoke test. Then open <http://localhost:8123/home-energy-optimizer>.
 
 ### What lands in Home Assistant
 
@@ -285,7 +285,7 @@ series:
 ### Caveats for the Home Assistant path
 
 - The demo uses synthetic forecasts. Point it at real data with
-  `hemspolicy.feeds` (keyless Open-Meteo PV, CSV, or a list from any tariff
+  `home_energy_optimizer.feeds` (keyless Open-Meteo PV, CSV, or a list from any tariff
   integration).
 - States are pushed over the REST API, so they disappear when Home Assistant
   restarts. A durable deployment wants MQTT discovery or a custom component.
@@ -314,7 +314,7 @@ household load realises the *import* price, not the export price.
 
 ## Also supported
 
-**evcc.** `src/hemspolicy/evcc.py` implements the optimizer HTTP contract used
+**evcc.** `src/home_energy_optimizer/evcc.py` implements the optimizer HTTP contract used
 by [evcc](https://evcc.io) (`POST /optimize/charge-schedule`), so a local server
 can serve its `OPTIMIZER_URI` endpoint. Handles multiple batteries, loadpoints
 modelled as charge-only batteries, per-slot charge demands and state-of-charge
@@ -324,7 +324,7 @@ EV bids charging plans from its DP, evcc's grid limits are enforced in the
 plan, and the response carries an extra `_hems_policy_certificate`. Start the
 server with `HEMS_METHOD=admm` for ADMM.
 
-**Real forecasts.** `hemspolicy.feeds` provides keyless Open-Meteo PV and
+**Real forecasts.** `home_energy_optimizer.feeds` provides keyless Open-Meteo PV and
 temperature, CSV and list ingestion, and measured-value blending — anchoring the
 first forecast slot to what was just measured and decaying back over four slots.
 
@@ -333,7 +333,7 @@ first forecast slot to what was just measured and decaying back over four slots.
 ## Layout
 
 ```
-src/hemspolicy/
+src/home_energy_optimizer/     the package (import home_energy_optimizer)
   types.py         config + result dataclasses
   dp_battery.py    battery DP; returns the value function and policy
   dp_thermal.py    hot-water and HVAC DPs, and their thermostat baselines
@@ -344,13 +344,15 @@ src/hemspolicy/
   ha.py            Home Assistant publishing
   evcc.py          evcc optimizer wire contract
   profiles.py      synthetic forecasts for tests and demos
-bench/             exact references: continuous LP, joint DP, MILP, duals
-admm/              ADMM coordinator (coordinator.py), its exact LP battery step (battery_qp.py),
-                   and its app: webapi.py, gui/ (also the policy API and the evcc endpoint), wasm/
-dw/                Dantzig-Wolfe coordinator, its comparison runner and its app (dw/gui/, dw/wasm/);
-                   dw/integrate.py hands its plan to Home Assistant and evcc
+  dw/              Dantzig-Wolfe: coordinator, LP solver, integrate (to HA and evcc),
+                   attribution (who saves what), webapi (the DW app's backend)
+  admm/            ADMM: coordinator, battery_qp (exact LP battery step),
+                   webapi (the ADMM app's backend and the policy API)
+dw/                the DW app: gui/ (server + page), wasm/ (single-file page), design notes
+admm/              the ADMM app: gui/ (server + page; also the evcc endpoint), wasm/
 wasm/              shared browser-build tooling: the compiled-kernel wheel, keep_names.py
-tools/             HA dashboard setup, evcc compatibility checks
+bench/             exact references (continuous LP, joint DP, MILP, duals) and studies
+tools/             theory build, page builder, HA dashboard setup, evcc checks
 docs/theory.tex    theory notes (tools/build-theory makes the PDF)
 docs/NOTES.md      measured findings
 docs/PLAN.md       state and next steps

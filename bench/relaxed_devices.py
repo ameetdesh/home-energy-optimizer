@@ -30,9 +30,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from dw.webapi import _site_fc  # noqa: E402
-from hemspolicy.coordinate import coordinate  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc  # noqa: E402
+from home_energy_optimizer.coordinate import coordinate  # noqa: E402
 
 SITES = list(itertools.product(("dynamic", "day_night", "flat"), (1, 2, 3), (7, None), (5, 8), (10, 20)))
 

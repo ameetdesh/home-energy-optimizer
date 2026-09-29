@@ -1,7 +1,7 @@
 """One entry point for both coordinators.
 
     plan(site, fc)                          # Dantzig-Wolfe (the default)
-    plan(site, fc, method="admm")           # ADMM, admm/coordinator.py
+    plan(site, fc, method="admm")           # ADMM, src/home_energy_optimizer/admm/coordinator.py
 
 Both return a `CoordinationResult`, so everything downstream - the policy
 snapshot, Home Assistant publishing, the evcc contract - is the same. The DW
@@ -41,7 +41,7 @@ def plan(cfg: SiteConfig, fc: Forecasts, method: str = "dw", fallback: bool = Tr
         return _admm(cfg, fc, warm)
     if method != "dw":
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
-    from dw.integrate import dw_plan
+    from home_energy_optimizer.dw.integrate import dw_plan
 
     try:
         return dw_plan(cfg, fc, **kw)

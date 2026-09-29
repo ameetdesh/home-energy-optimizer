@@ -33,10 +33,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from dw.webapi import build_site  # noqa: E402
-from hemspolicy import demo_forecasts  # noqa: E402
-from hemspolicy.dp_battery import solve_battery  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import build_site  # noqa: E402
+from home_energy_optimizer import demo_forecasts  # noqa: E402
+from home_energy_optimizer.dp_battery import solve_battery  # noqa: E402
 
 APP = {"n_batteries": 2, "batt_capacity": 10, "solar_peak": 5, "max_import_kw": 7,
        "hours": 24, "grid": 200, "terminal_mode": "linear"}

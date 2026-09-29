@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from hemspolicy import Horizon, WaterHeaterConfig, demo_forecasts
-from hemspolicy.dp_thermal import solve_water_heater
+from home_energy_optimizer import Horizon, WaterHeaterConfig, demo_forecasts
+from home_energy_optimizer.dp_thermal import solve_water_heater
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def test_grid_is_refined_to_resolve_a_duty_step(day):
     s = solve_water_heater(wh, h, fc.buy, fc.sell, fc.hot_water_demand)
     claimed = -np.interp(wh.t_comfort, s.states, s.value[0])
     # bill + comfort of the executed plan, as the DP scores it
-    from hemspolicy.dp_thermal import wh_discomfort
+    from home_energy_optimizer.dp_thermal import wh_discomfort
     ref = float(np.mean(fc.buy))
     real = float(np.sum(s.power * fc.buy * h.dt) + np.sum(wh_discomfort(wh, s.trajectory[1:], ref, h.dt))
                  + wh.heat_capacity_kwh_per_k * ref * max(0.0, wh.t_comfort - s.trajectory[-1]))

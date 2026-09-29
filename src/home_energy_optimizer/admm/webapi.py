@@ -17,13 +17,13 @@ import threading
 
 import numpy as np
 
-from hemspolicy.coordinate import (
+from home_energy_optimizer.coordinate import (
     _pricing_resolve,
     baseline_solution,
     coordinate,
     grid_penalty,
 )
-from hemspolicy.policy import (
+from home_energy_optimizer.policy import (
     PolicySnapshot,
     HardLimits,
     action,
@@ -33,8 +33,8 @@ from hemspolicy.policy import (
     reservation_prices,
     rollout,
 )
-from hemspolicy.profiles import demo_forecasts
-from hemspolicy.types import (
+from home_energy_optimizer.profiles import demo_forecasts
+from home_energy_optimizer.types import (
     BatteryConfig,
     CoordinationConfig,
     CoordinationResult,

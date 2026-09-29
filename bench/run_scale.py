@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -39,7 +39,7 @@ from hemspolicy import (
     coordinate,
     demo_forecasts,
 )
-from hemspolicy.policy import PolicySnapshot, fleet_action
+from home_energy_optimizer.policy import PolicySnapshot, fleet_action
 
 COUNTS = (1, 2, 3, 5, 8, 12, 16, 20)
 
@@ -125,7 +125,7 @@ def main() -> None:
     h24 = Horizon(dt=0.25, hours=24.0)
     fc = demo_forecasts(h24, tariff="dynamic")
 
-    print("hems-policy :: scale with device count")
+    print("home-energy-optimizer :: scale with device count")
     print(f"96 slots (24 h at 15 min), 100 SoE states x 41 actions per unit\n")
     print(f"{'DERs':>5}{'devices':>9}{'plan ms':>10}{'rounds':>8}"
           f"{'ms/round':>10}{'us/unit/rd':>12}{'infer us':>10}{'us/unit':>9}")

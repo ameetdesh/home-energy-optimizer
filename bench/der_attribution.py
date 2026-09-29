@@ -6,7 +6,7 @@ On the app's two-battery site (on/off tank, HVAC, 5 kW PV, 7 kW import limit,
 stored energy valued at the average import price, as on the page) planned by
 Dantzig-Wolfe, prints:
 
-1. the ledger dw/attribution.py computes against a baseline with no PV and
+1. the ledger src/home_energy_optimizer/dw/attribution.py computes against a baseline with no PV and
    nothing coordinated - each player's bill before and after, its private-cost
    change and its net gain (docs/theory.tex, "Who saves what");
 2. five ways to split the same total saving among solar and the devices:
@@ -33,11 +33,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.attribution import _path_prices, _tariff_cost, baseline, ledger  # noqa: E402
-from dw.coordinator import DWCoordinator  # noqa: E402
-from dw.webapi import build_site, value_stored_energy  # noqa: E402
-from hemspolicy.coordinate import apply_curtailment  # noqa: E402
-from hemspolicy import SiteConfig, demo_forecasts  # noqa: E402
+from home_energy_optimizer.dw.attribution import _path_prices, _tariff_cost, baseline, ledger  # noqa: E402
+from home_energy_optimizer.dw.coordinator import DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import build_site, value_stored_energy  # noqa: E402
+from home_energy_optimizer.coordinate import apply_curtailment  # noqa: E402
+from home_energy_optimizer import SiteConfig, demo_forecasts  # noqa: E402
 
 APP = {"n_batteries": 2, "batt_capacity": 10, "solar_peak": 5, "max_import_kw": 7,
        "hours": 24, "grid": 100, "terminal_mode": "linear"}
@@ -126,7 +126,7 @@ def study(tariff: str, export_limit: float | None) -> None:
 
 
 def _dev(co, key):
-    from dw.attribution import _device
+    from home_energy_optimizer.dw.attribution import _device
     return _device(co, key)
 
 

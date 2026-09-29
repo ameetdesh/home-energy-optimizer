@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Forecasts,
@@ -26,7 +26,7 @@ from hemspolicy import (
     SiteConfig,
     coordinate,
 )
-from hemspolicy.profiles import day_night_tariff
+from home_energy_optimizer.profiles import day_night_tariff
 
 
 def two_battery_site(limit: float | None = None, **grid_kw):

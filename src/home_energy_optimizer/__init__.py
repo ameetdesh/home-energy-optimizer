@@ -1,4 +1,4 @@
-"""hems-policy: a value-function tier for home energy management.
+"""home-energy-optimizer: a value-function tier for home energy management.
 
 Solves per-device dynamic programs and exposes the resulting value function as
 a fast policy, a marginal price of stored energy, and cheap counterfactual

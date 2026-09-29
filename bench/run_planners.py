@@ -32,12 +32,12 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from dw.coordinator import Column, DWCoordinator, baseline_objective  # noqa: E402
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, baseline_objective  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig, CoordinationConfig, GridLimits, Horizon, HvacConfig, SiteConfig,
     WaterHeaterConfig, demo_forecasts, plan,
 )
-from hemspolicy.evcc import request_to_site  # noqa: E402
+from home_energy_optimizer.evcc import request_to_site  # noqa: E402
 
 
 def score(site, fc, res) -> float:

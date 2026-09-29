@@ -33,7 +33,7 @@ import numpy as np
 
 from bench.duals import agreement, joint_costate, lp_battery_with_duals
 from bench.reference import joint_dp_battery_water_heater
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -161,7 +161,7 @@ def report(title: str, rows: list[dict], a_name: str, b_name: str, band_keys: tu
 
 
 def main() -> None:
-    print("hems-policy :: lambda validation study")
+    print("home-energy-optimizer :: lambda validation study")
     print("lambda is a marginal value of STORED energy, in currency/kWh.")
     print("Theory says it must lie in [sell/eta, buy*eta] - the no-arbitrage band for a lossy store.")
 

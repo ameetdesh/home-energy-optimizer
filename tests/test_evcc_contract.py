@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy.evcc import (
+from home_energy_optimizer.evcc import (
     ContractError,
     W_PER_KW,
     health,
@@ -436,7 +436,7 @@ def test_objective_is_a_benefit_not_a_cost():
 
 
 def _net_cost_of(req: dict) -> float:
-    from hemspolicy import coordinate
+    from home_energy_optimizer import coordinate
 
     site, fc, _ = request_to_site(req)
     return coordinate(site, fc).net_cost
@@ -508,7 +508,7 @@ def test_export_above_import_is_an_arbitrage_and_is_taken():
 def test_health_endpoint():
     h = health()
     assert h["status"] == "ok"
-    assert "hems-policy" in h["message"]
+    assert "home-energy-optimizer" in h["message"]
 
 
 def test_plan_is_economically_sensible_without_pv():

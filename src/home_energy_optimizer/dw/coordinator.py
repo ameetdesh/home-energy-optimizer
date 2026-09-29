@@ -1,6 +1,5 @@
-"""Dantzig-Wolfe / column-generation coordinator - a prototype alternative to
-the ADMM loop in hemspolicy.coordinate, kept deliberately separate from it:
-nothing under src/ is modified, and dw/compare.py runs both side by side.
+"""Dantzig-Wolfe / column-generation coordinator - the default planner
+(home_energy_optimizer.plan); bench/dw_compare.py runs it beside ADMM.
 
 Design notes: dw/README.md. Reference: G. B. Dantzig and P. Wolfe, "Decomposition
 Principle for Linear Programs", Operations Research 8(1):101-111, 1960.
@@ -27,7 +26,7 @@ The fractional master solution is a convex mix of device plans. For the
 battery that mix is physically realisable (conservatively); for binary devices
 it is a duty-cycle schedule. `recover()` turns it into one plan per device.
 
-The master is solved by dw/lpsolver.py (numpy only) by default; pass
+The master is solved by src/home_energy_optimizer/dw/lpsolver.py (numpy only) by default; pass
 solver="highs" to use scipy's HiGHS instead, e.g. to cross-check.
 """
 
@@ -38,10 +37,10 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from dw.lpsolver import Triplets, choose_one
-from dw.lpsolver import linprog as np_linprog
+from home_energy_optimizer.dw.lpsolver import Triplets, choose_one
+from home_energy_optimizer.dw.lpsolver import linprog as np_linprog
 
-from hemspolicy.coordinate import (
+from home_energy_optimizer.coordinate import (
     apply_curtailment,
     breach_price,
     battery_terminal_penalty,
@@ -50,8 +49,8 @@ from hemspolicy.coordinate import (
     grid_penalty,
     total_objective,
 )
-from hemspolicy.dp_battery import _gate_thresholds, solve_battery, terminal_price
-from hemspolicy.dp_thermal import (
+from home_energy_optimizer.dp_battery import _gate_thresholds, solve_battery, terminal_price
+from home_energy_optimizer.dp_thermal import (
     _max_duty,
     _relaxation,
     _usable_outflow,
@@ -62,7 +61,7 @@ from hemspolicy.dp_thermal import (
     solve_water_heater,
     wh_discomfort,
 )
-from hemspolicy.types import Forecasts, SiteConfig
+from home_energy_optimizer.types import Forecasts, SiteConfig
 
 
 def thermal_terminal(cfg, kind: str, t_end: float, ref: float) -> float:
@@ -349,7 +348,7 @@ class DWCoordinator:
         go into the pool, so the master sees the directions in which the
         device is cheapest to move.
         """
-        from dw.sensitivity import flexibility, variants
+        from home_energy_optimizer.dw.sensitivity import flexibility, variants
         found, _ = variants(self, dev, sol)
         if flex_out is not None:
             flex_out[dev.key] = flexibility(self, dev, sol, price_kwh, col.cost, found)
@@ -373,7 +372,7 @@ class DWCoordinator:
         the DW result can then never be worse than ADMM's, and the DW bound
         certifies ADMM's plan too.
         """
-        from hemspolicy.coordinate import coordinate
+        from home_energy_optimizer.coordinate import coordinate
         res = coordinate(self.cfg, self.fc)
         self.admm_value = extended_objective(self.cfg, self.fc, res.net_grid,
                                              {k: sol.trajectory for k, sol in res.devices.items()})
@@ -887,7 +886,7 @@ class DWCoordinator:
         anytime: bool = False,        # also recover a plan at every iteration
         pool: str = "auto",           # active: what the master uses + the newest | full: keep all | auto (below)
         seed_admm: bool = False,      # start the pool from every ADMM round's plans
-        response: str = "proposals",  # proposals | both | sensitivity (see dw/sensitivity.py)
+        response: str = "proposals",  # proposals | both | sensitivity (see src/home_energy_optimizer/dw/sensitivity.py)
         sens_keep: int = 24,          # sensitivity variants kept per device, per direction
         progress=None,                # progress(it, max_iter) as each iteration starts, then
                                       # progress(it, max_iter, blend, bound, best runnable) as it ends

@@ -22,7 +22,7 @@ pytest.importorskip("scipy", reason="LP dual comparison needs scipy/HiGHS")
 
 from bench.duals import agreement, joint_costate, lp_battery_with_duals  # noqa: E402
 from bench.reference import joint_dp_battery_water_heater  # noqa: E402
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig,
     CoordinationConfig,
     Horizon,

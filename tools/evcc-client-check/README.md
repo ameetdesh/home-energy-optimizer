@@ -1,7 +1,7 @@
 # evcc client compatibility check
 
 Drives **evcc's own generated Go client** (`github.com/evcc-io/optimizer/client`,
-the package evcc itself imports) against a running `hems-policy` server.
+the package evcc itself imports) against a running `home-energy-optimizer` server.
 
 This is the difference between "we implemented a JSON API that looks right" and
 "a stock evcc binary can actually use this". The Python tests in
@@ -17,7 +17,7 @@ go run . http://127.0.0.1:8765
 Expected:
 
 ```
-health: HTTP 200 status="ok" message="hems-policy 0.1.0"
+health: HTTP 200 status="ok" message="home-energy-optimizer 0.1.0"
 schedule: HTTP 200 status="Optimal" objective=0.4113
   batteries=1 charging=96 discharging=96 soc=96
   flow=96 gridImport=96 gridExport=96

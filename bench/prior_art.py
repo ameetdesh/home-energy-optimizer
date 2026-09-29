@@ -57,13 +57,13 @@ import scipy.sparse as sp
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator, _PriceVector  # noqa: E402
-from dw.webapi import _site_fc  # noqa: E402
-from hemspolicy.coordinate import breach_price, coordinate, device_sell_price  # noqa: E402
-from hemspolicy.dp_battery import solve_battery  # noqa: E402
-from hemspolicy.dp_thermal import _relaxation, solve_hvac, solve_water_heater  # noqa: E402
-from hemspolicy.meter import Limits  # noqa: E402
-from hemspolicy.types import SiteConfig  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, _PriceVector  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc  # noqa: E402
+from home_energy_optimizer.coordinate import breach_price, coordinate, device_sell_price  # noqa: E402
+from home_energy_optimizer.dp_battery import solve_battery  # noqa: E402
+from home_energy_optimizer.dp_thermal import _relaxation, solve_hvac, solve_water_heater  # noqa: E402
+from home_energy_optimizer.meter import Limits  # noqa: E402
+from home_energy_optimizer.types import SiteConfig  # noqa: E402
 
 SITES = list(itertools.product(("dynamic", "day_night", "flat"), (1, 2, 3), (7, None), (5, 8), (10, 20)))
 

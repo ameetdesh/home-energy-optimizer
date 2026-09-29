@@ -1,5 +1,8 @@
 # Plan
 
+> Written when the package was `hems-policy` (import `hemspolicy`); it is now
+> `home-energy-optimizer` (import `home_energy_optimizer`), laid out as in the README.
+
 Execution plan from `optimsurvey_notes/poc-integration-analysis.md` §7, updated
 with what Phase 1 actually found.
 

@@ -20,7 +20,7 @@ import pytest
 pytest.importorskip("scipy", reason="MILP reference needs scipy/HiGHS")
 
 from bench.milp_full import milp_battery_water_heater  # noqa: E402
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -29,7 +29,7 @@ from hemspolicy import (  # noqa: E402
     coordinate,
     demo_forecasts,
 )
-from hemspolicy.coordinate import total_objective  # noqa: E402
+from home_energy_optimizer.coordinate import total_objective  # noqa: E402
 
 
 @pytest.fixture(scope="module")
