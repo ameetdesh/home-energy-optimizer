@@ -1,6 +1,6 @@
 """Backend for the Dantzig-Wolfe testbed UI (dw/gui/), independent of transport.
 
-Mirrors hemspolicy.webapi in shape - so the charts read the same fields - but
+Mirrors admm.webapi in shape - so the charts read the same fields - but
 runs dw.coordinator instead of the ADMM loop, and adds what only DW has: a
 lower bound, the master's meter price, battery costates from the master's
 duals, and a per-iteration view of the master's convex mix.
@@ -20,7 +20,7 @@ from dw.coordinator import Column, DWCoordinator, baseline_objective
 from hemspolicy.coordinate import apply_curtailment, baseline_solution, net_cost
 from hemspolicy.profiles import demo_forecasts
 from hemspolicy.types import SiteConfig
-from hemspolicy.webapi import build_site
+from admm.webapi import build_site
 
 
 def _dark(fc):
@@ -334,13 +334,13 @@ def _reporter(p: dict, progress):
 
 def solve_admm(p: dict, progress=None) -> dict:
     """The same view of the same site, planned by ADMM instead (proximal
-    message passing, hemspolicy.exchange).
+    message passing, admm.coordinator).
 
     Returns the fields the page reads for DW, with what ADMM has: one runnable
     plan per device per iteration (no blending), no lower bound, and each
     iteration's objective in place of the blend. `xrho` is the starting rho,
     `rho_adapt` lets it adapt. `battery_step`: "dp", each battery's DP on its
-    grid, or "lp", its LP solved exactly (hemspolicy.battery_qp); on a site of
+    grid, or "lp", its LP solved exactly (admm.battery_qp); on a site of
     batteries alone the bill's kink is then left unrounded, so the loop
     converges to the optimum. The tank is its DP as configured - "continuous
     (LP)" is a DW option and runs here as the on/off element. `warm_start`:
@@ -355,7 +355,7 @@ def solve_admm(p: dict, progress=None) -> dict:
     `_progress_id`; `pause`: return the best plan so far and keep it.
     """
     from hemspolicy.coordinate import coordinate
-    from hemspolicy.exchange import ExchangeRun
+    from admm.coordinator import ExchangeRun
     from hemspolicy.policy import PolicySnapshot, marginal_value
     from hemspolicy.types import CoordinationConfig
 

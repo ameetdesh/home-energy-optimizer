@@ -1,7 +1,7 @@
 """One entry point for both coordinators.
 
     plan(site, fc)                          # Dantzig-Wolfe (the default)
-    plan(site, fc, method="admm")           # ADMM, hemspolicy.exchange
+    plan(site, fc, method="admm")           # ADMM, admm/coordinator.py
 
 Both return a `CoordinationResult`, so everything downstream - the policy
 snapshot, Home Assistant publishing, the evcc contract - is the same. The DW

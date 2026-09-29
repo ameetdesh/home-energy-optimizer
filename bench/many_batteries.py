@@ -11,7 +11,7 @@ limit, 24 hours.
    (bench/prior_art.py: continuous batteries, the tank and HVAC relaxed). Every
    cost is convex, so the convergence theorem applies - however many batteries
    share a price margin.
-2. DP steps, the method as shipped (hemspolicy.exchange), on the batteries'
+2. DP steps, the method as shipped (admm.coordinator), on the batteries'
    50-state, 26-action grid, for N = 1, 2, 4, 8: the primal residual it stalls
    at (the mean over the last 20 iterations) against the stopping threshold,
    and, over those iterations, how many batteries change their plan at once
@@ -19,7 +19,7 @@ limit, 24 hours.
    total.
 3. DP steps at N = 8 on finer battery grids: the stall level against the
    action spacing.
-4. LP steps (each battery's own LP, solved exactly: hemspolicy.battery_qp) at
+4. LP steps (each battery's own LP, solved exactly: admm.battery_qp) at
    N = 8: the lockstep is gone and the loop converges; the on/off tank and
    HVAC still keep the plan from the optimum.
 5. Batteries alone (three, no tank or HVAC) with LP steps and the bill
@@ -42,7 +42,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "bench")]
 
 from dw.coordinator import Column, DWCoordinator  # noqa: E402
 from dw.webapi import _site_fc  # noqa: E402
-from hemspolicy.exchange import ExchangeRun  # noqa: E402
+from admm.coordinator import ExchangeRun  # noqa: E402
 from hemspolicy.types import CoordinationConfig  # noqa: E402
 
 

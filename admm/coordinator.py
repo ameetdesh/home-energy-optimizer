@@ -12,7 +12,7 @@ beyond a grid limit at the breach price) and every device. Each iteration
      the grid connection in closed form, the PV by clipping, and the
      batteries, tank and HVAC by their own DPs with a tether and no bill (the
      grid connection carries the bill) - or, as an option, each plain battery
-     by its LP, solved exactly (hemspolicy.battery_qp);
+     by its LP, solved exactly (admm.battery_qp);
   2. the net averages the imbalance and moves the price: u <- u + pbar;
   3. rho adapts by the paper's proportional-derivative rule, then is held.
 
@@ -44,7 +44,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .coordinate import (
+from hemspolicy.coordinate import (
     _apply_baseline_fallback,
     _polish,
     _pricing_resolve,
@@ -56,11 +56,12 @@ from .coordinate import (
     net_cost,
     total_objective,
 )
+from hemspolicy.dp_battery import solve_battery, terminal_price
+from hemspolicy.dp_thermal import hvac_discomfort, solve_hvac, solve_water_heater
+from hemspolicy.meter import Limits
+from hemspolicy.types import CoordinationResult, Forecasts, RoundRecord, SiteConfig
+
 from .battery_qp import battery_prox, lp_step_applies
-from .dp_battery import solve_battery, terminal_price
-from .dp_thermal import hvac_discomfort, solve_hvac, solve_water_heater
-from .meter import Limits
-from .types import CoordinationResult, Forecasts, RoundRecord, SiteConfig
 
 
 class _Grid:

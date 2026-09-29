@@ -5,7 +5,7 @@
 #   dw/wasm/build.sh            # bundle -> page -> multi_device_optimizer_standalone.html
 #   dw/wasm/build.sh --serve    # ...then serve it on :8767
 #
-# Same pipeline as wasm/build.sh for the ADMM app:
+# Same pipeline as admm/wasm/build.sh for the ADMM app:
 #   make_bundle.py        dw/ + src/hemspolicy  -> dw_bundle.py (one flat module)
 #   make_page.py          dw/gui/index.html     -> dw_page.html (Pyodide worker boot)
 #   make_standalone.py    page + bundle (+ wheel) -> one HTML file, Python

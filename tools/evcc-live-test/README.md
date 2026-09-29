@@ -59,7 +59,7 @@ none and fails with `optimizer: meter profile incomplete`. That is seedable.
 5. **Run both:**
 
    ```bash
-   HEMS_DUMP_REQUESTS=/tmp/evcc-requests.jsonl python gui/server.py &
+   HEMS_DUMP_REQUESTS=/tmp/evcc-requests.jsonl python admm/gui/server.py &
    EVCC_LOCAL_SPONSOR=1 OPTIMIZER_URI=http://127.0.0.1:8765 \
      /tmp/evcc-local --config evcc-test.yaml --disable-auth
    ```

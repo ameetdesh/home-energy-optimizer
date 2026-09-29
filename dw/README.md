@@ -7,7 +7,7 @@ side on the same instances. Nothing under `src/` is modified.
 ```
 dw/coordinator.py   the DW coordinator (master LP + the existing DPs as pricing oracles)
 dw/compare.py       ADMM vs DW vs exact references, one objective, one table per scenario
-dw/webapi.py        JSON backend for the DW app (same payload shape as hemspolicy.webapi)
+dw/webapi.py        JSON backend for the DW app (same payload shape as admm.webapi)
 dw/gui/             the DW app: server.py (stdlib HTTP, port 8766) + index.html
 tests/test_dw.py    bound ordering, parity with ADMM, exact grid limit (skips without scipy)
 ```
@@ -18,10 +18,10 @@ tests/test_dw.py    bound ordering, parity with ADMM, exact grid limit (skips wi
 .venv/bin/python dw/compare.py --only A --milp   # adds the HiGHS MILP reference (~70 s more)
 .venv/bin/python -m pytest tests/test_dw.py
 .venv/bin/python dw/gui/server.py     # the DW app on http://127.0.0.1:8766 (numpy only)
-.venv/bin/python gui/server.py        # the ADMM app on http://127.0.0.1:8765, for comparison
+.venv/bin/python admm/gui/server.py   # the ADMM app on http://127.0.0.1:8765, for comparison
 ```
 
-The app is the DW counterpart of `gui/` (the ADMM app on port 8765), and both
+The app is the DW counterpart of `admm/gui/` (the ADMM app on port 8765), and both
 can run at once. It shows:
 
 - **An iteration strip**, in place of ADMM's rounds. Click an iteration to plot
@@ -50,7 +50,7 @@ can run at once. It shows:
   (dynamic tariff); 1.377 → 1.218 → 1.194 (day/night). The gap to the bound
   falls from 0.02–0.03 to about 0.001.
 
-Deep links work the same way as in `gui/`, plus `view=relaxed|<iteration>`, e.g.
+Deep links work the same way as in `admm/gui/`, plus `view=relaxed|<iteration>`, e.g.
 `/?n_batteries=2&max_import_kw=3&tariff=day_night&solar_peak=9&view=relaxed`.
 One feature is deliberately left out: the ADMM app's hover policy replay and
 forced-action pricing (they need a DP snapshot at the final π; see §7b).
@@ -72,7 +72,7 @@ own discretisation (§6.3).
 > **Since replaced.** The ADMM loop described in this section and compared in
 > §6 (Jacobi rounds against the others' last plans, a z-step on the kink, dual
 > ascent on limit multipliers) has been removed. The package's ADMM is now
-> proximal message passing (`hemspolicy.exchange`); `docs/theory.tex` describes
+> proximal message passing (`admm/coordinator.py`); `docs/theory.tex` describes
 > both coordinators as they are and compares them.
 
 The previous sessions finished with PR #8: compiled DP kernels and a wasm
@@ -661,11 +661,11 @@ dw/wasm/build.sh            # rebuild: bundle -> page -> standalone
 dw/wasm/build.sh --serve    # ...and serve it on http://127.0.0.1:8767
 ```
 
-It is the same pipeline as the ADMM app's `wasm/build.sh`:
+It is the same pipeline as the ADMM app's `admm/wasm/build.sh`:
 
 | step | from | to |
 |---|---|---|
-| `dw/wasm/make_bundle.py` | `dw/` + `src/hemspolicy/` | `dw_bundle.py`: one flat module; `dw.*`/`hemspolicy.*` imports removed (aliases become assignments); only `build_site` taken from `hemspolicy.webapi`, whose other names would collide; any collision fails the build |
+| `dw/wasm/make_bundle.py` | `dw/` + `admm/` + `src/hemspolicy/` | `dw_bundle.py`: one flat module; `dw.*`/`admm.*`/`hemspolicy.*` imports removed (aliases become assignments); only `build_site` taken from `hemspolicy.webapi`, whose other names would collide; any collision fails the build |
 | `dw/wasm/make_page.py` | `dw/gui/index.html` | `dw_page.html`: the ADMM page's Pyodide-worker bootstrap, retargeted; the solver choice dropped (no scipy in the browser) |
 | `wasm_batt_optimizer/make_standalone.py` | page + bundle + `wasm/build/dist/*.whl` | the standalone, with names kept per `wasm/keep_names.py` |
 

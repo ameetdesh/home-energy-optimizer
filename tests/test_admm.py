@@ -1,5 +1,5 @@
 """Textbook ADMM - proximal message passing with the DPs as device steps
-(hemspolicy.exchange)."""
+(admm.coordinator)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 from dw.coordinator import Column, DWCoordinator  # noqa: E402
 from dw.webapi import _site_fc, solve  # noqa: E402
 from hemspolicy.coordinate import coordinate  # noqa: E402
-from hemspolicy.exchange import _Grid  # noqa: E402
+from admm.coordinator import _Grid  # noqa: E402
 from hemspolicy.types import CoordinationConfig  # noqa: E402
 
 
@@ -99,7 +99,7 @@ def test_the_page_plans_with_admm():
 def test_a_paused_run_resumes_exactly():
     """Run in chunks, looking at the paused plan between them, and it ends where
     one uninterrupted run ends - pausing changes nothing."""
-    from hemspolicy.exchange import ExchangeRun
+    from admm.coordinator import ExchangeRun
 
     site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24})
     site = replace(site, coordination=CoordinationConfig(exchange_rounds=25))
@@ -137,13 +137,13 @@ def test_the_page_can_pause_and_resume_a_solve():
 
 
 def test_the_lp_battery_step_is_the_exact_prox():
-    """A battery's LP step (hemspolicy.battery_qp) against OSQP on the same QP,
+    """A battery's LP step (admm.battery_qp) against OSQP on the same QP,
     over random batteries and rho across four decades."""
     pytest.importorskip("osqp")
     sys.path.insert(0, str(ROOT / "bench"))
     from prior_art import Battery
 
-    from hemspolicy.battery_qp import battery_prox
+    from admm.battery_qp import battery_prox
     from hemspolicy.types import BatteryConfig
 
     rng = np.random.default_rng(3)
@@ -190,7 +190,7 @@ def test_the_page_offers_lp_battery_steps():
 
 
 def test_a_warm_started_battery_step_gives_the_same_answer_sooner():
-    from hemspolicy.battery_qp import battery_prox
+    from admm.battery_qp import battery_prox
     from hemspolicy.types import BatteryConfig
 
     b = BatteryConfig(capacity_kwh=12.0, terminal_price=0.2)
@@ -208,7 +208,7 @@ def test_a_solve_can_start_where_the_last_one_stood():
     """After a setting changes, a solve started from the last one's best state
     reaches a good plan in far fewer iterations; a state for other devices is
     ignored."""
-    from hemspolicy.exchange import ExchangeRun
+    from admm.coordinator import ExchangeRun
 
     base = {"tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24, "max_import_kw": 7}
     cc = CoordinationConfig(exchange_rounds=40)
@@ -228,7 +228,7 @@ def test_a_solve_can_start_where_the_last_one_stood():
 
 
 def test_a_warm_state_moves_with_the_horizon():
-    from hemspolicy.exchange import WarmStart
+    from admm.coordinator import WarmStart
 
     p = np.arange(12.0).reshape(3, 4)
     w = WarmStart(("battery",), p, np.array([1.0, 2.0, 3.0, 4.0]), 0.1, {}).shift(1)

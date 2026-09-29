@@ -1,4 +1,4 @@
-"""Tune ADMM (hemspolicy.exchange) for speed without losing quality.
+"""Tune ADMM (admm.coordinator) for speed without losing quality.
 
     .venv/bin/python bench/exchange_tune.py ['{"relax_levels": 5}' ...]
 

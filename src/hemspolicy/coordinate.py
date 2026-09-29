@@ -1,7 +1,7 @@
 """ADMM coordination of the devices, and the pieces both coordinators share.
 
-`coordinate()` plans a site by ADMM - proximal message passing, in
-hemspolicy.exchange. This module also holds what every planner uses to score
+`coordinate()` plans a site by ADMM - proximal message passing, in the
+`admm` package beside this one (admm/coordinator.py). This module also holds what every planner uses to score
 and finish a plan: the meter's curtailment rule and cost, the comfort, breach
 and battery end-value terms of the objective, the thermostat baseline, the
 baseline fallback, the polish (Gauss-Seidel best responses, kept only if the
@@ -261,15 +261,15 @@ def baseline_solution(cfg: SiteConfig, fc: Forecasts) -> tuple[np.ndarray, float
 
 
 def coordinate(cfg: SiteConfig, fc: Forecasts, progress=None, warm=None) -> CoordinationResult:
-    """Plan a site by ADMM (hemspolicy.exchange) and return its best plan.
+    """Plan a site by ADMM (admm.coordinator) and return its best plan.
 
     `progress`, if given, is called as progress(round, max_rounds) when an
     iteration starts, progress(round, max_rounds, objective, None, best) when it
     has been scored (None: ADMM has no bound), and progress(-1, max_rounds)
     before the fallback and polish - the same shape the DW app reads. `warm`:
-    an earlier result's `warm_start` (see hemspolicy.exchange.WarmStart).
+    an earlier result's `warm_start` (see admm.coordinator.WarmStart).
     """
-    from .exchange import coordinate_exchange      # exchange imports this module
+    from admm.coordinator import coordinate_exchange      # it imports this module
     return coordinate_exchange(cfg, fc, progress, warm)
 
 

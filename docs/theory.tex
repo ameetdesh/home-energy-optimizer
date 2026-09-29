@@ -791,7 +791,7 @@ which can diverge even on convex problems \cite{chen2016}.
 \label{sec:admmalg}
 
 \begin{algorithm}[H]
-\caption{ADMM planning cycle, as implemented (\texttt{hemspolicy/exchange.py}).}
+\caption{ADMM planning cycle, as implemented (\texttt{admm/coordinator.py}).}
 \label{alg:admm}
 \begin{algorithmic}[1]
 \Require forecasts; terminals: load, PV, grid connection, and each device, the
@@ -1470,7 +1470,7 @@ in one slot is allowed; it only wastes energy, so an optimum does it only where
 wasting energy costs nothing. The proximal step replaces the objective by
 $\tfrac{\rho}{2}\|c - e - v\|^2 - \pi_{\mathrm T}\,s_n$, a convex QP. The package
 solves it by a primal--dual interior-point method with Mehrotra's
-predictor--corrector (\texttt{battery\_qp.py}); the Newton system
+predictor--corrector (\texttt{admm/battery\_qp.py}); the Newton system
 reduces to a tridiagonal one in the $n$ balance duals, so an iteration costs
 $O(n)$. A warm start moves the previous solution $5\%$ of each range off its
 bounds and floors its bound multipliers, which saves about a third of the

@@ -9,7 +9,7 @@ This is the difference between "we implemented a JSON API that looks right" and
 evcc's own deserialiser accepts what we emit.
 
 ```bash
-.venv/bin/python gui/server.py &          # from the repo root
+.venv/bin/python admm/gui/server.py &     # from the repo root
 cd tools/evcc-client-check
 go run . http://127.0.0.1:8765
 ```

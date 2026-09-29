@@ -35,7 +35,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from dw.coordinator import Column, DWCoordinator  # noqa: E402
 from dw.webapi import _site_fc  # noqa: E402
-from hemspolicy.exchange import ExchangeRun  # noqa: E402
+from admm.coordinator import ExchangeRun  # noqa: E402
 from hemspolicy.types import CoordinationConfig, Forecasts  # noqa: E402
 
 BASE = {"tariff": "dynamic", "hours": 24, "max_import_kw": 7, "batt_capacity": 10, "solar_peak": 5,
