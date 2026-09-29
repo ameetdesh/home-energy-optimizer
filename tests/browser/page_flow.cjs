@@ -27,18 +27,46 @@ const puppeteer = require(process.env.PUPPETEER_MODULE || 'puppeteer');
             status: document.querySelector('#status').textContent.replace(/\s+/g, ' ').slice(0, 120),
             pausedTag: pt && getComputedStyle(pt).display !== 'none' ? pt.textContent : '',
             button: document.querySelector('#solve').textContent,
-            conv: chart('#chConv'), power: chart('#chPower'), soc: chart('#chSoc'), price: chart('#chPrice')};
+            conv: chart('#chConv'), power: chart('#chPower'), soc: chart('#chSoc'), price: chart('#chPrice'),
+            room: chart('#chRoom'), band: document.querySelector('#bandState').textContent,
+            low7: DATA.comfort.room_low ? DATA.comfort.room_low[Math.round(7 / DATA.dt)] : null};
   }, tag);
   const setSlider = (id, v) => page.evaluate((id, v) => {
     const el = document.querySelector('#' + id); el.value = v;
     el.dispatchEvent(new Event('input')); el.dispatchEvent(new Event('change'));
   }, id, v);
 
+  // Drag one dot of the room's comfort band on the Room chart: find
+  // it by moving up hour h's column until the cursor offers a drag (the
+  // lowest dot there is the band's floor), then pull it up.
+  const dragBand = async (h, dy) => {
+    await page.evaluate(() => document.querySelector('#chRoom').scrollIntoView());
+    const c = await page.evaluate(h => {
+      const r = document.querySelector('#chRoom canvas').getBoundingClientRect(), n = DATA.steps;
+      const i = Math.min(Math.round(h / DATA.dt), n - 1);
+      return {x: r.left + 46 + i / (n - 1) * (r.width - 46 - 12), top: r.top, bottom: r.bottom};   // chart()'s margins
+    }, h);
+    for (let y = c.bottom - 21; y > c.top + 8; y -= 2) {
+      await page.mouse.move(c.x, y);
+      if (await page.evaluate(() => document.querySelector('#chRoom canvas').style.cursor) === 'ns-resize') {
+        await page.mouse.down(); await page.mouse.move(c.x, y - dy, {steps: 4}); await page.mouse.up();
+        return true;
+      }
+    }
+    return false;
+  };
+
   const steps = [];
   await idle();
   await setSlider('max_iter', 20);                   // keep the ADMM solves short
   await idle();
   steps.push(await snap('dw'));
+  if (!await dragBand(7, 30)) throw new Error('no comfort-band dot found at 07:00');
+  await idle();
+  steps.push(await snap('band dragged'));
+  await page.evaluate(() => document.querySelector('#bandReset').click());   // it sits in the closed Advanced panel
+  await idle();
+  steps.push(await snap('band reset'));
   await page.select('#method', 'admm');
   await idle();
   steps.push(await snap('admm'));

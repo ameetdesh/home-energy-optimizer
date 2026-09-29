@@ -40,10 +40,13 @@ def wh_discomfort(cfg: WaterHeaterConfig, temp, ref_price: float, dt: float):
     return cfg.comfort_weight * short**2 * dt
 
 
-def hvac_discomfort(cfg: HvacConfig, temp, ref_price: float, dt: float):
-    """Cost of the room sitting outside its comfort band, in currency."""
-    too_hot = np.maximum(0.0, temp - cfg.t_comfort_high)
-    too_cold = np.maximum(0.0, cfg.t_comfort_low - temp)
+def hvac_discomfort(cfg: HvacConfig, temp, ref_price: float, dt: float, low=None, high=None):
+    """Cost of the room sitting outside its comfort band, in currency.
+    `low`/`high`: the band at `temp`'s points (default: the flat band)."""
+    low = cfg.t_comfort_low if low is None else low
+    high = cfg.t_comfort_high if high is None else high
+    too_hot = np.maximum(0.0, temp - high)
+    too_cold = np.maximum(0.0, low - temp)
     if cfg.comfort_mode == "linear":
         return cfg.discomfort_price_per_kelvin_hour(ref_price) * (too_hot + too_cold) * dt
     return cfg.comfort_weight * (too_hot**2 + too_cold**2) * dt
@@ -313,6 +316,18 @@ def _hvac_duty_cap(temp, cfg: HvacConfig, q_wall, a: float, dt: float):
     return np.clip(room_kw / q_ac, 0.0, 1.0)
 
 
+def _band_runs(low: np.ndarray, high: np.ndarray) -> list[tuple[int, int]]:
+    """Runs [t0, t1) of slots whose priced points (t + 1) share one band."""
+    n = len(low) - 1
+    runs, t0 = [], 0
+    for t in range(1, n):
+        if low[t + 1] != low[t] or high[t + 1] != high[t]:
+            runs.append((t0, t))
+            t0 = t
+    runs.append((t0, n))
+    return runs
+
+
 def solve_hvac(
     cfg: HvacConfig,
     horizon: Horizon,
@@ -325,7 +340,8 @@ def solve_hvac(
     admm_rho: float = 0.0,
     ref_price: float | None = None,
 ) -> DeviceSolution:
-    """Solve the HVAC DP. Ternary action, soft two-sided comfort band.
+    """Solve the HVAC DP. Ternary action, soft two-sided comfort band (flat, or
+    one per trajectory point: HvacConfig.comfort_band).
     `limits`: see home_energy_optimizer.meter. `admm_target`/`admm_rho`: an optional
     tether on its power, as for the tank. `ref_price`: as for the tank."""
     t_start = time.perf_counter()
@@ -340,27 +356,30 @@ def solve_hvac(
     V = np.zeros((n + 1, cfg.n_states))
     POL = np.zeros((n, cfg.n_states), dtype=np.int64)
 
+    low, high = cfg.comfort_band(n)       # slot t prices point t + 1
     if cfg.comfort_mode == "linear":
-        V[n] = -hvac_discomfort(cfg, T, ref_price, 1.0)
+        V[n] = -hvac_discomfort(cfg, T, ref_price, 1.0, low[n], high[n])
     else:
-        V[n] = -cfg.terminal_weight * (T - cfg.t_comfort_mid) ** 2
+        V[n] = -cfg.terminal_weight * (T - (low[n] + high[n]) / 2.0) ** 2
 
     actions = cfg.duty_actions
     POL_f = np.zeros(POL.shape)
-    # The compiled kernel is the three-way (off / full cool / full heat) unit only.
+    # The compiled kernel is the three-way (off / full cool / full heat) unit
+    # under one flat band. A band that changes goes through it one run of
+    # equal-band slots at a time, the last run first; a flat band is one run.
     tether = admm_target is not None and admm_rho > 0
-    compiled = limits is None and cfg.n_duty_levels == 2 and not tether and kernel_hvac(
-        np.ascontiguousarray(buy, dtype=np.float64),
-        np.ascontiguousarray(sell, dtype=np.float64),
-        np.ascontiguousarray(dp_load, dtype=np.float64),
-        np.ascontiguousarray(outdoor_temp, dtype=np.float64),
-        np.ascontiguousarray(T, dtype=np.float64),
-        V, POL_f, n, cfg.n_states,
-        dt, cfg.c_room_kwh_per_k, cfg.r_wall_k_per_kw, cfg.power_kw, cfg.cop,
-        cfg.t_min, cfg.t_max, cfg.t_comfort_low, cfg.t_comfort_high,
-        cfg.discomfort_price_per_kelvin_hour(ref_price)
-        if cfg.comfort_mode == "linear" else 0.0,
-    ) if cfg.comfort_mode == "linear" else False
+    compiled = limits is None and cfg.n_duty_levels == 2 and not tether and cfg.comfort_mode == "linear"
+    if compiled:
+        series = [np.ascontiguousarray(x, dtype=np.float64) for x in (buy, sell, dp_load, outdoor_temp)]
+        grid = np.ascontiguousarray(T, dtype=np.float64)
+        price_k = cfg.discomfort_price_per_kelvin_hour(ref_price)
+        for t0, t1 in reversed(_band_runs(low, high)):
+            compiled = kernel_hvac(
+                *(x[t0:t1] for x in series), grid, V[t0:t1 + 1], POL_f[t0:t1], t1 - t0, cfg.n_states,
+                dt, cfg.c_room_kwh_per_k, cfg.r_wall_k_per_kw, cfg.power_kw, cfg.cop,
+                cfg.t_min, cfg.t_max, low[t1], high[t1], price_k)
+            if not compiled:      # no kernels in this build: nothing was written
+                break
     if compiled:
         # POL holds action INDICES; the kernel writes float64 because `long`
         # is 32-bit on wasm32 and 64-bit natively (see dp_kernels.pyx).
@@ -387,7 +406,7 @@ def solve_hvac(
                 -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
                 - limit_cost(imp, sell[t], limits)
             ) * dt
-            comfort = -hvac_discomfort(cfg, T_next, ref_price, dt)
+            comfort = -hvac_discomfort(cfg, T_next, ref_price, dt, low[t + 1], high[t + 1])
             if tether:
                 elec = elec - (admm_rho / 2.0) * (cfg.power_kw * abs(a) * duty - admm_target[t]) ** 2 * dt
 
@@ -485,14 +504,15 @@ def baseline_hvac(
     """Deadband thermostat: cool above the band, heat below it, else off."""
     n = horizon.steps
     dt = horizon.dt
+    low, high = cfg.comfort_band(n)
     temp = np.zeros(n + 1)
     power = np.zeros(n)
     temp[0] = cfg.t_comfort_mid
 
     for t in range(n):
-        if temp[t] > cfg.t_comfort_high:
+        if temp[t] > high[t]:
             mode = -1.0
-        elif temp[t] < cfg.t_comfort_low:
+        elif temp[t] < low[t]:
             mode = 1.0
         else:
             mode = 0.0

@@ -118,7 +118,9 @@ def comfort_penalty(
     if cfg.water_heater is not None and wh_temp is not None:
         total += float(np.sum(wh_discomfort(cfg.water_heater, wh_temp[1:], reference_price, dt)))
     if cfg.hvac is not None and hvac_temp is not None:
-        total += float(np.sum(hvac_discomfort(cfg.hvac, hvac_temp[1:], reference_price, dt)))
+        low, high = cfg.hvac.comfort_band(len(hvac_temp) - 1)
+        total += float(np.sum(hvac_discomfort(cfg.hvac, hvac_temp[1:], reference_price, dt,
+                                              low[1:], high[1:])))
     return total
 
 

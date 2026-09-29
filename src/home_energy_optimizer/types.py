@@ -314,6 +314,13 @@ class HvacConfig:
     discomfort_price: float | None = None  # currency/(K.h); None = derive
     comfort_weight: float = 8.0  # quadratic mode only
     terminal_weight: float = 10.0
+    # A comfort band that changes over the horizon, optional: one bound per
+    # point of the room trajectory, so n + 1 for n slots (point i is hour
+    # i * dt). The room starts mid-band at point 0 and the DP prices points
+    # 1..n against their own band (comfort_band). None: the flat band
+    # (t_comfort_low, t_comfort_high) throughout.
+    comfort_low_profile: tuple[float, ...] | None = None
+    comfort_high_profile: tuple[float, ...] | None = None
 
     @property
     def duty_actions(self) -> np.ndarray:
@@ -329,9 +336,27 @@ class HvacConfig:
         need = int(np.ceil((self.t_max - self.t_min) * per_step / step_k)) + 1
         return max(self.n_states, need)
 
+    def band_at(self, i: int) -> tuple[float, float]:
+        """(low, high) at point i of the room trajectory; -1 is the horizon's end."""
+        if self.comfort_low_profile is None:
+            return self.t_comfort_low, self.t_comfort_high
+        return float(self.comfort_low_profile[i]), float(self.comfort_high_profile[i])
+
+    def comfort_band(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """(low, high) at the n + 1 points of an n-slot room trajectory."""
+        if self.comfort_low_profile is None:
+            return np.full(n + 1, self.t_comfort_low), np.full(n + 1, self.t_comfort_high)
+        if len(self.comfort_low_profile) != n + 1:
+            raise ValueError(f"the comfort profile has {len(self.comfort_low_profile)} points; "
+                             f"{n} slots need {n + 1}")
+        return (np.array(self.comfort_low_profile, dtype=float),
+                np.array(self.comfort_high_profile, dtype=float))
+
     @property
     def t_comfort_mid(self) -> float:
-        return (self.t_comfort_low + self.t_comfort_high) / 2.0
+        """Mid-band at the start: where the room starts."""
+        low, high = self.band_at(0)
+        return (low + high) / 2.0
 
     def discomfort_price_per_kelvin_hour(self, reference_price: float) -> float:
         """Currency per K outside the comfort band per hour."""
@@ -346,6 +371,15 @@ class HvacConfig:
     def validate(self) -> None:
         if not self.t_min < self.t_comfort_low <= self.t_comfort_high < self.t_max:
             raise ValueError("require t_min < t_comfort_low <= t_comfort_high < t_max")
+        if (self.comfort_low_profile is None) != (self.comfort_high_profile is None):
+            raise ValueError("give comfort_low_profile and comfort_high_profile together")
+        if self.comfort_low_profile is not None:
+            low = np.asarray(self.comfort_low_profile, dtype=float)
+            high = np.asarray(self.comfort_high_profile, dtype=float)
+            if low.shape != high.shape or low.size < 2:
+                raise ValueError("the comfort profiles need the same length, one value per trajectory point")
+            if not (np.all(self.t_min < low) and np.all(low <= high) and np.all(high < self.t_max)):
+                raise ValueError("require t_min < low <= high < t_max at every point of the comfort profile")
         if self.n_states < 2:
             raise ValueError("n_states must be >= 2")
         if self.n_duty_levels < 2:
@@ -500,6 +534,8 @@ class SiteConfig:
         for dev in (*self.battery_list, self.water_heater, self.hvac):
             if dev is not None:
                 dev.validate()
+        if self.hvac is not None:
+            self.hvac.comfort_band(self.horizon.steps)   # a profile must fit the horizon
 
     def without(self, *names: str) -> SiteConfig:
         """Return a copy with the named devices disabled. Test convenience."""

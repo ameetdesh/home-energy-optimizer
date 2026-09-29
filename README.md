@@ -161,6 +161,9 @@ and export prices, the household load and the hot-water draw can be edited:
 drag the hourly dots (on the bold lines) on the Prices and Power charts, and it
 re-solves on release. The draw is the heat taken from the tank, in kW. Export is kept at
 or below import; **reset** (or a new tariff or horizon) restores the preset.
+The room's comfort band is edited the same way on the Room chart: one
+low and one high dot per hour, flat 22–26 °C until dragged, with its own
+**reset** under Advanced (a new horizon restores it too).
 The same page can plan with **ADMM** instead (Method), with a slider for its
 tether ρ, an "Adapt ρ" switch, each battery's step (its DP or its exact LP) and
 a cold or warm start, so the two can be compared on one site.

@@ -88,7 +88,8 @@ def build_site(p: dict) -> SiteConfig:
     )
     wh = (WaterHeaterConfig(t_comfort=float(p.get("tank_comfort", 55.0)))
           if p.get("enable_wh", True) else None)
-    # the room band: whichever order the two sliders are in
+    # the room's flat band, whichever order the two values are in (the DW page
+    # drags an hourly one instead: dw.webapi.apply_band)
     lo, hi = sorted((float(p.get("room_low", 22.0)), float(p.get("room_high", 26.0))))
     hvac = HvacConfig(t_comfort_low=lo, t_comfort_high=hi) if p.get("enable_hvac", True) else None
     return SiteConfig(

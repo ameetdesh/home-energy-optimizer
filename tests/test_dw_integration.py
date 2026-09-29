@@ -306,6 +306,50 @@ def test_export_equal_to_import_everywhere_solves():
 
 
 # --------------------------------------------------------------------------
+# The app's dragged comfort band (src/home_energy_optimizer/dw/webapi.py apply_band)
+# --------------------------------------------------------------------------
+
+
+def test_the_default_band_is_flat_22_to_26():
+    from home_energy_optimizer.dw.webapi import _comfort, _site_fc
+
+    site, _, _ = _site_fc({"hours": 24})
+    c = _comfort(site)
+    assert site.hvac.comfort_low_profile is None
+    assert len(c["room_low"]) == site.horizon.steps + 1
+    assert set(c["room_low"]) == {22.0} and set(c["room_high"]) == {26.0}
+
+
+def test_dragged_band_is_interpolated_and_sorted():
+    from home_energy_optimizer.dw.webapi import _site_fc
+
+    low = [22.0] * 25
+    low[12] = 27.0                                   # noon's floor dragged above its ceiling
+    site, _, _ = _site_fc({"hours": 24, "room_low_h": low, "room_high_h": [26.0] * 25})
+    lo, hi = site.hvac.comfort_band(site.horizon.steps)
+    i = int(12 / site.horizon.dt)
+    assert (lo[i], hi[i]) == (26.0, 27.0)            # sorted point by point
+    assert lo[i - 2] == pytest.approx(24.5)          # 11:30, half-way from 11:00's point
+    assert lo[0] == lo[-1] == 22.0 and site.hvac.t_comfort_mid == 24.0
+
+
+@pytest.mark.parametrize("method", ["dw", "admm"])
+def test_dragged_band_reaches_the_plan(method):
+    """The floor raised to 24 degC from 06:00 to 09:00: more heating, both methods."""
+    from home_energy_optimizer.dw.webapi import solve
+
+    base = {"hours": 24, "tariff": "flat", "method": method, "enable_battery": False, "enable_wh": False}
+    low = [22.0] * 25
+    for h in range(6, 10):
+        low[h] = 24.0
+    flat, warm = solve(base), solve({**base, "room_low_h": low})
+    assert "error" not in flat and "error" not in warm
+    assert warm["comfort"]["room_low"][int(7 / warm["dt"])] == 24.0
+    hvac = lambda r: np.array(r["plan"]["devices"]["hvac"]["power"])
+    assert hvac(warm).sum() > hvac(flat).sum()
+
+
+# --------------------------------------------------------------------------
 # A grid limit is not cheaper to break when energy is cheap
 # --------------------------------------------------------------------------
 

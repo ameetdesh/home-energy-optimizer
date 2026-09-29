@@ -138,7 +138,7 @@ def _objective(cfg, fc, net, sols, batteries, ref) -> float:
     if wh is not None and cfg.water_heater.comfort_mode == "linear":
         obj += cfg.water_heater.heat_capacity_kwh_per_k * ref * max(0.0, cfg.water_heater.t_comfort - float(wh[-1]))
     if hv is not None and cfg.hvac.comfort_mode == "linear":
-        obj += float(hvac_discomfort(cfg.hvac, np.array([float(hv[-1])]), ref, 1.0)[0])
+        obj += float(hvac_discomfort(cfg.hvac, np.array([float(hv[-1])]), ref, 1.0, *cfg.hvac.band_at(-1))[0])
     return float(obj)
 
 

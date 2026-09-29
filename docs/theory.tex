@@ -193,20 +193,20 @@ term charges a tank left short at the end the cost of reheating it.
 \paragraph{Heat pump / HVAC} (state: room temperature $T_t$; electrical power
 $P$; coefficient of performance $\mathrm{COP}$; room capacitance
 $C_{\mathrm{room}}$ and envelope resistance $R_{\mathrm{wall}}$; comfort band
-$[T^{\mathrm{lo}}, T^{\mathrm{hi}}]$):
+$[T^{\mathrm{lo}}_t, T^{\mathrm{hi}}_t]$, which may change over the day):
 \begin{equation}
 \begin{aligned}
   &\text{dynamics:}    && T_{t+1} = T_t + \tfrac{\dt}{C_{\mathrm{room}}}\Big(q(a_t)\,\alpha_t
                           + \tfrac{T^{\mathrm{out}}_t - T_t}{R_{\mathrm{wall}}}\Big), \\
   &\text{constraints:} && a_t \in \{-1, 0, +1\} \ \text{(cool, off, heat)}, \qquad
                           \alpha_t = \min\{|a_t|, \bar\alpha_t(T_t)\}, \qquad p_t = P\alpha_t, \\
-  &\text{private cost:}&& f(p) = \dt\textstyle\sum_t \pi^{\mathrm{hv}}_{\mathrm K}\,\xi(T_{t+1})
-                          \;+\; (1\,\mathrm h)\,\pi^{\mathrm{hv}}_{\mathrm K}\,\xi(T_n),
+  &\text{private cost:}&& f(p) = \dt\textstyle\sum_t \pi^{\mathrm{hv}}_{\mathrm K}\,\xi_{t+1}(T_{t+1})
+                          \;+\; (1\,\mathrm h)\,\pi^{\mathrm{hv}}_{\mathrm K}\,\xi_n(T_n),
 \end{aligned}
 \label{eq:hvac}
 \end{equation}
-where $\xi(T) = [T - T^{\mathrm{hi}}]^+ + [T^{\mathrm{lo}} - T]^+$ is the
-excursion from the comfort band, and the heat flow is $q(a) = P\,\mathrm{COP}\,a$
+where $\xi_t(T) = [T - T^{\mathrm{hi}}_t]^+ + [T^{\mathrm{lo}}_t - T]^+$ is the
+excursion from the comfort band at time $t$, and the heat flow is $q(a) = P\,\mathrm{COP}\,a$
 when cooling and $P(\mathrm{COP}+1)\,a$ when heating (Appendix~\ref{app:hvac}).
 
 \paragraph{Electric vehicle} (a battery that cannot discharge, whose charger is
