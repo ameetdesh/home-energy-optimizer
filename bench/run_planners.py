@@ -2,8 +2,8 @@
 
     .venv/bin/python bench/run_planners.py
 
-Prints the tables quoted in docs/theory.tex, section "Two coordinators, side
-by side":
+Prints the tables quoted in docs/theory.tex, section "The two coordinators
+compared":
 
 1. the Home Assistant demo site (tools/ha-lambda-demo/run.py's defaults:
    battery on a 100-state grid, on/off tank, HVAC, 24 h) on three tariffs;

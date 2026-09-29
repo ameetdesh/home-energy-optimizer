@@ -34,7 +34,7 @@ The tank's *physics* is entirely linear here. Both heat-loss terms - the
 standing loss to `t_ambient` and the enthalpy carried out by the draw to
 `t_inlet` - are linear in T, so their sum is `C*rate[t]*(T - t_inf[t])` with
 `rate` and `t_inf` exogenous (they depend only on the demand forecast), and
-`alpha_bar` is linear in T as well. See docs/theory.tex section 2.2. The one
+`alpha_bar` is linear in T as well. See docs/theory.tex, Appendix A. The one
 nonlinearity left is the `min` that realises the command against the cut-out,
 and it is modelled exactly, with one binary per slot on each side.
 

@@ -5,7 +5,8 @@
 With a single device, the house problem is exactly the one the battery's DP
 solves when handed the real tariff and the house load, so DW should land on
 the same plan or a better one (the LP battery is continuous; the DP is on a
-grid). Prints the table of docs/theory.tex, "One device alone".
+grid). Prints that check as a table (a sanity check; docs/theory.tex does not
+quote it).
 """
 
 from __future__ import annotations

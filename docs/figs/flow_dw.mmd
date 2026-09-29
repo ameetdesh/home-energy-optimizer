@@ -1,12 +1,12 @@
 %%{init: {"flowchart": {"wrappingWidth": 320}}}%%
 %% Dantzig-Wolfe: devices answer one price question; the coordinator blends their offers.
 flowchart TB
-  S(["<b>Start</b><br/>a few offers per device: its thermostat plan, and its plans at the import and export prices"]) --> LP
+  S(["<b>Start</b><br/>a few offers per device: its baseline plan, and its price responses at the import and export prices"]) --> LP
   subgraph R["One iteration, repeated"]
     direction TB
-    LP["<b>Coordinator LP</b><br/>meter: import, export, limits, curtailment; batteries as exact variables<br/>keeps every offer and picks the <i>blend</i> with the cheapest bill plus private costs"]
-    D["<b>Each device that bids</b> (tank, HVAC, EV)<br/>its best plan if a kWh in slot t costs π<sub>t</sub><br/>it never sees the tariff or the other devices"]
+    LP["<b>Coordinator LP</b><br/>meter: import, export, limits, curtailment; LP devices (the battery) as exact variables<br/>keeps every offer and picks the <i>blend</i> with the cheapest bill plus private costs"]
+    D["<b>Each device that bids</b> (tank, HVAC, EV)<br/>its price response: its best plan if a kWh in slot t costs π<sub>t</sub>, by any solver<br/>it never sees the tariff or the other devices"]
     LP -- "prices π, one per slot" --> D
     D -- "offers: plan + private cost" --> LP
   end
-  D -- "their answers give a lower bound; stop when blend − bound is small" --> E(["<b>Result</b><br/>one runnable plan per device (a blend, where the device can run one)<br/><i>certificate: at most the gap from the best possible</i>"])
+  D -- "their answers give a lower bound; stop when blend − bound is small" --> E(["<b>Result</b><br/>one runnable plan per device (a blend, where the device can run one), then a polish<br/><i>certificate: at most the gap from the best possible</i>"])
