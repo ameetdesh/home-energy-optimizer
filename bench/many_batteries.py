@@ -40,10 +40,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "bench")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from dw.webapi import _site_fc  # noqa: E402
-from admm.coordinator import ExchangeRun  # noqa: E402
-from hemspolicy.types import CoordinationConfig  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc  # noqa: E402
+from home_energy_optimizer.admm.coordinator import ExchangeRun  # noqa: E402
+from home_energy_optimizer.types import CoordinationConfig  # noqa: E402
 
 
 def site(n_batteries: int, grid: int = 50, thermal: bool = True):

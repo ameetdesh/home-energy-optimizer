@@ -136,7 +136,7 @@ def solve_water_heater(
     admm_rho: float = 0.0,
     ref_price: float | None = None,
 ) -> DeviceSolution:
-    """Solve the hot-water tank DP. `limits`: see hemspolicy.meter.
+    """Solve the hot-water tank DP. `limits`: see home_energy_optimizer.meter.
 
     `admm_target`/`admm_rho`: an optional tether (admm_rho/2)(p - target)^2 dt
     on the element's power, as the battery DP has - ADMM's proximal step
@@ -326,7 +326,7 @@ def solve_hvac(
     ref_price: float | None = None,
 ) -> DeviceSolution:
     """Solve the HVAC DP. Ternary action, soft two-sided comfort band.
-    `limits`: see hemspolicy.meter. `admm_target`/`admm_rho`: an optional
+    `limits`: see home_energy_optimizer.meter. `admm_target`/`admm_rho`: an optional
     tether on its power, as for the tank. `ref_price`: as for the tank."""
     t_start = time.perf_counter()
     n = horizon.steps

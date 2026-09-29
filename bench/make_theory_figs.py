@@ -34,8 +34,8 @@ import numpy as np
 from bench.milp_full import milp_battery_water_heater
 from bench.reference import lp_battery
 from bench.run_benchmark import capture
-from dw.integrate import dw_plan
-from hemspolicy import (
+from home_energy_optimizer.dw.integrate import dw_plan
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -44,9 +44,9 @@ from hemspolicy import (
     coordinate,
     demo_forecasts,
 )
-from hemspolicy.coordinate import baseline_solution, net_cost, total_objective
-from hemspolicy.dp_battery import solve_battery, terminal_price
-from hemspolicy.dp_thermal import baseline_water_heater
+from home_energy_optimizer.coordinate import baseline_solution, net_cost, total_objective
+from home_energy_optimizer.dp_battery import solve_battery, terminal_price
+from home_energy_optimizer.dp_thermal import baseline_water_heater
 
 FIGS = ROOT / "docs" / "figs"
 TARIFFS = ("flat", "day_night", "dynamic")

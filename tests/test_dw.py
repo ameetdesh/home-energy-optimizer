@@ -1,6 +1,6 @@
 """The Dantzig-Wolfe prototype (dw/): bound ordering, and parity with ADMM.
 
-The DW master runs on dw/lpsolver.py (numpy only), so no scipy is needed.
+The DW master runs on src/home_energy_optimizer/dw/lpsolver.py (numpy only), so no scipy is needed.
 """
 
 import sys
@@ -12,8 +12,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from dw.coordinator import DWCoordinator, dw_coordinate, extended_objective  # noqa: E402
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer.dw.coordinator import DWCoordinator, dw_coordinate, extended_objective  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig, GridLimits, Horizon, HvacConfig, SiteConfig, WaterHeaterConfig,
     coordinate, demo_forecasts,
 )
@@ -84,7 +84,7 @@ def test_tank_in_master_follows_the_tank_physics():
     co = DWCoordinator(site, fc, battery_in_master=True, tank_in_master=True)
     r = co.run()
     tank = r.plan["water_heater"]
-    from hemspolicy.dp_thermal import _max_duty, _usable_outflow
+    from home_energy_optimizer.dp_thermal import _max_duty, _usable_outflow
     cfg, dt = site.water_heater, site.horizon.dt
     T = [cfg.t_comfort]
     for t in range(site.horizon.steps):
@@ -127,9 +127,9 @@ def test_active_pool_stays_small_and_ordered():
 def test_sensitivity_variants_follow_the_tank_physics():
     """Every "force one step, then re-plan" variant is a plan the tank can run:
     re-simulating its power reproduces its temperature."""
-    from dw.coordinator import Device
-    from dw.sensitivity import variants
-    from hemspolicy.dp_thermal import _max_duty, _usable_outflow
+    from home_energy_optimizer.dw.coordinator import Device
+    from home_energy_optimizer.dw.sensitivity import variants
+    from home_energy_optimizer.dp_thermal import _max_duty, _usable_outflow
     site = limit_site()
     fc = demo_forecasts(site.horizon, tariff="day_night")
     co = DWCoordinator(site, fc, battery_in_master=True)
@@ -174,7 +174,7 @@ def test_sensitivity_only_bounds_memory():
 # ---------------------------------------------------------------------------
 
 def _two_batteries_as_plans():
-    from dw.webapi import build_site
+    from home_energy_optimizer.dw.webapi import build_site
     site = build_site({"n_batteries": 2, "max_import_kw": 7, "terminal_mode": "linear", "grid": 60})
     return site, demo_forecasts(site.horizon, tariff="dynamic", solar_peak_kw=5.0)
 

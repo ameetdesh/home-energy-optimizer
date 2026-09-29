@@ -1,7 +1,7 @@
 """ADMM coordination of the devices, and the pieces both coordinators share.
 
 `coordinate()` plans a site by ADMM - proximal message passing, in the
-`admm` package beside this one (admm/coordinator.py). This module also holds what every planner uses to score
+`admm` package beside this one (src/home_energy_optimizer/admm/coordinator.py). This module also holds what every planner uses to score
 and finish a plan: the meter's curtailment rule and cost, the comfort, breach
 and battery end-value terms of the objective, the thermostat baseline, the
 baseline fallback, the polish (Gauss-Seidel best responses, kept only if the
@@ -269,7 +269,7 @@ def coordinate(cfg: SiteConfig, fc: Forecasts, progress=None, warm=None) -> Coor
     before the fallback and polish - the same shape the DW app reads. `warm`:
     an earlier result's `warm_start` (see admm.coordinator.WarmStart).
     """
-    from admm.coordinator import coordinate_exchange      # it imports this module
+    from home_energy_optimizer.admm.coordinator import coordinate_exchange      # it imports this module
     return coordinate_exchange(cfg, fc, progress, warm)
 
 

@@ -40,7 +40,7 @@
 \newcommand{\Pk}{\mathcal P_k}
 
 \title{Coordinating Distributed Energy Resources Behind One Meter\\
-\large Theory notes for \texttt{hems-policy}}
+\large Theory notes for \texttt{home-energy-optimizer}}
 \author{}
 \date{}
 
@@ -54,7 +54,7 @@ electric vehicle has several distributed energy resources (DERs) behind one
 meter. Planning them together, so that the electricity bill plus the
 occupants' discomfort is as small as possible, couples them only through the
 meter, where energy bought costs more than energy sold. These notes state that
-problem and the method \texttt{hems-policy} uses to solve it. Each DER is
+problem and the method \texttt{home-energy-optimizer} uses to solve it. Each DER is
 planned by its own solver --- a linear, quadratic or dynamic programme, or any
 other method --- provided it answers three queries of a fixed form. A
 \emph{coordinator} then makes the DERs' plans agree at the meter. The default
@@ -78,7 +78,9 @@ Section~\ref{sec:limits} lists what is and is not guaranteed.
 Table~\ref{tab:notation} collects the notation. The appendices hold the device
 models (\ref{app:models}), the device solvers (\ref{app:solvers}), the
 numerical evidence with the script behind every figure and table
-(\ref{app:evidence}), and one proof (\ref{app:curtail}).
+(\ref{app:evidence}), and one proof (\ref{app:curtail}). Code is cited by module
+within the package \texttt{home\_energy\_optimizer} (e.g.\ \texttt{dw.coordinator}),
+and scripts by path (e.g.\ \texttt{bench/run\_planners.py}).
 
 \begin{table}[htbp]
 \centering
@@ -619,7 +621,7 @@ package's own branch and bound.
 \subsection{The algorithm}
 
 \begin{algorithm}[H]
-\caption{Dantzig--Wolfe planning cycle (\texttt{dw/coordinator.py}).}
+\caption{Dantzig--Wolfe planning cycle (\texttt{dw.coordinator}).}
 \label{alg:dw}
 \begin{algorithmic}[1]
 \Require forecasts $\cimp, \cexp, d, g$ and each device's own; bidding devices
@@ -658,7 +660,7 @@ master. The testbed also recovers a plan at every iteration and keeps the best.
 
 \paragraph{Cost.} One iteration is one small LP plus, per bidding device, a price
 response at each of the two prices and one best response. The master is solved by an interior-point method in numpy
-(\texttt{dw/lpsolver.py}). A day at $15$-minute slots takes $0.6$--$0.9$~s on the
+(\texttt{dw.lpsolver}). A day at $15$-minute slots takes $0.6$--$0.9$~s on the
 Home Assistant demo site; a week-long evcc request ($672$ slots),
 $1.7$--$2.5$~s.
 
@@ -791,7 +793,7 @@ which can diverge even on convex problems \cite{chen2016}.
 \label{sec:admmalg}
 
 \begin{algorithm}[H]
-\caption{ADMM planning cycle, as implemented (\texttt{admm/coordinator.py}).}
+\caption{ADMM planning cycle, as implemented (\texttt{admm.coordinator}).}
 \label{alg:admm}
 \begin{algorithmic}[1]
 \Require forecasts; terminals: load, PV, grid connection, and each device, the
@@ -974,7 +976,7 @@ sensor & meaning & source \\
 Figure~\ref{fig:hadashboard} shows them live.
 
 \paragraph{evcc} calls the planner over HTTP with its own request format
-(\texttt{hemspolicy/evcc.py}). The home battery and each charging point arrive as
+(\texttt{evcc}). The home battery and each charging point arrive as
 batteries: the home battery is held in the master, and each EV bids offers from
 its DP, which respects its charger minimum and goal. evcc's grid limits become
 limits in the master, and the response carries the certificate. A request where
@@ -1000,7 +1002,7 @@ numbers.}
 The house pays one bill, and the plan lowers it; what did the solar and each
 device contribute? The bill does not split by device on its own: whether a kWh a
 device draws is imported or merely displaces an export depends on everything else
-on the meter. The package splits the saving as follows (\texttt{dw/attribution.py}).
+on the meter. The package splits the saving as follows (\texttt{dw.attribution}).
 
 \paragraph{Reimburse, then share.} Compare the plan with a \emph{baseline}: no
 PV, the thermal devices on their thermostats, the batteries idle. Device $k$ is
@@ -1470,7 +1472,7 @@ in one slot is allowed; it only wastes energy, so an optimum does it only where
 wasting energy costs nothing. The proximal step replaces the objective by
 $\tfrac{\rho}{2}\|c - e - v\|^2 - \pi_{\mathrm T}\,s_n$, a convex QP. The package
 solves it by a primal--dual interior-point method with Mehrotra's
-predictor--corrector (\texttt{admm/battery\_qp.py}); the Newton system
+predictor--corrector (\texttt{admm.battery\_qp}); the Newton system
 reduces to a tridiagonal one in the $n$ balance duals, so an iteration costs
 $O(n)$. A warm start moves the previous solution $5\%$ of each range off its
 bounds and floors its bound multipliers, which saves about a third of the

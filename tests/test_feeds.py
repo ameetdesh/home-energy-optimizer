@@ -11,8 +11,8 @@ import os
 import numpy as np
 import pytest
 
-from hemspolicy import Horizon
-from hemspolicy.feeds import (
+from home_energy_optimizer import Horizon
+from home_energy_optimizer.feeds import (
     blend_measured,
     from_csv,
     from_series,

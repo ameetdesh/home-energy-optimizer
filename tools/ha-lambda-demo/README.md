@@ -22,10 +22,10 @@ HA_TOKEN=<token> python tools/ha-lambda-demo/run.py --speed 400
 
 ```bash
 HA_TOKEN=<token> python tools/ha-lambda-demo/setup_dashboard.py
-# -> dashboard ready at http://127.0.0.1:8123/hems-policy
+# -> dashboard ready at http://127.0.0.1:8123/home-energy-optimizer
 ```
 
-Then open <http://localhost:8123/hems-policy>, or use the sidebar entry.
+Then open <http://localhost:8123/home-energy-optimizer>, or use the sidebar entry.
 
 **Do not rely on the default Overview dashboard.** Entities pushed through the
 REST `/api/states` endpoint are *orphan states* — they have no entry in HA's
@@ -145,7 +145,7 @@ series:
 ## Caveats
 
 - The demo uses `demo_forecasts` synthetics. Point it at real feeds with
-  `hemspolicy.feeds` (keyless Open-Meteo PV, CSV, or a list from any tariff
+  `home_energy_optimizer.feeds` (keyless Open-Meteo PV, CSV, or a list from any tariff
   integration).
 - It writes states over the REST API, so entities vanish on an HA restart.
   A real deployment would use MQTT discovery or a custom component.

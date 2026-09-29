@@ -44,7 +44,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from hemspolicy.coordinate import (
+from home_energy_optimizer.coordinate import (
     _apply_baseline_fallback,
     _polish,
     _pricing_resolve,
@@ -56,10 +56,10 @@ from hemspolicy.coordinate import (
     net_cost,
     total_objective,
 )
-from hemspolicy.dp_battery import solve_battery, terminal_price
-from hemspolicy.dp_thermal import hvac_discomfort, solve_hvac, solve_water_heater
-from hemspolicy.meter import Limits
-from hemspolicy.types import CoordinationResult, Forecasts, RoundRecord, SiteConfig
+from home_energy_optimizer.dp_battery import solve_battery, terminal_price
+from home_energy_optimizer.dp_thermal import hvac_discomfort, solve_hvac, solve_water_heater
+from home_energy_optimizer.meter import Limits
+from home_energy_optimizer.types import CoordinationResult, Forecasts, RoundRecord, SiteConfig
 
 from .battery_qp import battery_prox, lp_step_applies
 

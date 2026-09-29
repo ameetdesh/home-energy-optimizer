@@ -16,7 +16,7 @@ import pathlib
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,

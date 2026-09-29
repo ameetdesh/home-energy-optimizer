@@ -55,9 +55,9 @@ import time
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
 
-from hemspolicy.dp_battery import terminal_price
-from hemspolicy.dp_thermal import _relaxation
-from hemspolicy.types import BatteryConfig, Horizon, WaterHeaterConfig
+from home_energy_optimizer.dp_battery import terminal_price
+from home_energy_optimizer.dp_thermal import _relaxation
+from home_energy_optimizer.types import BatteryConfig, Horizon, WaterHeaterConfig
 
 
 def milp_battery_water_heater(

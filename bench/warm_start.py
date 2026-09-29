@@ -16,7 +16,7 @@
 For 2 and 3: iterations run, whether the run converged, the returned plan
 above the Dantzig-Wolfe bound, the first iteration whose runnable plan came
 within 0.05 of the run's best, and time. The sites are the testbed's
-(dw/webapi.py _site_fc): dynamic tariff, 24 hours, a 7 kW import limit, the
+(src/home_energy_optimizer/dw/webapi.py _site_fc): dynamic tariff, 24 hours, a 7 kW import limit, the
 tank and HVAC, one or two batteries, with DP or LP battery steps.
 """
 
@@ -33,10 +33,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from dw.webapi import _site_fc  # noqa: E402
-from admm.coordinator import ExchangeRun  # noqa: E402
-from hemspolicy.types import CoordinationConfig, Forecasts  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc  # noqa: E402
+from home_energy_optimizer.admm.coordinator import ExchangeRun  # noqa: E402
+from home_energy_optimizer.types import CoordinationConfig, Forecasts  # noqa: E402
 
 BASE = {"tariff": "dynamic", "hours": 24, "max_import_kw": 7, "batt_capacity": 10, "solar_peak": 5,
         "grid": 50, "tank_levels": 2}

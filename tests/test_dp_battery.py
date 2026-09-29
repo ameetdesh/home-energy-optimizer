@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy import BatteryConfig, Horizon, SocGate, solve_battery
+from home_energy_optimizer import BatteryConfig, Horizon, SocGate, solve_battery
 
 
 @pytest.fixture
@@ -86,7 +86,7 @@ def test_soe_bounds_need_no_projection(horizon, cfg):
 
     With correct bounds `s + eff*dt` lands inside [0, cap] by construction.
     """
-    from hemspolicy.dp_battery import _feasible_actions
+    from home_energy_optimizer.dp_battery import _feasible_actions
 
     dt, cap = horizon.dt, cfg.capacity_kwh
     grid = np.linspace(-cfg.p_discharge_max_kw, cfg.p_charge_max_kw, 41)
@@ -103,7 +103,7 @@ def test_soe_bounds_need_no_projection(horizon, cfg):
 def test_a_full_battery_is_reachable(horizon, cfg):
     """The un-adjusted charge bound stops at cap - (cap-s)(1-eta_c), so the
     store creeps toward capacity without arriving."""
-    from hemspolicy.dp_battery import _feasible_actions
+    from home_energy_optimizer.dp_battery import _feasible_actions
 
     s = cfg.capacity_kwh - 1.0
     Ac = _feasible_actions(
@@ -116,7 +116,7 @@ def test_a_full_battery_is_reachable(horizon, cfg):
 
 def test_an_empty_battery_delivers_only_what_it_holds(horizon, cfg):
     """The failure this guards: energy created from nothing at the low bound."""
-    from hemspolicy.dp_battery import _feasible_actions
+    from home_energy_optimizer.dp_battery import _feasible_actions
 
     s = 1.0
     Ac = _feasible_actions(
@@ -206,7 +206,7 @@ def test_min_soe_is_a_hard_floor(horizon, cfg):
     and a battery that starts below it is simply not discharged further."""
     from dataclasses import replace
 
-    from hemspolicy import demo_forecasts
+    from home_energy_optimizer import demo_forecasts
 
     fc = demo_forecasts(horizon, tariff="dynamic")
     b = replace(cfg, soe_min_frac=0.3)
@@ -225,7 +225,7 @@ def test_priced_limits_leave_only_the_headroom(horizon, cfg):
     """With `limits`, a battery charging into a cheap slot takes what is left
     under the import limit given the others' load - and no more, while the
     breach price is above what the stored energy is worth."""
-    from hemspolicy.meter import Limits
+    from home_energy_optimizer.meter import Limits
 
     n = horizon.steps
     buy = np.where(np.arange(n) < n // 2, 0.05, 0.40)

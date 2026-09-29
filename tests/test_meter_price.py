@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("scipy", reason="the finite-difference ground truth needs scipy")
 
 from bench.duals import lp_battery_with_duals  # noqa: E402
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -190,7 +190,7 @@ def test_two_batteries_can_have_different_lambdas():
     because less of it comes back out. Measured mean gap 0.015/kWh, max 0.044
     for eta 0.95 vs 0.85.
     """
-    from hemspolicy.dp_battery import solve_battery
+    from home_energy_optimizer.dp_battery import solve_battery
 
     h = Horizon(dt=0.25, hours=24.0)
     fc = demo_forecasts(h, tariff="day_night")

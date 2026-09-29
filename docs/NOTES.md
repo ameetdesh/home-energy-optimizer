@@ -1,5 +1,8 @@
 # Findings
 
+> Written when the package was `hems-policy` (import `hemspolicy`); it is now
+> `home-energy-optimizer` (import `home_energy_optimizer`), laid out as in the README.
+
 What was measured, and what it means for using this package. Method notes appear
 only where the result would be misread without them.
 

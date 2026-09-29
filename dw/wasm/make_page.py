@@ -39,7 +39,7 @@ def admm_boot() -> str:
 
 def retarget(boot: str) -> str:
     swaps = [
-        ("hemspolicy_bundle.py", "dw_bundle.py"),
+        ("admm_bundle.py", "dw_bundle.py"),
         ("var(--red)", "var(--bad)"),
         ("var(--blue)", "var(--sel-ink)"),
         ("await boot();", "await solve();"),
@@ -75,7 +75,7 @@ def main() -> None:
         sys.exit(f"no HEMS-BOOT markers in {args.src}")
     out = html[:a] + retarget(admm_boot()) + html[b + len(END):]
 
-    row_start = out.find('<div class="row"><label title="Built-in: dw/lpsolver.py')
+    row_start = out.find('<div class="row"><label title="Built-in: src/home_energy_optimizer/dw/lpsolver.py')
     row_end = out.find("</select></div>", row_start) + len("</select></div>")
     if row_start < 0 or row_end < len("</select></div>"):
         sys.exit("dw/gui/index.html changed: LP solver row not found")

@@ -25,12 +25,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig, Horizon, HvacConfig, WaterHeaterConfig,
     solve_battery, solve_hvac, solve_water_heater,
 )
-from hemspolicy import _kernels  # noqa: E402
-from hemspolicy.profiles import (  # noqa: E402
+from home_energy_optimizer import _kernels  # noqa: E402
+from home_energy_optimizer.profiles import (  # noqa: E402
     day_night_tariff, dynamic_tariff, flat_tariff,
     hot_water_demand_profile, outdoor_temp_profile,
 )

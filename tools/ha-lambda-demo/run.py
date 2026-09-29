@@ -29,11 +29,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))  # the dw package, when not pip-installed
 
 import numpy as np  # noqa: E402
 
-from hemspolicy import (  # noqa: E402
+from home_energy_optimizer import (  # noqa: E402
     BatteryConfig,
     Horizon,
     HvacConfig,
@@ -44,7 +43,7 @@ from hemspolicy import (  # noqa: E402
     demo_forecasts,
     plan,
 )
-from hemspolicy.ha import HomeAssistant, publish_policy, publish_site  # noqa: E402
+from home_energy_optimizer.ha import HomeAssistant, publish_policy, publish_site  # noqa: E402
 
 
 def build(hours: float, tariff: str, capacity: float, grid: int, thermal: bool) -> tuple:

@@ -1,4 +1,4 @@
-"""dw/lpsolver.py: the numpy-only master solver, checked against HiGHS."""
+"""src/home_energy_optimizer/dw/lpsolver.py: the numpy-only master solver, checked against HiGHS."""
 
 import sys
 from pathlib import Path
@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from dw.lpsolver import Triplets, choose_one, linprog  # noqa: E402
+from home_energy_optimizer.dw.lpsolver import Triplets, choose_one, linprog  # noqa: E402
 
 scipy_opt = pytest.importorskip("scipy.optimize")
 

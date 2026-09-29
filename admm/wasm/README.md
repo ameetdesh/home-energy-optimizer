@@ -1,6 +1,6 @@
 # The testbed, in a browser tab
 
-`hems_policy_standalone.html` is the whole thing in one file: the UI, the
+`admm_standalone.html` is the whole thing in one file: the UI, the
 solver, and a zlib+base64 copy of the Python. Open it and it runs — no server,
 no install, no Python on the machine. Pyodide and numpy come from a CDN on
 first load and are cached after.
@@ -14,13 +14,13 @@ module imports from `file://`, and Pyodide is loaded as a module.
 
 | File | From | Committed |
 |---|---|---|
-| `hemspolicy_bundle.py` | `src/hemspolicy/*.py` via `make_bundle.py` | yes, and checked |
-| `hems_policy.html` | `admm/gui/index.html` via `make_page.py` | yes |
-| `hems_policy_standalone.html` | both, via `make_standalone.py` | yes — this is the artifact |
+| `admm_bundle.py` | `src/home_energy_optimizer/*.py` via `make_bundle.py` | yes, and checked |
+| `admm_page.html` | `admm/gui/index.html` via `make_page.py` | yes |
+| `admm_standalone.html` | both, via `make_standalone.py` | yes — this is the artifact |
 
 `tests/test_wasm_bundle.py` regenerates the bundle and fails if it differs from
 the committed copy, so the two cannot drift apart quietly. It also unpacks the
-shipped `hems_policy_standalone.html`, execs the payload, and checks it still
+shipped `admm_standalone.html`, execs the payload, and checks it still
 answers every route with numbers identical to the package — because the two
 ways obfuscation can break this both build cleanly and fail only at call time.
 
@@ -90,7 +90,7 @@ handling.)
 
 `wasm/build/dp_kernels.pyx` is a Cython translation of the three backward
 recursions, cross-compiled to a Pyodide wasm32 wheel and embedded alongside the
-Python. The page installs it with micropip, and `hemspolicy._kernels`
+Python. The page installs it with micropip, and `home_energy_optimizer._kernels`
 dispatches to it when it imports.
 
     wasm/build_wheel.sh       # Docker; slow the first time (emsdk + xbuildenv)

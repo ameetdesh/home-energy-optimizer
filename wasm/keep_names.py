@@ -56,7 +56,7 @@ def keep(src: str) -> set[str]:
 
 
 def main() -> None:
-    path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / "admm" / "wasm" / "hemspolicy_bundle.py"
+    path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / "admm" / "wasm" / "admm_bundle.py"
     for name in sorted(keep(path.read_text())):
         print(name)
 

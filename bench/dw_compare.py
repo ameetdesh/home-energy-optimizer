@@ -1,7 +1,7 @@
-"""ADMM coordinator (hemspolicy.coordinate) vs the Dantzig-Wolfe prototype
-(dw/coordinator.py), side by side on identical instances.
+"""ADMM (home_energy_optimizer.coordinate) vs Dantzig-Wolfe
+(home_energy_optimizer.dw.coordinator), side by side on identical instances.
 
-Run:  python3 dw/compare.py [--milp] [--only ABC] [--iters N]
+Run:  python3 bench/dw_compare.py [--milp] [--only ABC] [--iters N]
 
 Every method is scored on ONE number, `extended_objective` (total_objective
 plus the thermal horizon-edge terms every DP already optimises), so the rows
@@ -23,13 +23,13 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
-from dw.coordinator import baseline_objective as baseline_obj, dw_coordinate, extended_objective
+from home_energy_optimizer.dw.coordinator import baseline_objective as baseline_obj, dw_coordinate, extended_objective
 from bench.reference import joint_dp_battery_water_heater
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig, CoordinationConfig, GridLimits, Horizon, HvacConfig,
     SiteConfig, WaterHeaterConfig, coordinate, demo_forecasts,
 )
-from hemspolicy.coordinate import apply_curtailment
+from home_energy_optimizer.coordinate import apply_curtailment
 
 TARIFFS = ("flat", "day_night", "dynamic")
 
@@ -173,7 +173,7 @@ def scenario_ablation(max_iter: int):
 def scenario_variants(max_iter: int):
     """The DW variants side by side: where the tank lives, pool policy, ADMM seed."""
     from dataclasses import replace as _replace
-    from dw.coordinator import DWCoordinator
+    from home_energy_optimizer.dw.coordinator import DWCoordinator
     print("\n== E. DW variants - 2 batteries + tank + HVAC, 7 kW import limit, 24 h ==")
     h = Horizon(dt=0.25, hours=24.0)
     base = SiteConfig(horizon=h, battery=BatteryConfig(capacity_kwh=10.0),
@@ -216,7 +216,7 @@ def scenario_variants(max_iter: int):
 def scenario_sensitivity(max_iter: int):
     """Device response: proposals only, + DP price sensitivity, sensitivity only."""
     from dataclasses import replace as _replace
-    from dw.coordinator import DWCoordinator
+    from home_energy_optimizer.dw.coordinator import DWCoordinator
     print("\n== F. device response - 2 batteries (in master) + tank + HVAC, 7 kW import limit, 24 h ==")
     h = Horizon(dt=0.25, hours=24.0)
     base = SiteConfig(horizon=h, battery=BatteryConfig(capacity_kwh=10.0),

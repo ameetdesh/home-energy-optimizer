@@ -53,10 +53,9 @@ from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))  # admm, and dw: the evcc endpoint plans with Dantzig-Wolfe
 
-from admm import webapi  # noqa: E402
-from hemspolicy.evcc import (  # noqa: E402
+from home_energy_optimizer.admm import webapi  # noqa: E402
+from home_energy_optimizer.evcc import (  # noqa: E402
     ContractError,
     health as evcc_health,
     optimize_charge_schedule,
@@ -133,7 +132,7 @@ def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     url = f"http://127.0.0.1:{port}"
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"hems-policy GUI on {url}   (Ctrl-C to stop)")
+    print(f"home-energy-optimizer GUI on {url}   (Ctrl-C to stop)")
     try:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
         server.serve_forever()

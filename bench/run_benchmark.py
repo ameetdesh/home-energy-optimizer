@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 
 from bench.reference import joint_dp_battery_water_heater, lp_battery
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -36,9 +36,9 @@ from hemspolicy import (
     coordinate,
     demo_forecasts,
 )
-from hemspolicy.coordinate import baseline_solution, net_cost, total_objective
-from hemspolicy.dp_thermal import baseline_water_heater
-from hemspolicy.dp_battery import solve_battery, terminal_price
+from home_energy_optimizer.coordinate import baseline_solution, net_cost, total_objective
+from home_energy_optimizer.dp_thermal import baseline_water_heater
+from home_energy_optimizer.dp_battery import solve_battery, terminal_price
 
 TARIFFS = ("flat", "day_night", "dynamic")
 
@@ -201,7 +201,7 @@ def report(title: str, rows: list[dict], note: str) -> None:
 
 
 def main() -> None:
-    print("hems-policy :: Phase 1 gating experiment")
+    print("home-energy-optimizer :: Phase 1 gating experiment")
     print("Objective is a COST (lower is better); a positive gap means the fast path loses.")
 
     disc = bench_discretisation()

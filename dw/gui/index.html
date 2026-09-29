@@ -138,7 +138,7 @@ canvas{display:block;width:100%;height:170px;cursor:crosshair}
           <select id="pool"><option value="auto">auto</option><option value="active">used + newest</option><option value="full">keep all</option></select></div>
         <div class="row"><label title="How the final blend becomes one runnable plan per device.">Recovery</label>
           <select id="recovery"><option value="milp">best combination</option><option value="maxweight">heaviest plan</option></select></div>
-        <div class="row"><label title="Built-in: dw/lpsolver.py, numpy only. HiGHS: scipy's solver, for cross-checking.">LP solver</label>
+        <div class="row"><label title="Built-in: src/home_energy_optimizer/dw/lpsolver.py, numpy only. HiGHS: scipy's solver, for cross-checking.">LP solver</label>
           <select id="solver"><option value="numpy">built-in</option><option value="highs">HiGHS</option></select></div>
         <div class="row"><label title="Iteration cap. DW stops earlier once its gap closes; ADMM once its residuals are small.">Max iterations</label><output id="o_max_iter"></output><input type="range" id="max_iter" min="1" max="100" value="100"></div>
         <div class="row"><label title="States in each battery DP (actions: half as many). 50 is fast and close; finer grids recover the last few percent of savings, at a cost in solve time.">DP state grid</label><output id="o_grid"></output><input type="range" id="grid" min="50" max="400" step="50" value="50"></div>
@@ -219,7 +219,7 @@ const f3 = v => v == null ? '–' : (+v).toFixed(3);
 const f4 = v => v == null ? '–' : (+v).toFixed(4);
 let DATA = null, VIEW = 'plan';
 /* User-edited inputs: one point per hour (0..H) for import, export and load,
-   interpolated onto the slots by the backend (dw/webapi.py apply_edits).
+   interpolated onto the slots by the backend (src/home_energy_optimizer/dw/webapi.py apply_edits).
    null = use the preset tariff and load. */
 let EDIT = null;
 const EDITABLE_W = 3;   // draggable lines are drawn bold

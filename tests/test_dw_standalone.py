@@ -50,12 +50,12 @@ def test_the_committed_bundle_is_current(fresh):
 def test_the_bundle_carries_no_package_imports(fresh):
     for i, line in enumerate(fresh.splitlines(), 1):
         s = line.lstrip()
-        assert not s.startswith(("from .", "from dw", "from hemspolicy", "import dw", "import hemspolicy")), \
+        assert not s.startswith(("from .", "from dw", "from home_energy_optimizer", "import dw", "import home_energy_optimizer")), \
             f"package import at line {i}: {line!r}"
 
 
 def test_the_bundle_matches_the_package(fresh):
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
     flat = run(fresh, PARAMS)
     pkg = webapi.call("solve", dict(PARAMS))
     assert "error" not in flat, flat.get("error")
@@ -86,7 +86,7 @@ def test_the_shipped_payload_is_obfuscated():
                                    {"method": "admm", "max_iter": 15},        # textbook ADMM
                                    {"method": "admm", "max_iter": 15, "battery_step": "lp"}])
 def test_the_shipped_payload_solves_like_the_package(extra):
-    from dw import webapi
+    from home_energy_optimizer.dw import webapi
     params = {**PARAMS, **extra}
     got = run(payload(), params)
     assert "error" not in got, got.get("error")

@@ -159,7 +159,7 @@ def solve_battery(
 ) -> DeviceSolution:
     """Solve the battery DP and roll out the optimal trajectory.
 
-    `limits`: price the grid limits into the reward (hemspolicy.meter).
+    `limits`: price the grid limits into the reward (home_energy_optimizer.meter).
 
     Sign convention: positive power = CHARGING (drawing from the meter),
     negative = discharging. This matches the POC and is the opposite of

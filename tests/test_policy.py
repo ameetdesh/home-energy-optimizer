@@ -12,7 +12,7 @@ import time
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     HardLimits,
@@ -285,7 +285,7 @@ def test_clamp_fleet_does_not_hand_the_same_headroom_to_everyone():
     Two batteries, 6 kW import limit, 1 kW of house load. Clamping each
     independently tells both that 5 kW is free, so the pair draws 11 kW.
     """
-    from hemspolicy.policy import clamp_fleet
+    from home_energy_optimizer.policy import clamp_fleet
 
     naive = [clamp(5.0, other_load_kw=1.0, limits=HardLimits(max_import_kw=6.0))[0]
              for _ in range(2)]
@@ -299,7 +299,7 @@ def test_clamp_fleet_does_not_hand_the_same_headroom_to_everyone():
 
 
 def test_clamp_fleet_reports_which_unit_was_bound():
-    from hemspolicy.policy import clamp_fleet
+    from home_energy_optimizer.policy import clamp_fleet
 
     _, why = clamp_fleet(
         [("b0", 5.0), ("b1", 5.0)], other_load_kw=1.0,
@@ -310,7 +310,7 @@ def test_clamp_fleet_reports_which_unit_was_bound():
 
 
 def test_clamp_fleet_order_is_the_priority():
-    from hemspolicy.policy import clamp_fleet
+    from home_energy_optimizer.policy import clamp_fleet
 
     a, _ = clamp_fleet([("b0", 5.0), ("b1", 5.0)], 1.0, HardLimits(max_import_kw=6.0))
     b, _ = clamp_fleet([("b1", 5.0), ("b0", 5.0)], 1.0, HardLimits(max_import_kw=6.0))
@@ -319,7 +319,7 @@ def test_clamp_fleet_order_is_the_priority():
 
 
 def test_clamp_fleet_holds_on_export_too():
-    from hemspolicy.policy import clamp_fleet
+    from home_energy_optimizer.policy import clamp_fleet
 
     # Both want to dump 5 kW; PV already exporting 2 kW; export cap 4 kW.
     granted, _ = clamp_fleet(
@@ -330,7 +330,7 @@ def test_clamp_fleet_holds_on_export_too():
 
 
 def test_clamp_fleet_applies_per_unit_limits_separately():
-    from hemspolicy.policy import clamp_fleet
+    from home_energy_optimizer.policy import clamp_fleet
 
     granted, why = clamp_fleet(
         [("small", 5.0), ("big", 5.0)], other_load_kw=0.0,
@@ -343,7 +343,7 @@ def test_clamp_fleet_applies_per_unit_limits_separately():
 
 
 def test_clamp_fleet_is_feasible_for_any_fleet_size():
-    from hemspolicy.policy import clamp_fleet
+    from home_energy_optimizer.policy import clamp_fleet
 
     for n in (1, 3, 8):
         granted, _ = clamp_fleet(
@@ -375,7 +375,7 @@ def test_independent_replies_to_one_measurement_overshoot(snap):
     deviation, so the fleet covers it three times and drives the meter past
     zero in the opposite direction.
     """
-    from hemspolicy.policy import fleet_action
+    from home_energy_optimizer.policy import fleet_action
 
     t, soe = 40, 5.0
     spike = float(snap.dp_load[t]) + 4.0
@@ -392,7 +392,7 @@ def test_independent_replies_to_one_measurement_overshoot(snap):
 
 def test_fleet_response_is_about_one_units_worth_regardless_of_size(snap):
     """A deviation should be covered once, not once per battery."""
-    from hemspolicy.policy import fleet_action
+    from home_energy_optimizer.policy import fleet_action
 
     t, soe = 40, 5.0
     spike = float(snap.dp_load[t]) + 4.0
@@ -408,7 +408,7 @@ def test_fleet_response_is_about_one_units_worth_regardless_of_size(snap):
 
 def test_fleet_action_allocates_asymmetrically_by_priority(snap):
     """Earlier units absorb more, because later ones see less residual."""
-    from hemspolicy.policy import fleet_action
+    from home_energy_optimizer.policy import fleet_action
 
     t, soe = 40, 5.0
     spike = float(snap.dp_load[t]) + 4.0
@@ -418,7 +418,7 @@ def test_fleet_action_allocates_asymmetrically_by_priority(snap):
 
 
 def test_fleet_action_respects_its_round_budget(snap):
-    from hemspolicy.policy import fleet_action
+    from home_energy_optimizer.policy import fleet_action
 
     _, sweeps = fleet_action([("b0", snap, 5.0)], 40, 0.0, rounds=3)
     assert sweeps <= 3
@@ -427,7 +427,7 @@ def test_fleet_action_respects_its_round_budget(snap):
 def test_fleet_action_matches_single_action_for_one_unit(snap):
     """With one unit there is nothing to coordinate; the fixed point is the
     ordinary reply."""
-    from hemspolicy.policy import fleet_action
+    from home_energy_optimizer.policy import fleet_action
 
     t, soe = 40, 5.0
     spike = float(snap.dp_load[t]) + 4.0
@@ -436,7 +436,7 @@ def test_fleet_action_matches_single_action_for_one_unit(snap):
 
 
 def test_persistent_deviation_is_flagged_for_replanning(snap):
-    from hemspolicy.policy import deviation_is_persistent
+    from home_energy_optimizer.policy import deviation_is_persistent
 
     t = 40
     assert not deviation_is_persistent(snap, t, float(snap.dp_load[t]) + 0.1)

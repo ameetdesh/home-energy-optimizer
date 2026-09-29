@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Rebuild the ADMM app's in-browser testbed from src/hemspolicy and admm/.
+# Rebuild the ADMM app's in-browser testbed from src/home_energy_optimizer and admm/.
 #
 #   admm/wasm/build.sh            # bundle -> page -> single-file standalone
 #   admm/wasm/build.sh --serve    # ...then serve it on :8765
@@ -11,9 +11,9 @@
 # instead of numpy. Without a wheel everything still works, just slower.
 #
 # Three steps, each runnable on its own:
-#   make_bundle.py   src/hemspolicy + admm    -> hemspolicy_bundle.py
-#   make_page.py     admm/gui/index.html      -> hems_policy.html
-#   make_standalone  page + bundle            -> hems_policy_standalone.html
+#   make_bundle.py   src/home_energy_optimizer + admm    -> admm_bundle.py
+#   make_page.py     admm/gui/index.html      -> admm_page.html
+#   make_standalone  page + bundle            -> admm_standalone.html
 #
 # The last step is tools/make_standalone.py, which was written for an earlier
 # proof of concept; this only supplies its two inputs.
@@ -36,7 +36,7 @@ if [ -x "$STANDALONE" ]; then
   # keep_names.py lists them; everything else (72 of 73 module-level
   # functions, i.e. the solver internals) still gets obfuscated.
   KEEP=()
-  while read -r n; do KEEP+=(--keep "$n"); done < <("$PY" "$ROOT/wasm/keep_names.py" "$HERE/hemspolicy_bundle.py")
+  while read -r n; do KEEP+=(--keep "$n"); done < <("$PY" "$ROOT/wasm/keep_names.py" "$HERE/admm_bundle.py")
   echo "[keep] protecting ${#KEEP[@]} class members from renaming"
 
   WHL=$(ls "$ROOT"/wasm/build/dist/*pyodide*wasm32.whl 2>/dev/null | head -1)
@@ -49,16 +49,16 @@ if [ -x "$STANDALONE" ]; then
   fi
 
   "$STANDALONE" "${WHEEL_ARG[@]}" --keep _api "${KEEP[@]}" \
-      --html "$HERE/hems_policy.html" \
-      --py   "$HERE/hemspolicy_bundle.py" \
-      --out  "$HERE/hems_policy_standalone.html"
+      --html "$HERE/admm_page.html" \
+      --py   "$HERE/admm_bundle.py" \
+      --out  "$HERE/admm_standalone.html"
 else
   echo "!! make_standalone.py not found at $STANDALONE" >&2
   echo "   set MAKE_STANDALONE=/path/to/make_standalone.py to inline the payload." >&2
-  echo "   hems_policy.html still works if you serve this directory." >&2
+  echo "   admm_page.html still works if you serve this directory." >&2
 fi
 
 if [ "${1:-}" = "--serve" ]; then
-  echo "http://127.0.0.1:8765/hems_policy_standalone.html"
+  echo "http://127.0.0.1:8765/admm_standalone.html"
   exec "$PY" -m http.server -d "$HERE" 8765
 fi

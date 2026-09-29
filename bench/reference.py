@@ -23,15 +23,15 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import linprog
 
-from hemspolicy.dp_battery import terminal_price
-from hemspolicy.dp_thermal import (
+from home_energy_optimizer.dp_battery import terminal_price
+from home_energy_optimizer.dp_thermal import (
     WATER_HEATER_ACTIONS,
     _max_duty,
     _usable_outflow,
     wh_discomfort,
 )
-from hemspolicy.interp import interp_uniform
-from hemspolicy.types import BatteryConfig, Horizon, WaterHeaterConfig
+from home_energy_optimizer.interp import interp_uniform
+from home_energy_optimizer.types import BatteryConfig, Horizon, WaterHeaterConfig
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +197,7 @@ def joint_dp_battery_water_heater(
         q_out = _usable_outflow(T, wh, hot_water_demand[step], dt)
 
         # Battery transition (depends on s only)
-        # Bounds carry the efficiencies, matching hemspolicy.dp_battery: without
+        # Bounds carry the efficiencies, matching home_energy_optimizer.dp_battery: without
         # them a nearly empty store discharges past zero and the projection
         # silently creates energy, which would make this "exact" reference
         # optimistic by the same amount as the solver it is checking.
@@ -210,7 +210,7 @@ def joint_dp_battery_water_heater(
 
         for wi, wa in enumerate(WATER_HEATER_ACTIONS):
             # Tank transition (depends on t_idx only). Uses the SAME bounded
-            # outflow and cut-out-limited duty as hemspolicy.dp_thermal - a
+            # outflow and cut-out-limited duty as home_energy_optimizer.dp_thermal - a
             # reference solving different physics is not a reference.
             duty = np.minimum(wa, _max_duty(T, wh, q_out, dt))
             dT = (wh.power_kw * duty - q_out) / C * dt

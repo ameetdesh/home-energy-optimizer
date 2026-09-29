@@ -40,10 +40,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from dw.coordinator import Device, DWCoordinator
-from hemspolicy.coordinate import apply_curtailment, breach_price
-from hemspolicy.dp_thermal import baseline_hvac, baseline_water_heater
-from hemspolicy.types import SiteConfig
+from home_energy_optimizer.dw.coordinator import Device, DWCoordinator
+from home_energy_optimizer.coordinate import apply_curtailment, breach_price
+from home_energy_optimizer.dp_thermal import baseline_hvac, baseline_water_heater
+from home_energy_optimizer.types import SiteConfig
 
 
 def _tariff_cost(co: DWCoordinator, z: np.ndarray) -> np.ndarray:

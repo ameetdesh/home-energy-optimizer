@@ -17,10 +17,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from dw.coordinator import Column, DWCoordinator  # noqa: E402
-from hemspolicy import BatteryConfig, GridLimits, Horizon, SiteConfig, demo_forecasts  # noqa: E402
-from hemspolicy.coordinate import device_sell_price  # noqa: E402
-from hemspolicy.dp_battery import solve_battery  # noqa: E402
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator  # noqa: E402
+from home_energy_optimizer import BatteryConfig, GridLimits, Horizon, SiteConfig, demo_forecasts  # noqa: E402
+from home_energy_optimizer.coordinate import device_sell_price  # noqa: E402
+from home_energy_optimizer.dp_battery import solve_battery  # noqa: E402
 
 
 def main() -> None:

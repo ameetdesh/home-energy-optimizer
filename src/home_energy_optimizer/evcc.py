@@ -5,7 +5,7 @@ environment variable (`core/site_optimizer.go:341`):
 
     OPTIMIZER_URI=http://127.0.0.1:8765 evcc
 
-so implementing this contract makes `hems-policy` a drop-in replacement for
+so implementing this contract makes `home-energy-optimizer` a drop-in replacement for
 `https://optimizer.evcc.io` with **zero changes to evcc**. No fork, no patch.
 
 The contract is transcribed from the generated client in
@@ -27,7 +27,7 @@ Three things to get right, and all three are easy to get wrong:
   this package uses one signed series with positive = charging.
 
 **Which coordinator.** Requests are planned by Dantzig-Wolfe by default
-(`hemspolicy.plan`). A home battery then sits in the master LP exactly, and an
+(`home_energy_optimizer.plan`). A home battery then sits in the master LP exactly, and an
 EV loadpoint - which carries p_demand, s_goal and a c_min floor - bids charging
 plans from its DP, which honours all three. Grid limits become rows of the
 master: met, or - only when physically unavoidable - breached at a fixed
@@ -371,4 +371,4 @@ def health() -> dict:
     """`GET /optimize/health`."""
     from . import __version__
 
-    return {"status": "ok", "message": f"hems-policy {__version__}"}
+    return {"status": "ok", "message": f"home-energy-optimizer {__version__}"}

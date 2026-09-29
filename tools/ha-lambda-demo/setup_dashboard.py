@@ -1,4 +1,4 @@
-"""Create the hems-policy dashboard in a running Home Assistant.
+"""Create the home-energy-optimizer dashboard in a running Home Assistant.
 
     HA_TOKEN=<token> python tools/ha-lambda-demo/setup_dashboard.py
 
@@ -131,17 +131,17 @@ async def main() -> None:
                 if r.get("id") == i:
                     return r
 
-        r = await call({"type": "lovelace/dashboards/create", "url_path": "hems-policy",
-                        "title": "hems-policy", "require_admin": False,
+        r = await call({"type": "lovelace/dashboards/create", "url_path": "home-energy-optimizer",
+                        "title": "home-energy-optimizer", "require_admin": False,
                         "show_in_sidebar": True, "mode": "storage", "icon": "mdi:flash"})
         if not r.get("success"):
             print("dashboard exists already:", r.get("error", {}).get("message", ""))
 
-        r = await call({"type": "lovelace/config/save", "url_path": "hems-policy",
+        r = await call({"type": "lovelace/config/save", "url_path": "home-energy-optimizer",
                         "config": CONFIG})
         if not r.get("success"):
             raise SystemExit(f"save failed: {r.get('error')}")
-        print(f"dashboard ready at {url}/hems-policy")
+        print(f"dashboard ready at {url}/home-energy-optimizer")
 
 
 if __name__ == "__main__":

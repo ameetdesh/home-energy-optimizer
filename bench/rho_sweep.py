@@ -31,7 +31,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src"), str(ROOT / "bench")]
 
-from dw.webapi import _site_fc  # noqa: E402
+from home_energy_optimizer.dw.webapi import _site_fc  # noqa: E402
 from prior_art import build, pmp, relaxed_objective  # noqa: E402
 
 SITES = [(t, nb, lim, 5, 10) for t, nb, lim in itertools.product(("dynamic", "day_night", "flat"), (1, 3), (7, None))]

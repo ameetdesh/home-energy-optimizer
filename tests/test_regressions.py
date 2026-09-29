@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hemspolicy import (
+from home_energy_optimizer import (
     BatteryConfig,
     CoordinationConfig,
     Horizon,
@@ -214,7 +214,7 @@ def test_negative_export_price_does_not_buy_phantom_battery_cycles():
 
     import numpy as np
 
-    from hemspolicy import (BatteryConfig, CoordinationConfig, GridLimits,
+    from home_energy_optimizer import (BatteryConfig, CoordinationConfig, GridLimits,
                             Horizon, SiteConfig, coordinate, demo_forecasts)
 
     h = Horizon(dt=0.25, hours=24.0)
@@ -251,8 +251,8 @@ def test_device_sell_price_is_a_no_op_without_curtailment():
     must keep seeing it."""
     import numpy as np
 
-    from hemspolicy import GridLimits
-    from hemspolicy.coordinate import device_sell_price
+    from home_energy_optimizer import GridLimits
+    from home_energy_optimizer.coordinate import device_sell_price
 
     sell = np.array([-0.2, 0.0, 0.3])
     off = GridLimits(allow_curtailment=False)

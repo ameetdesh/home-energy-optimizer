@@ -15,17 +15,17 @@ from dataclasses import replace
 
 import numpy as np
 
-from dw.attribution import ledger
-from dw.coordinator import Column, DWCoordinator, baseline_objective
-from hemspolicy.coordinate import apply_curtailment, baseline_solution, net_cost
-from hemspolicy.profiles import demo_forecasts
-from hemspolicy.types import SiteConfig
-from admm.webapi import build_site
+from home_energy_optimizer.dw.attribution import ledger
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, baseline_objective
+from home_energy_optimizer.coordinate import apply_curtailment, baseline_solution, net_cost
+from home_energy_optimizer.profiles import demo_forecasts
+from home_energy_optimizer.types import SiteConfig
+from home_energy_optimizer.admm.webapi import build_site
 
 
 def _dark(fc):
     """The same forecasts with no PV: the devices' plan before solar arrives,
-    which the ledger needs (dw/attribution.py)."""
+    which the ledger needs (src/home_energy_optimizer/dw/attribution.py)."""
     return replace(fc, solar=np.zeros_like(fc.solar))
 
 
@@ -52,7 +52,7 @@ def ledger_route(p: dict) -> dict:
 
 
 def _ledger_json(co, plan, co_dark, plan_dark) -> dict:
-    """Who saves what (dw/attribution.py), rounded for the page."""
+    """Who saves what (src/home_energy_optimizer/dw/attribution.py), rounded for the page."""
     L = ledger(co, plan, co_dark, plan_dark)
     return {"rows": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()} for r in L["rows"]],
             "totals": {k: round(v, 4) for k, v in L["totals"].items()}}
@@ -70,7 +70,7 @@ def _view(co: DWCoordinator, fc, snap: dict, batt_keys: list[str]) -> dict:
     net, curtail = apply_curtailment(net, fc.solar, fc.sell, co.cfg.grid)
     view = {
         # per device, per hour: cost of being asked to consume one step more /
-        # less, re-planning after (dw/sensitivity.py); None where inadmissible
+        # less, re-planning after (src/home_energy_optimizer/dw/sensitivity.py); None where inadmissible
         "flex": {k: {d: [None if v is None else round(v, 5) for v in arr] for d, arr in f.items()}
                  for k, f in snap.get("flex", {}).items()},
         "net_grid": _series(net),
@@ -354,10 +354,10 @@ def solve_admm(p: dict, progress=None) -> dict:
     `chunk`: iterations per call; `resume`: continue the run with this
     `_progress_id`; `pause`: return the best plan so far and keep it.
     """
-    from hemspolicy.coordinate import coordinate
-    from admm.coordinator import ExchangeRun
-    from hemspolicy.policy import PolicySnapshot, marginal_value
-    from hemspolicy.types import CoordinationConfig
+    from home_energy_optimizer.coordinate import coordinate
+    from home_energy_optimizer.admm.coordinator import ExchangeRun
+    from home_energy_optimizer.policy import PolicySnapshot, marginal_value
+    from home_energy_optimizer.types import CoordinationConfig
 
     site, fc, _ = _site_fc(p)
     rounds = int(p.get("max_iter", 100))
