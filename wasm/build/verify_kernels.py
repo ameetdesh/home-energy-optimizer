@@ -10,8 +10,12 @@ Run after building the extension in place:
 
     cd wasm/build
     python3 -m venv .venv && ./.venv/bin/pip install setuptools cython numpy
-    ./.venv/bin/python setup.py build_ext --inplace
+    CFLAGS=-ffp-contract=off ./.venv/bin/python setup.py build_ext --inplace
     ./.venv/bin/python verify_kernels.py
+
+The flag matters natively: arm64 and x86 compilers fuse a*b + c into one
+rounding, which numpy does not do and wasm32 cannot, so a native build without
+it differs from the reference in the last bit.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from home_energy_optimizer import (  # noqa: E402
     BatteryConfig, Horizon, HvacConfig, WaterHeaterConfig,
     solve_battery, solve_hvac, solve_water_heater,
 )
-from home_energy_optimizer import _kernels  # noqa: E402
+from home_energy_optimizer import _kernels, dp_battery, dp_thermal  # noqa: E402
 from home_energy_optimizer.profiles import (  # noqa: E402
     day_night_tariff, dynamic_tariff, flat_tariff,
     hot_water_demand_profile, outdoor_temp_profile,
@@ -40,16 +44,17 @@ if not _kernels.HAVE_KERNELS:
 
 
 def without_kernels():
-    """Force the Python path by making the dispatch report failure."""
-    saved = (_kernels.kernel_battery, _kernels.kernel_water_heater, _kernels.kernel_hvac)
-    _kernels.kernel_battery = lambda *a: False
-    _kernels.kernel_water_heater = lambda *a: False
-    _kernels.kernel_hvac = lambda *a: False
+    """Force the Python path by making the dispatch report failure - in the
+    modules that call it, which hold their own reference to each function."""
+    saved = (dp_battery.kernel_battery, dp_thermal.kernel_water_heater, dp_thermal.kernel_hvac)
+    dp_battery.kernel_battery = lambda *a: False
+    dp_thermal.kernel_water_heater = lambda *a: False
+    dp_thermal.kernel_hvac = lambda *a: False
     return saved
 
 
 def restore(saved):
-    (_kernels.kernel_battery, _kernels.kernel_water_heater, _kernels.kernel_hvac) = saved
+    (dp_battery.kernel_battery, dp_thermal.kernel_water_heater, dp_thermal.kernel_hvac) = saved
 
 
 def compare(name, ref, got) -> bool:
@@ -106,6 +111,20 @@ def main() -> None:
             restore(saved)
             got = solve_hvac(HvacConfig(), h, buy, sell, od, load)
             ok &= compare(f"hvac(mean={mean:g})", ref, got)
+
+        # A comfort band that changes hour by hour (as dragged in the DW app)
+        # reaches the kernel one run of equal-band slots at a time.
+        pts = np.arange(n + 1) * h.dt
+        hours = np.arange(25)
+        banded = HvacConfig(
+            comfort_low_profile=tuple(np.interp(pts, hours, 21.0 + 2.0 * (hours % 3 == 0))),
+            comfort_high_profile=tuple(np.interp(pts, hours, 25.0 + 2.0 * (hours >= 12))))
+        od = outdoor_temp_profile(h, mean_c=28.0)
+        saved = without_kernels()
+        ref = solve_hvac(banded, h, buy, sell, od, load)
+        restore(saved)
+        got = solve_hvac(banded, h, buy, sell, od, load)
+        ok &= compare("hvac(hourly band)", ref, got)
 
     print("\nALL IDENTICAL" if ok else "\nMISMATCHES FOUND")
     sys.exit(0 if ok else 1)

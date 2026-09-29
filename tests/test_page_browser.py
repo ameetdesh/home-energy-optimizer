@@ -73,6 +73,16 @@ def test_switching_coordinator_redraws_the_charts(flow):
         assert s["dw again"][chart] != s["admm, warm start"][chart], chart
 
 
+def test_dragging_the_comfort_band_replans_against_it(flow):
+    s = {x["tag"]: x for x in flow["steps"]}
+    dw, dragged, reset = s["dw"], s["band dragged"], s["band reset"]
+    assert dw["band"].endswith("drag the dots") and dw["low7"] == 22.0
+    assert dragged["band"] == "custom" and dragged["low7"] > 22.0    # the backend planned against the dragged floor
+    assert dragged["room"] != dw["room"]
+    assert reset["band"] == dw["band"] and reset["low7"] == 22.0
+    assert reset["room"] == dw["room"]
+
+
 def test_clicking_an_iteration_redraws_the_plan(flow):
     s = {x["tag"]: x for x in flow["steps"]}
     assert s["admm, an iteration clicked"]["power"] != s["admm"]["power"]

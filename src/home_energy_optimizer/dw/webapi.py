@@ -132,6 +132,36 @@ def apply_edits(fc, horizon, p: dict):
     return replace(fc, buy=buy, sell=sell, load=load, hot_water_demand=draw)
 
 
+def apply_band(site: SiteConfig, p: dict) -> SiteConfig:
+    """Replace the room's flat comfort band with the one dragged in the UI.
+
+    As for the prices: one low and one high point per hour (`room_low_h`,
+    `room_high_h`, at hours 0, 1, ..., H), interpolated here onto the n + 1
+    points of the room trajectory (HvacConfig.comfort_band). Each point's pair
+    is sorted, as build_site sorts the flat band's.
+    """
+    hv = site.hvac
+    if hv is None or not (p.get("room_low_h") or p.get("room_high_h")):
+        return site
+    xs = np.arange(site.horizon.steps + 1) * site.horizon.dt
+    def expand(key, flat):
+        v = p.get(key)
+        return np.full(xs.size, flat) if not v else np.interp(xs, np.arange(len(v)), np.asarray(v, dtype=float))
+    low, high = expand("room_low_h", hv.t_comfort_low), expand("room_high_h", hv.t_comfort_high)
+    low, high = np.minimum(low, high), np.maximum(low, high)
+    return replace(site, hvac=replace(hv, comfort_low_profile=tuple(low.tolist()),
+                                      comfort_high_profile=tuple(high.tolist())))
+
+
+def _comfort(site: SiteConfig) -> dict:
+    """The thresholds the Temperatures chart draws: the tank's setpoint, and
+    the room's band at each point of its trajectory."""
+    low, high = site.hvac.comfort_band(site.horizon.steps) if site.hvac else (None, None)
+    return {"tank": site.water_heater.t_comfort if site.water_heater else None,
+            "room_low": None if low is None else _series(low),
+            "room_high": None if high is None else _series(high)}
+
+
 # Solve progress for the served UI, which polls it while a solve runs:
 # request id -> [iteration, max_iter]; iteration -1 means "finishing".
 # (The in-browser page is pushed the same numbers by its worker instead.)
@@ -165,6 +195,7 @@ def _site_fc(p: dict):
     if site.hvac is not None and hvac_levels != 2:
         hv = replace(site.hvac, n_duty_levels=hvac_levels)
         site = replace(site, hvac=replace(hv, n_states=hv.states_for_duty_levels(site.horizon.dt)))
+    site = apply_band(site, p)
     fc = demo_forecasts(site.horizon, tariff=p.get("tariff", "dynamic"),
                         solar_peak_kw=float(p.get("solar_peak", 5.0)))
     fc = apply_edits(fc, site.horizon, p)
@@ -269,11 +300,7 @@ def solve(p: dict, progress=None) -> dict:
         "battery_floors": [b.soe_floor_kwh for b in site.battery_list],
         "grid": {"max_import_kw": site.grid.max_import_kw,
                  "max_export_kw": site.grid.max_export_kw},
-        "comfort": {
-            "tank": site.water_heater.t_comfort if site.water_heater else None,
-            "room_low": site.hvac.t_comfort_low if site.hvac else None,
-            "room_high": site.hvac.t_comfort_high if site.hvac else None,
-        },
+        "comfort": _comfort(site),
         "pool": pool,
         "ledger": ledger_route(p)["ledger"] if p.get("ledger") else None,
         "summary": {
@@ -447,11 +474,7 @@ def solve_admm(p: dict, progress=None) -> dict:
         "battery_capacities": [b.capacity_kwh for b in site.battery_list],
         "battery_floors": [b.soe_floor_kwh for b in site.battery_list],
         "grid": {"max_import_kw": site.grid.max_import_kw, "max_export_kw": site.grid.max_export_kw},
-        "comfort": {
-            "tank": site.water_heater.t_comfort if site.water_heater else None,
-            "room_low": site.hvac.t_comfort_low if site.hvac else None,
-            "room_high": site.hvac.t_comfort_high if site.hvac else None,
-        },
+        "comfort": _comfort(site),
         "pool": {},
         "ledger": ledger_route(p)["ledger"] if p.get("ledger") else None,
         "summary": {

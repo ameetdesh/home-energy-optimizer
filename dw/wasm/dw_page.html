@@ -118,8 +118,8 @@ canvas{display:block;width:100%;height:170px;cursor:crosshair}
         <div class="row" title="Reserve: the plan never draws a battery below this share of its capacity (backup, battery health). A battery that starts below it is not discharged further."><label>Min SoE</label><output id="o_soe_min"></output><input type="range" id="soe_min" min="0" max="50" step="5" value="0"></div>
         <div class="row"><label>Efficiency (one way)</label><output id="o_eta"></output><input type="range" id="eta" min="0.5" max="1" step="0.01" value="0.9"></div>
         <div class="grp">Comfort</div>
-        <div class="row" title="Below this the room costs discomfort (priced per kelvin-hour)."><label>Room comfort low</label><output id="o_room_low"></output><input type="range" id="room_low" min="16" max="26" step="0.5" value="22"></div>
-        <div class="row" title="Above this the room costs discomfort (priced per kelvin-hour)."><label>Room comfort high</label><output id="o_room_high"></output><input type="range" id="room_high" min="20" max="30" step="0.5" value="26"></div>
+        <div class="row" id="bandRow" title="The room's comfort band: drag its dots on the Room chart, one low and one high point per hour. Outside the band the room costs discomfort (priced per kelvin-hour). Changing the horizon resets it."><label>Room comfort</label>
+          <span><span id="bandState">22–26 °C · drag the dots</span> <a href="#" id="bandReset" style="display:none">reset</a></span></div>
         <div class="row" title="Below this the tank costs discomfort. The element cuts out at 75 °C."><label>Tank setpoint</label><output id="o_tank_comfort"></output><input type="range" id="tank_comfort" min="40" max="70" step="1" value="55"></div>
         <div class="grp">Solver</div>
         <div class="row admm-only" title="ADMM's rho: how strongly each device is held near its last plan while the price moves. Too small and plans chase the price; too large and they barely move. 0.03-0.1 works well."><label>ρ</label><output id="o_xrho"></output><input type="range" id="xrho" min="0.01" max="1" step="0.01" value="0.1"></div>
@@ -203,7 +203,8 @@ canvas{display:block;width:100%;height:170px;cursor:crosshair}
       <div class="status" style="margin-top:6px" title="Baseline: no PV, thermostats on, batteries idle. Each device is first reimbursed its private-cost change. The saving is then shared between solar and the devices by averaging two orders of arrival: PV first (solar earns what PV saves on its own; the devices share the coordination saving) and devices first (the devices share what a plan with no PV saves; solar earns the rest). Within the devices, each kWh a device shifts is priced at the average tariff the house meets as all devices move together (Aumann–Shapley). This is an Owen value; it tracks the full Shapley value closely without re-solving every coalition, at the cost of one extra plan with no PV. The household load does not move, so its bill does not change. See docs/theory.tex.">Rule: reimburse each device's private-cost change, then share the saving between solar and the devices over both orders of arrival, and among the devices by Aumann–Shapley. Hover for detail.</div>
     </details>
     <div class="card" id="chSoc"><h2>Battery energy <span class="note">kWh</span></h2><div class="legend"></div><canvas></canvas></div>
-    <div class="card" id="chTemp"><h2>Temperatures <span class="note">°C</span></h2><div class="legend"></div><canvas></canvas></div>
+    <div class="card" id="chTank"><h2>Hot-water tank <span class="note">°C</span></h2><div class="legend"></div><canvas></canvas></div>
+    <div class="card" id="chRoom"><h2>Room <span class="note">°C · drag the dots to edit the comfort band</span></h2><div class="legend"></div><canvas></canvas></div>
     <div class="card" id="chFlex" style="display:none"><h2>Flexibility <span class="note">cost of one step more (+) or less (−), per hour</span></h2>
       <div class="legend"></div><canvas style="height:140px"></canvas></div>
   </div>
@@ -229,11 +230,21 @@ function beginEdit(){ if(!EDIT) EDIT = {buy: hourly(DATA.buy, DATA.dt, DATA.hour
   load: hourly(DATA.load, DATA.dt, DATA.hours), draw: hourly(DATA.hot_water, DATA.dt, DATA.hours)}; }
 function syncEditUi(){ $('#editState').textContent = EDIT ? 'custom' : 'preset · drag the dots'; $('#editReset').style.display = EDIT ? '' : 'none'; }
 function resetEdit(){ EDIT = null; syncEditUi(); }
+/* The room's comfort band, dragged on the Room chart: one low and one
+   high point per hour, interpolated by the backend (dw/webapi.py apply_band).
+   null = the flat preset band. */
+let BAND = null;
+const ROOM_MIN = 19, ROOM_MAX = 30;   // °C; inside the HVAC model's temperature grid (18-38)
+const BAND_PRESET = $('#bandState').textContent;
+function beginBand(){ if(!BAND) BAND = {low: hourly(DATA.comfort.room_low, DATA.dt, DATA.hours),
+  high: hourly(DATA.comfort.room_high, DATA.dt, DATA.hours)}; }
+function syncBandUi(){ $('#bandState').textContent = BAND ? 'custom' : BAND_PRESET; $('#bandReset').style.display = BAND ? '' : 'none'; }
+function resetBand(){ BAND = null; syncBandUi(); }
 
 /* ---------------------------------------------------------------- controls */
 const devs = {battery:true, wh:true, hvac:true};
 const opts = {battery_in_master:true, allow_curtailment:true, smoothing:true, heuristic_columns:true, polish:true, seed_admm:false, rho_adapt:true};
-const fmt = {n_batteries:v=>v, batt_capacity:v=>v+' kWh', soe_min:v=>+v?v+' %':'off', room_low:v=>(+v).toFixed(1)+' °C', room_high:v=>(+v).toFixed(1)+' °C', tank_comfort:v=>v+' °C', solar_peak:v=>v+' kW',
+const fmt = {n_batteries:v=>v, batt_capacity:v=>v+' kWh', soe_min:v=>+v?v+' %':'off', tank_comfort:v=>v+' °C', solar_peak:v=>v+' kW',
   max_import_kw:v=>+v?v+' kW':'off', max_export_kw:v=>+v?v+' kW':'off', hours:v=>v+' h',
   max_iter:v=>v, batt_charge:v=>v+' kW', eta:v=>(+v).toFixed(2), grid:v=>v, xrho:v=>(+v).toFixed(2)};
 Object.keys(fmt).forEach(id => { const el = $('#'+id), o = $('#o_'+id);
@@ -253,8 +264,9 @@ function syncMethod(){
   ['battery_in_master', 'smoothing', 'heuristic_columns', 'seed_admm'].forEach(o => {
     const c = document.querySelector(`[data-opt="${o}"]`); if(c) c.style.display = admm ? 'none' : ''; });
 }
-$('#hours').addEventListener('change', resetEdit, true);
+$('#hours').addEventListener('change', () => { resetEdit(); resetBand(); }, true);
 $('#editReset').onclick = e => { e.preventDefault(); resetEdit(); solve(); };
+$('#bandReset').onclick = e => { e.preventDefault(); resetBand(); solve(); };
 document.querySelectorAll('#devChips .chip').forEach(el => el.onclick = () => {
   devs[el.dataset.dev] = !devs[el.dataset.dev]; el.classList.toggle('on', devs[el.dataset.dev]); solve(); });
 document.querySelectorAll('#optChips .chip').forEach(el => el.onclick = () => {
@@ -265,14 +277,15 @@ $('#solve').onclick = () => solve(!SOLVING && PAUSED_ID !== null, true);
 function params(){
   const v = id => $('#'+id).value;
   syncLabels();
-  return {tariff:v('tariff'), n_batteries:+v('n_batteries'), batt_capacity:+v('batt_capacity'), soe_min:+v('soe_min'), room_low:+v('room_low'), room_high:+v('room_high'), tank_comfort:+v('tank_comfort'),
+  return {tariff:v('tariff'), n_batteries:+v('n_batteries'), batt_capacity:+v('batt_capacity'), soe_min:+v('soe_min'), tank_comfort:+v('tank_comfort'),
     solar_peak:+v('solar_peak'), max_import_kw:+v('max_import_kw')||null, max_export_kw:+v('max_export_kw')||null,
     hours:+v('hours'), max_iter:+v('max_iter'), batt_charge:+v('batt_charge'), batt_discharge:+v('batt_charge'),
     eta:+v('eta'), grid:+v('grid'), tank_levels: v('tank_levels')==='lp' ? 'lp' : +v('tank_levels'), hvac_levels:+v('hvac_levels'),
     response:v('response'), pool:v('pool'), recovery:v('recovery'), solver:v('solver'),
     method:v('method'), xrho:+v('xrho'), battery_step:v('batt_step'), warm_start:v('warm_start') === 'warm',
     enable_battery: devs.battery && +v('batt_capacity') > 0, enable_wh: devs.wh, enable_hvac: devs.hvac, ...opts,
-    ...(EDIT ? {buy_h: EDIT.buy, sell_h: EDIT.sell, load_h: EDIT.load, draw_h: EDIT.draw} : {})};
+    ...(EDIT ? {buy_h: EDIT.buy, sell_h: EDIT.sell, load_h: EDIT.load, draw_h: EDIT.draw} : {}),
+    ...(BAND ? {room_low_h: BAND.low, room_high_h: BAND.high} : {})};
 }
 
 /* Every backend call goes through here. Served by dw/gui/server.py it is HTTP;
@@ -377,7 +390,7 @@ function chart(sel, spec){
   spec.series.forEach(s => {
     const el = document.createElement('span');
     const sw = s.dash ? `background:repeating-linear-gradient(90deg,${s.color} 0 5px,transparent 5px 8px)`
-             : s.band ? `background:${s.color};opacity:.35;height:8px;vertical-align:0` : `background:${s.color}`;
+             : s.band ? `background:${s.color}59;height:8px;vertical-align:0` : `background:${s.color}`;
     const drag = (spec.handles || []).some(hd => hd.id === s.id);
     el.innerHTML = drag ? `<i class="drag" style="${sw};--knob:${s.color}"></i>${s.label}` : `<i style="${sw}"></i>${s.label}`;
     if(s.hint || drag) el.title = (s.hint || '') + (drag ? ' (drag the dots on the chart)' : '');
@@ -760,17 +773,34 @@ function renderCharts(){
     ...keys.flatMap((k, i) => floors[i] > 0 ? [{id:'floor:' + k, label:`reserve ${i + 1}`, color:bcol(i), dash:true, width:1.2,
       data:Array(n).fill(floors[i]), hint:`Min SoE: the plan keeps battery ${i + 1} at or above ${f3(floors[i])} kWh.`}] : [])]});
 
-  // temperatures: tank, room, their comfort thresholds, outdoor
-  const c = DATA.comfort, t = [];
-  if(dev('water_heater')){
-    t.push({id:'tp:tank', label:'tank', color:css('--c-tank'), data:dev('water_heater').trajectory.slice(0, n), width:2.2, hint:'Tank water temperature.'});
-    t.push({id:'tp:set', label:'tank setpoint', color:css('--c-tank'), dash:true, width:1, data:Array(n).fill(c.tank), hint:'Below this the tank costs comfort.'}); }
-  if(dev('hvac')){
-    t.push({id:'tp:room', label:'room', color:css('--c-hvac'), data:dev('hvac').trajectory.slice(0, n), width:2.2, hint:'Room temperature.'});
-    t.push({id:'tp:band', label:'comfort band', color:css('--c-hvac'), data:Array(n).fill(c.room_low),
-      band:[Array(n).fill(c.room_low), Array(n).fill(c.room_high)], hint:`Room comfort band ${c.room_low}–${c.room_high} °C; outside it costs comfort.`}); }
-  t.push({id:'tp:out', label:'outdoor', color:css('--c-out'), data:DATA.outdoor_temp, dash:true, width:1.2, hint:'Outdoor temperature forecast.'});
-  chart('#chTemp', {...base, series:t});
+  // temperatures, on two charts so the room's few kelvin are not squeezed
+  // under the tank's range: the tank against its setpoint; the room against
+  // its comfort band (editable, one low and one high dot per hour) and outdoors
+  const c = DATA.comfort, roomOn = !!dev('hvac');
+  $('#chTank').style.display = tankOn ? '' : 'none';
+  if(tankOn) chart('#chTank', {...base, series:[
+    {id:'tp:tank', label:'tank', color:css('--c-tank'), data:dev('water_heater').trajectory.slice(0, n), width:2.2, hint:'Tank water temperature.'},
+    {id:'tp:set', label:'setpoint', color:css('--c-tank'), dash:true, width:1, data:Array(n).fill(c.tank), hint:'Below this the tank costs comfort.'}]});
+  $('#chRoom').style.display = roomOn ? '' : 'none';
+  if(roomOn){
+    // the backend's band is on the trajectory's points, of which the chart shows the first n
+    const bandNow = () => BAND ? [toSlots(BAND.low, dt, n), toSlots(BAND.high, dt, n)] : [c.room_low.slice(0, n), c.room_high.slice(0, n)];
+    const BAND_SERIES = {id:'tp:band', label:'comfort band', color:css('--c-hvac'), band:bandNow(),
+      hint:'Room comfort band; outside it costs comfort. Drag the dots to change it, hour by hour.'};
+    BAND_SERIES.data = BAND_SERIES.band[0];
+    const pts = BAND || {low: hourly(c.room_low, dt, hrs), high: hourly(c.room_high, dt, hrs)};
+    const bandHandle = (key, label, fix) => ({id:'tp:band', label, color:css('--c-hvac'), xs: hx, vals: pts[key],
+      set: (k, v) => { beginBand(); BAND[key][k] = Math.round(Math.min(ROOM_MAX, Math.max(ROOM_MIN, v)) * 2) / 2; fix(k);
+        HLO.vals = BAND.low; HHI.vals = BAND.high; BAND_SERIES.band = bandNow(); BAND_SERIES.data = BAND_SERIES.band[0]; syncBandUi(); },
+      done: solve});
+    // keep low at or below high: dragging one past the other pushes it along
+    const HLO = bandHandle('low', 'comfort low', k => { BAND.high[k] = Math.max(BAND.high[k], BAND.low[k]); });
+    const HHI = bandHandle('high', 'comfort high', k => { BAND.low[k] = Math.min(BAND.low[k], BAND.high[k]); });
+    chart('#chRoom', {...base, handles:[HLO, HHI], series:[
+      {id:'tp:room', label:'room', color:css('--c-hvac'), data:dev('hvac').trajectory.slice(0, n), width:2.2, hint:'Room temperature.'},
+      BAND_SERIES,
+      {id:'tp:out', label:'outdoor', color:css('--c-out'), data:DATA.outdoor_temp, dash:true, width:1.2, hint:'Outdoor temperature forecast.'}]});
+  }
 
   // flexibility: only when devices send sensitivities
   const flex = (V.flex && Object.keys(V.flex).length) ? V.flex : (its.length ? its[its.length - 1].flex : null);

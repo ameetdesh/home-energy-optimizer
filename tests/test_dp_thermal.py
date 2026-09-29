@@ -15,7 +15,7 @@ from home_energy_optimizer import (
     solve_hvac,
     solve_water_heater,
 )
-from home_energy_optimizer.dp_thermal import _draw_factor, _relaxation, _usable_outflow
+from home_energy_optimizer.dp_thermal import _band_runs, _draw_factor, _relaxation, _usable_outflow
 from home_energy_optimizer.profiles import (
     day_night_tariff,
     hot_water_demand_profile,
@@ -142,6 +142,78 @@ def test_hvac_works_harder_when_it_is_hotter(horizon):
     mild = solve_hvac(cfg, horizon, buy, sell, outdoor_temp_profile(horizon, mean_c=24.0))
     hot = solve_hvac(cfg, horizon, buy, sell, outdoor_temp_profile(horizon, mean_c=36.0))
     assert hot.power.sum() > mild.power.sum()
+
+
+# --------------------------------------------------------------------------
+# HVAC comfort band that changes over the horizon (HvacConfig.comfort_band)
+# --------------------------------------------------------------------------
+
+
+def _profiled(n: int, low, high) -> HvacConfig:
+    return HvacConfig(comfort_low_profile=tuple(np.broadcast_to(low, n + 1)),
+                      comfort_high_profile=tuple(np.broadcast_to(high, n + 1)))
+
+
+def test_hvac_flat_profile_is_the_flat_band(horizon):
+    """A profile that never moves is the flat band, bit for bit."""
+    buy, sell = day_night_tariff(horizon)
+    out = outdoor_temp_profile(horizon)
+    flat = solve_hvac(HvacConfig(), horizon, buy, sell, out)
+    prof = solve_hvac(_profiled(horizon.steps, 22.0, 26.0), horizon, buy, sell, out)
+    for field in ("value", "policy", "trajectory", "power"):
+        assert np.array_equal(getattr(flat, field), getattr(prof, field)), field
+
+
+def test_hvac_follows_a_band_that_changes(horizon):
+    """Raise the floor to 24 degC from 06:00 to 09:00. Under the flat band the
+    room sits near 22 degC then; now it is heated to meet the new floor."""
+    n, dt = horizon.steps, horizon.dt
+    buy, sell = day_night_tariff(horizon)
+    out = outdoor_temp_profile(horizon)          # 18-30 degC, coldest at 03:00
+    low = np.full(n + 1, 22.0)
+    low[int(6 / dt):int(9 / dt) + 1] = 24.0
+    flat = solve_hvac(HvacConfig(), horizon, buy, sell, out)
+    warm = solve_hvac(_profiled(n, low, 26.0), horizon, buy, sell, out)
+    am = slice(int(6 / dt) + 1, int(9 / dt) + 1)   # the points the raised floor prices
+    assert warm.power.sum() > flat.power.sum()
+    assert flat.trajectory[am].min() < 22.5 < 23.5 < warm.trajectory[am].min()
+
+
+def test_band_runs_tile_the_horizon():
+    """Slot t prices point t + 1; a run is a stretch of slots with one band."""
+    low = np.array([22.0, 22, 22, 23, 23, 22, 22])       # points 0..6 of 6 slots
+    high = np.full(7, 26.0)
+    assert _band_runs(low, high) == [(0, 2), (2, 4), (4, 6)]
+    assert _band_runs(np.full(7, 22.0), high) == [(0, 6)]
+
+
+def test_thermostat_follows_the_band_of_the_moment(horizon):
+    """Outdoors at the room's 24 degC, the thermostat idles under the flat band
+    and starts cooling once the ceiling drops to 23 degC at 06:00."""
+    n, dt = horizon.steps, horizon.dt
+    out = np.full(n, 24.0)
+    high = np.full(n + 1, 26.0)
+    high[int(6 / dt):] = 23.0
+    _, idle = baseline_hvac(HvacConfig(), horizon, out)
+    _, cool = baseline_hvac(_profiled(n, 22.0, high), horizon, out)
+    assert idle.sum() == 0.0
+    assert cool[:int(6 / dt)].sum() == 0.0 and cool[int(6 / dt):].sum() > 0.0
+
+
+def test_comfort_profile_is_checked():
+    n = 4
+    ok = _profiled(n, 21.0, 25.0)
+    ok.validate()
+    low, high = ok.comfort_band(n)
+    assert low.shape == high.shape == (n + 1,) and ok.band_at(-1) == (21.0, 25.0)
+    with pytest.raises(ValueError):
+        ok.comfort_band(n + 1)                                  # not this horizon
+    with pytest.raises(ValueError):
+        HvacConfig(comfort_low_profile=(21.0,) * 5).validate()  # low without high
+    with pytest.raises(ValueError):
+        _profiled(n, 27.0, 25.0).validate()                     # low above high
+    with pytest.raises(ValueError):
+        _profiled(n, 17.0, 25.0).validate()                     # below the model's grid
 
 
 # --------------------------------------------------------------------------

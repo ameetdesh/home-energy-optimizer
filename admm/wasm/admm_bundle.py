@@ -413,6 +413,13 @@ class HvacConfig:
     discomfort_price: float | None = None  # currency/(K.h); None = derive
     comfort_weight: float = 8.0  # quadratic mode only
     terminal_weight: float = 10.0
+    # A comfort band that changes over the horizon, optional: one bound per
+    # point of the room trajectory, so n + 1 for n slots (point i is hour
+    # i * dt). The room starts mid-band at point 0 and the DP prices points
+    # 1..n against their own band (comfort_band). None: the flat band
+    # (t_comfort_low, t_comfort_high) throughout.
+    comfort_low_profile: tuple[float, ...] | None = None
+    comfort_high_profile: tuple[float, ...] | None = None
 
     @property
     def duty_actions(self) -> np.ndarray:
@@ -428,9 +435,27 @@ class HvacConfig:
         need = int(np.ceil((self.t_max - self.t_min) * per_step / step_k)) + 1
         return max(self.n_states, need)
 
+    def band_at(self, i: int) -> tuple[float, float]:
+        """(low, high) at point i of the room trajectory; -1 is the horizon's end."""
+        if self.comfort_low_profile is None:
+            return self.t_comfort_low, self.t_comfort_high
+        return float(self.comfort_low_profile[i]), float(self.comfort_high_profile[i])
+
+    def comfort_band(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """(low, high) at the n + 1 points of an n-slot room trajectory."""
+        if self.comfort_low_profile is None:
+            return np.full(n + 1, self.t_comfort_low), np.full(n + 1, self.t_comfort_high)
+        if len(self.comfort_low_profile) != n + 1:
+            raise ValueError(f"the comfort profile has {len(self.comfort_low_profile)} points; "
+                             f"{n} slots need {n + 1}")
+        return (np.array(self.comfort_low_profile, dtype=float),
+                np.array(self.comfort_high_profile, dtype=float))
+
     @property
     def t_comfort_mid(self) -> float:
-        return (self.t_comfort_low + self.t_comfort_high) / 2.0
+        """Mid-band at the start: where the room starts."""
+        low, high = self.band_at(0)
+        return (low + high) / 2.0
 
     def discomfort_price_per_kelvin_hour(self, reference_price: float) -> float:
         """Currency per K outside the comfort band per hour."""
@@ -445,6 +470,15 @@ class HvacConfig:
     def validate(self) -> None:
         if not self.t_min < self.t_comfort_low <= self.t_comfort_high < self.t_max:
             raise ValueError("require t_min < t_comfort_low <= t_comfort_high < t_max")
+        if (self.comfort_low_profile is None) != (self.comfort_high_profile is None):
+            raise ValueError("give comfort_low_profile and comfort_high_profile together")
+        if self.comfort_low_profile is not None:
+            low = np.asarray(self.comfort_low_profile, dtype=float)
+            high = np.asarray(self.comfort_high_profile, dtype=float)
+            if low.shape != high.shape or low.size < 2:
+                raise ValueError("the comfort profiles need the same length, one value per trajectory point")
+            if not (np.all(self.t_min < low) and np.all(low <= high) and np.all(high < self.t_max)):
+                raise ValueError("require t_min < low <= high < t_max at every point of the comfort profile")
         if self.n_states < 2:
             raise ValueError("n_states must be >= 2")
         if self.n_duty_levels < 2:
@@ -599,6 +633,8 @@ class SiteConfig:
         for dev in (*self.battery_list, self.water_heater, self.hvac):
             if dev is not None:
                 dev.validate()
+        if self.hvac is not None:
+            self.hvac.comfort_band(self.horizon.steps)   # a profile must fit the horizon
 
     def without(self, *names: str) -> SiteConfig:
         """Return a copy with the named devices disabled. Test convenience."""
@@ -1266,10 +1302,13 @@ def wh_discomfort(cfg: WaterHeaterConfig, temp, ref_price: float, dt: float):
     return cfg.comfort_weight * short**2 * dt
 
 
-def hvac_discomfort(cfg: HvacConfig, temp, ref_price: float, dt: float):
-    """Cost of the room sitting outside its comfort band, in currency."""
-    too_hot = np.maximum(0.0, temp - cfg.t_comfort_high)
-    too_cold = np.maximum(0.0, cfg.t_comfort_low - temp)
+def hvac_discomfort(cfg: HvacConfig, temp, ref_price: float, dt: float, low=None, high=None):
+    """Cost of the room sitting outside its comfort band, in currency.
+    `low`/`high`: the band at `temp`'s points (default: the flat band)."""
+    low = cfg.t_comfort_low if low is None else low
+    high = cfg.t_comfort_high if high is None else high
+    too_hot = np.maximum(0.0, temp - high)
+    too_cold = np.maximum(0.0, low - temp)
     if cfg.comfort_mode == "linear":
         return cfg.discomfort_price_per_kelvin_hour(ref_price) * (too_hot + too_cold) * dt
     return cfg.comfort_weight * (too_hot**2 + too_cold**2) * dt
@@ -1539,6 +1578,18 @@ def _hvac_duty_cap(temp, cfg: HvacConfig, q_wall, a: float, dt: float):
     return np.clip(room_kw / q_ac, 0.0, 1.0)
 
 
+def _band_runs(low: np.ndarray, high: np.ndarray) -> list[tuple[int, int]]:
+    """Runs [t0, t1) of slots whose priced points (t + 1) share one band."""
+    n = len(low) - 1
+    runs, t0 = [], 0
+    for t in range(1, n):
+        if low[t + 1] != low[t] or high[t + 1] != high[t]:
+            runs.append((t0, t))
+            t0 = t
+    runs.append((t0, n))
+    return runs
+
+
 def solve_hvac(
     cfg: HvacConfig,
     horizon: Horizon,
@@ -1551,7 +1602,8 @@ def solve_hvac(
     admm_rho: float = 0.0,
     ref_price: float | None = None,
 ) -> DeviceSolution:
-    """Solve the HVAC DP. Ternary action, soft two-sided comfort band.
+    """Solve the HVAC DP. Ternary action, soft two-sided comfort band (flat, or
+    one per trajectory point: HvacConfig.comfort_band).
     `limits`: see home_energy_optimizer.meter. `admm_target`/`admm_rho`: an optional
     tether on its power, as for the tank. `ref_price`: as for the tank."""
     t_start = time.perf_counter()
@@ -1566,27 +1618,30 @@ def solve_hvac(
     V = np.zeros((n + 1, cfg.n_states))
     POL = np.zeros((n, cfg.n_states), dtype=np.int64)
 
+    low, high = cfg.comfort_band(n)       # slot t prices point t + 1
     if cfg.comfort_mode == "linear":
-        V[n] = -hvac_discomfort(cfg, T, ref_price, 1.0)
+        V[n] = -hvac_discomfort(cfg, T, ref_price, 1.0, low[n], high[n])
     else:
-        V[n] = -cfg.terminal_weight * (T - cfg.t_comfort_mid) ** 2
+        V[n] = -cfg.terminal_weight * (T - (low[n] + high[n]) / 2.0) ** 2
 
     actions = cfg.duty_actions
     POL_f = np.zeros(POL.shape)
-    # The compiled kernel is the three-way (off / full cool / full heat) unit only.
+    # The compiled kernel is the three-way (off / full cool / full heat) unit
+    # under one flat band. A band that changes goes through it one run of
+    # equal-band slots at a time, the last run first; a flat band is one run.
     tether = admm_target is not None and admm_rho > 0
-    compiled = limits is None and cfg.n_duty_levels == 2 and not tether and kernel_hvac(
-        np.ascontiguousarray(buy, dtype=np.float64),
-        np.ascontiguousarray(sell, dtype=np.float64),
-        np.ascontiguousarray(dp_load, dtype=np.float64),
-        np.ascontiguousarray(outdoor_temp, dtype=np.float64),
-        np.ascontiguousarray(T, dtype=np.float64),
-        V, POL_f, n, cfg.n_states,
-        dt, cfg.c_room_kwh_per_k, cfg.r_wall_k_per_kw, cfg.power_kw, cfg.cop,
-        cfg.t_min, cfg.t_max, cfg.t_comfort_low, cfg.t_comfort_high,
-        cfg.discomfort_price_per_kelvin_hour(ref_price)
-        if cfg.comfort_mode == "linear" else 0.0,
-    ) if cfg.comfort_mode == "linear" else False
+    compiled = limits is None and cfg.n_duty_levels == 2 and not tether and cfg.comfort_mode == "linear"
+    if compiled:
+        series = [np.ascontiguousarray(x, dtype=np.float64) for x in (buy, sell, dp_load, outdoor_temp)]
+        grid = np.ascontiguousarray(T, dtype=np.float64)
+        price_k = cfg.discomfort_price_per_kelvin_hour(ref_price)
+        for t0, t1 in reversed(_band_runs(low, high)):
+            compiled = kernel_hvac(
+                *(x[t0:t1] for x in series), grid, V[t0:t1 + 1], POL_f[t0:t1], t1 - t0, cfg.n_states,
+                dt, cfg.c_room_kwh_per_k, cfg.r_wall_k_per_kw, cfg.power_kw, cfg.cop,
+                cfg.t_min, cfg.t_max, low[t1], high[t1], price_k)
+            if not compiled:      # no kernels in this build: nothing was written
+                break
     if compiled:
         # POL holds action INDICES; the kernel writes float64 because `long`
         # is 32-bit on wasm32 and 64-bit natively (see dp_kernels.pyx).
@@ -1613,7 +1668,7 @@ def solve_hvac(
                 -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
                 - limit_cost(imp, sell[t], limits)
             ) * dt
-            comfort = -hvac_discomfort(cfg, T_next, ref_price, dt)
+            comfort = -hvac_discomfort(cfg, T_next, ref_price, dt, low[t + 1], high[t + 1])
             if tether:
                 elec = elec - (admm_rho / 2.0) * (cfg.power_kw * abs(a) * duty - admm_target[t]) ** 2 * dt
 
@@ -1711,14 +1766,15 @@ def baseline_hvac(
     """Deadband thermostat: cool above the band, heat below it, else off."""
     n = horizon.steps
     dt = horizon.dt
+    low, high = cfg.comfort_band(n)
     temp = np.zeros(n + 1)
     power = np.zeros(n)
     temp[0] = cfg.t_comfort_mid
 
     for t in range(n):
-        if temp[t] > cfg.t_comfort_high:
+        if temp[t] > high[t]:
             mode = -1.0
-        elif temp[t] < cfg.t_comfort_low:
+        elif temp[t] < low[t]:
             mode = 1.0
         else:
             mode = 0.0
@@ -2452,7 +2508,9 @@ def comfort_penalty(
     if cfg.water_heater is not None and wh_temp is not None:
         total += float(np.sum(wh_discomfort(cfg.water_heater, wh_temp[1:], reference_price, dt)))
     if cfg.hvac is not None and hvac_temp is not None:
-        total += float(np.sum(hvac_discomfort(cfg.hvac, hvac_temp[1:], reference_price, dt)))
+        low, high = cfg.hvac.comfort_band(len(hvac_temp) - 1)
+        total += float(np.sum(hvac_discomfort(cfg.hvac, hvac_temp[1:], reference_price, dt,
+                                              low[1:], high[1:])))
     return total
 
 
@@ -3011,7 +3069,7 @@ def _objective(cfg, fc, net, sols, batteries, ref) -> float:
     if wh is not None and cfg.water_heater.comfort_mode == "linear":
         obj += cfg.water_heater.heat_capacity_kwh_per_k * ref * max(0.0, cfg.water_heater.t_comfort - float(wh[-1]))
     if hv is not None and cfg.hvac.comfort_mode == "linear":
-        obj += float(hvac_discomfort(cfg.hvac, np.array([float(hv[-1])]), ref, 1.0)[0])
+        obj += float(hvac_discomfort(cfg.hvac, np.array([float(hv[-1])]), ref, 1.0, *cfg.hvac.band_at(-1))[0])
     return float(obj)
 
 
@@ -3362,7 +3420,8 @@ def build_site(p: dict) -> SiteConfig:
     )
     wh = (WaterHeaterConfig(t_comfort=float(p.get("tank_comfort", 55.0)))
           if p.get("enable_wh", True) else None)
-    # the room band: whichever order the two sliders are in
+    # the room's flat band, whichever order the two values are in (the DW page
+    # drags an hourly one instead: dw.webapi.apply_band)
     lo, hi = sorted((float(p.get("room_low", 22.0)), float(p.get("room_high", 26.0))))
     hvac = HvacConfig(t_comfort_low=lo, t_comfort_high=hi) if p.get("enable_hvac", True) else None
     return SiteConfig(

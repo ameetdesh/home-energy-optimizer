@@ -75,7 +75,7 @@ def thermal_terminal(cfg, kind: str, t_end: float, ref: float) -> float:
     """
     if kind == "water_heater":
         return cfg.heat_capacity_kwh_per_k * ref * max(0.0, cfg.t_comfort - t_end)
-    return float(hvac_discomfort(cfg, np.array([t_end]), ref, 1.0)[0])
+    return float(hvac_discomfort(cfg, np.array([t_end]), ref, 1.0, *cfg.band_at(-1))[0])
 
 
 def is_plain_battery(b, gates=()) -> bool:
@@ -286,7 +286,8 @@ class DWCoordinator:
         if dev.kind == "water_heater":
             return (float(np.sum(wh_discomfort(dev.cfg, traj[1:], self.ref, self.dt)))
                     + thermal_terminal(dev.cfg, "water_heater", traj[-1], self.ref))
-        return (float(np.sum(hvac_discomfort(dev.cfg, traj[1:], self.ref, self.dt)))
+        low, high = dev.cfg.comfort_band(len(traj) - 1)
+        return (float(np.sum(hvac_discomfort(dev.cfg, traj[1:], self.ref, self.dt, low[1:], high[1:])))
                 + thermal_terminal(dev.cfg, "hvac", traj[-1], self.ref))
 
     # --------------------------------------------------------------- oracles
