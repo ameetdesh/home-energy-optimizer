@@ -52,9 +52,11 @@ It uses [tectonic](https://tectonic-typesetting.github.io) if installed (it
 fetches missing LaTeX packages itself), else `latexmk`, else three `pdflatex`
 passes.
 
-Rebuilding the single-file browser pages (`admm/wasm/build.sh`, `dw/wasm/build.sh`)
-needs `make_standalone.py`, which is not in this repository yet; point
-`MAKE_STANDALONE` at it. The committed pages and the tests do not need it.
+The single-file browser pages rebuild with `admm/wasm/build.sh` and
+`dw/wasm/build.sh`, which embed the Python with `tools/make_standalone.py` and,
+if one has been built (`wasm/build_wheel.sh`, needs Docker), the compiled-kernel
+wheel. The embedded Python is obfuscated; that is kept as a proof of concept,
+since the source is here.
 
 ---
 

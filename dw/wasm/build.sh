@@ -15,7 +15,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY=python3
-STANDALONE="${MAKE_STANDALONE:-$ROOT/../wasm_batt_optimizer/make_standalone.py}"
+STANDALONE="${MAKE_STANDALONE:-$ROOT/tools/make_standalone.py}"
 OUT="$HERE/multi_device_optimizer_standalone.html"
 
 "$PY" "$HERE/make_bundle.py"

@@ -3,7 +3,7 @@
 
 The counterpart of admm/wasm/make_bundle.py for dw/. The DW code imports across
 packages - `dw.*`, `admm.*` and `hemspolicy.*` - with absolute imports, and the embedding
-tool (wasm_batt_optimizer/make_standalone.py) takes a single module. So:
+tool (tools/make_standalone.py) takes a single module. So:
 
 * every `dw.*` / `admm.*` / `hemspolicy.*` / relative import is removed, top level or
   nested; an alias (`linprog as np_linprog`) becomes an assignment;

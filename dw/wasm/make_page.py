@@ -9,7 +9,7 @@ the ADMM app, retargeted: the DW bundle's name, this page's colour tokens, and
 `solve()` as the entry point. The HiGHS option is dropped - scipy is not loaded
 in the browser; the built-in solver is.
 
-The output still FETCHES the bundle; wasm_batt_optimizer/make_standalone.py
+The output still FETCHES the bundle; tools/make_standalone.py
 inlines it (and the kernels wheel) afterwards.
 
 Run:  dw/wasm/make_page.py            # -> dw/wasm/dw_page.html
