@@ -26,8 +26,10 @@ ways obfuscation can break this both build cleanly and fail only at call time.
 
 ## Obfuscation
 
-The payload is renamed as well as stripped: 69 of the 73 module-level
-functions ship as `_wdpgx`-style names, with comments and docstrings gone.
+Kept as a proof of concept of shipping a solver in a page without its source;
+the source itself is public in this repository. The payload is renamed as well
+as stripped: 69 of the 73 module-level functions ship as `_wdpgx`-style names,
+with comments and docstrings gone.
 
 Renaming needs a keep-list, which `keep_names.py` derives rather than
 hand-maintains. `make_standalone.py` renames every `FunctionDef` and rewrites
@@ -132,8 +134,5 @@ responding". In a worker the UI keeps painting and the controls keep working
 while the solve runs. The page also coalesces requests: a slider drag fires a
 change per stop, and rather than queue solves whose answers are stale before
 they arrive, `solve()` notes that another is wanted and runs exactly one more
-when the current one lands. `wasm_batt_optimizer` solves this by compiling the
-kernels to a wasm wheel via Cython — `make_standalone.py --build-wheel` — and
-the same treatment would apply here. It has not been done; the pure-Python path
-is fast enough to explore with, and slow enough that you would not run a house
-on it.
+when the current one lands. The recursions themselves run as compiled kernels
+when the page embeds the wheel (Compiled kernels, above).

@@ -5,9 +5,8 @@
 #   wasm/build_wheel.sh            # build the wheel into wasm/build/dist/
 #   wasm/build_wheel.sh --image    # force a rebuild of the builder image
 #
-# Reuses the pyodide-builder image from wasm_batt_optimizer if it is already
-# present; the Dockerfile here is the same one, kept alongside so this project
-# builds without it.
+# Reuses a pyodide-builder image if one is already present (the same image
+# tools/make_standalone.py --build-wheel builds); the Dockerfile is in build/.
 #
 # The Emscripten/pyodide-build versions must line up with the Pyodide runtime
 # the page loads from the CDN (0.26.2) -- see the Dockerfile.

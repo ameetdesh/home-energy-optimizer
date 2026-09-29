@@ -15,8 +15,8 @@
 #   make_page.py     admm/gui/index.html      -> hems_policy.html
 #   make_standalone  page + bundle            -> hems_policy_standalone.html
 #
-# The last step lives in the sibling wasm_batt_optimizer project, which is
-# where that tooling was written; this only supplies its two inputs.
+# The last step is tools/make_standalone.py, which was written for an earlier
+# proof of concept; this only supplies its two inputs.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +24,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 
-STANDALONE="${MAKE_STANDALONE:-$ROOT/../wasm_batt_optimizer/make_standalone.py}"
+STANDALONE="${MAKE_STANDALONE:-$ROOT/tools/make_standalone.py}"
 
 "$PY" "$HERE/make_bundle.py"
 "$PY" "$HERE/make_page.py"

@@ -7,7 +7,7 @@ The UI is unchanged. admm/gui/index.html routes every backend call through one
 booting Pyodide, loading numpy, and exec'ing the flattened bundle.
 
 The output still FETCHES the bundle at runtime, which is what
-wasm_batt_optimizer/make_standalone.py needs in order to find its insertion
+tools/make_standalone.py needs in order to find its insertion
 point. Run that afterwards to inline the payload into a single file.
 
 Run:  admm/wasm/make_page.py       # -> admm/wasm/hems_policy.html

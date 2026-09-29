@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Flatten the ADMM app's Python (src/hemspolicy + admm/) into one .py file for Pyodide.
 
-`make_standalone.py` in wasm_batt_optimizer embeds a SINGLE Python module, but
+`tools/make_standalone.py` embeds a SINGLE Python module, but
 the app spans two packages. Rather than ship a wheel or teach the browser about
 packages, concatenate the modules the UI actually needs, in dependency order,
 into one flat namespace; every `hemspolicy.*` / `admm.*` / `dw.*` / relative

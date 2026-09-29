@@ -667,7 +667,7 @@ It is the same pipeline as the ADMM app's `admm/wasm/build.sh`:
 |---|---|---|
 | `dw/wasm/make_bundle.py` | `dw/` + `admm/` + `src/hemspolicy/` | `dw_bundle.py`: one flat module; `dw.*`/`admm.*`/`hemspolicy.*` imports removed (aliases become assignments); only `build_site` taken from `hemspolicy.webapi`, whose other names would collide; any collision fails the build |
 | `dw/wasm/make_page.py` | `dw/gui/index.html` | `dw_page.html`: the ADMM page's Pyodide-worker bootstrap, retargeted; the solver choice dropped (no scipy in the browser) |
-| `wasm_batt_optimizer/make_standalone.py` | page + bundle + `wasm/build/dist/*.whl` | the standalone, with names kept per `wasm/keep_names.py` |
+| `tools/make_standalone.py` | page + bundle + `wasm/build/dist/*.whl` | the standalone, with names kept per `wasm/keep_names.py` |
 
 `tests/test_dw_standalone.py` regenerates the bundle and compares it, then
 executes both the bundle **and the obfuscated payload inside the shipped
