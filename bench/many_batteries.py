@@ -1,5 +1,5 @@
-"""Why textbook ADMM does not settle with many batteries (docs/theory.tex,
-Appendix on ADMM on the test sites).
+"""Why ADMM does not settle with many batteries (docs/theory.tex, Appendix
+"Numerical evidence", ADMM on the test sites).
 
     .venv/bin/python bench/many_batteries.py        # the exact-step run needs osqp
 

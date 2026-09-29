@@ -162,8 +162,10 @@ and evcc work unchanged. DW puts plain batteries (and a modulating tank) into a
 small LP and lets everything else (on/off tank, HVAC, EVs with a charger
 minimum or a SoC goal) bid plans from its own DP. If DW cannot run (an export
 price above the import price in some slot), `plan()` falls back to ADMM and
-says why in `res.note`. `docs/theory.tex` §6–9 explains both and compares
-them; `bench/run_planners.py` reproduces the comparison.
+says why in `res.note`. `docs/theory.tex` explains both - the device interface
+they share (section 2), each coordinator as a problem and an algorithm (sections
+3-4) - and compares them (section 8); `bench/run_planners.py` reproduces the
+comparison.
 
 ---
 
