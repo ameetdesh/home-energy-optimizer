@@ -1,0 +1,792 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hems-policy — headless core testbed</title>
+<style>
+:root{--bg:#0b1020;--panel:#131a2e;--fg:#e6ecff;--muted:#8b97b8;--line:#243050;
+      --blue:#60a5fa;--green:#34d399;--amber:#fbbf24;--pink:#f472b6;--purple:#c084fc;--red:#fca5a5}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+h1{font-size:15px;margin:0;font-weight:650}
+header .sub{color:var(--muted);font-size:12px}
+main{display:grid;grid-template-columns:290px 1fr;gap:16px;padding:16px;align-items:start}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.ctl{display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center;margin-bottom:9px}
+.ctl label{color:var(--muted)}
+.ctl output{font-variant-numeric:tabular-nums;color:var(--fg);min-width:46px;text-align:right}
+input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--blue)}
+select{grid-column:2;background:#0d1426;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+.toggles{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 14px}
+.tg{padding:5px 11px;border-radius:9px;border:1px solid var(--line);background:#0d1426;cursor:pointer;user-select:none;font-size:12px}
+.tg.on{border-color:var(--blue);background:rgba(96,165,250,.16);color:var(--blue)}
+button{width:100%;padding:9px;border-radius:8px;border:0;background:var(--blue);color:#06122b;font-weight:650;cursor:pointer;font-size:13px}
+button:disabled{opacity:.5;cursor:default}
+.stats{display:grid;grid-template-columns:1fr auto;gap:4px 10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.stats span:nth-child(odd){color:var(--muted)}
+.stats span:nth-child(even){font-variant-numeric:tabular-nums;text-align:right}
+.charts{display:grid;gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px 6px}
+.card h2{font-size:12px;margin:0 0 6px;font-weight:600;color:var(--muted);display:flex;justify-content:space-between;gap:10px}
+.card h2 em{font-style:normal;color:var(--fg);font-variant-numeric:tabular-nums}
+canvas{width:100%;height:150px;display:block}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--muted);padding:2px 0 6px;align-items:center}
+.legend span[data-series]{cursor:pointer;user-select:none;border-radius:4px;padding:1px 4px;transition:opacity .12s}
+.legend span[data-series]:hover{background:rgba(255,255,255,.06)}
+.legend span[data-series].off{opacity:.32;text-decoration:line-through}
+.legend .act{cursor:pointer;color:var(--blue);border:1px solid #243050;border-radius:4px;padding:1px 6px}
+.legend .act:hover{background:rgba(96,165,250,.12)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.hint{color:var(--muted);font-size:11px;margin-top:8px}
+.rounds{display:flex;gap:6px;flex-wrap:wrap;align-items:stretch;margin:2px 0 8px}
+.rd{min-width:52px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:#0d1426;
+    cursor:pointer;user-select:none;font-size:11px;line-height:1.35;text-align:center;
+    font-variant-numeric:tabular-nums;transition:border-color .12s,background .12s}
+.rd:hover{border-color:var(--muted)}
+.rd b{display:block;font-weight:650;font-size:12px}
+.rd .v{color:var(--muted)}
+/* Three independent signals, so they must not overwrite one another: the
+   NUMBER is red when that round breached a grid limit, the BORDER is green on
+   the retained round, and the FILL marks the one being plotted. Ordering
+   matters - `view` is last so it wins the border. */
+.rd.bad .v{color:var(--red)}
+.rd.sel{border-color:var(--green);box-shadow:inset 0 0 0 1px rgba(52,211,153,.35)}
+.rd.view{background:rgba(96,165,250,.18);border-color:var(--blue);color:var(--blue);box-shadow:none}
+.rd.view .v{color:var(--blue)}
+.rmeta{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;
+       font-variant-numeric:tabular-nums;padding:2px 0 6px}
+.rmeta b{color:var(--fg);font-weight:600}
+.viewing{color:var(--blue)}
+.err{background:rgba(252,165,165,.12);border:1px solid var(--red);color:var(--red);padding:8px 10px;border-radius:8px;margin-bottom:12px;display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>hems-policy — headless core testbed</h1>
+  <span class="sub">same code the tests run · in your browser, no server</span>
+</header>
+
+<main>
+  <div class="panel">
+    <div class="err" id="err"></div>
+
+    <div class="toggles">
+      <div class="tg on" data-dev="battery">Battery</div>
+      <div class="tg on" data-dev="wh">Water heater</div>
+      <div class="tg on" data-dev="hvac">HVAC</div>
+    </div>
+
+    <div class="ctl"><label>Tariff</label>
+      <select id="tariff"><option value="dynamic">dynamic</option><option value="day_night">day / night</option><option value="flat">flat</option></select></div>
+    <div class="ctl"><label>Terminal value</label>
+      <select id="terminal_mode"><option value="linear">linear (default)</option><option value="quadratic">quadratic (POC)</option></select></div>
+
+    <div class="ctl"><label>Battery capacity</label><output id="o_cap">10 kWh</output>
+      <input type="range" id="batt_capacity" min="0" max="40" step="0.5" value="10"></div>
+    <div class="ctl"><label>Charge limit</label><output id="o_chg">5 kW</output>
+      <input type="range" id="batt_charge" min="0.5" max="20" step="0.5" value="5"></div>
+    <div class="ctl"><label>Discharge limit</label><output id="o_dis">5 kW</output>
+      <input type="range" id="batt_discharge" min="0.5" max="20" step="0.5" value="5"></div>
+    <div class="ctl"><label>Round-trip η (one-way)</label><output id="o_eta">0.90</output>
+      <input type="range" id="eta" min="0.5" max="1" step="0.01" value="0.90"></div>
+    <div class="ctl"><label>Solar peak</label><output id="o_sol">5 kW</output>
+      <input type="range" id="solar_peak" min="0" max="15" step="0.5" value="5"></div>
+    <div class="ctl"><label>Horizon</label><output id="o_hrs">48 h</output>
+      <input type="range" id="hours" min="12" max="72" step="12" value="48"></div>
+    <div class="ctl"><label>State grid</label><output id="o_grid">200</output>
+      <input type="range" id="grid" min="50" max="400" step="50" value="200"></div>
+    <div class="ctl"><label>Batteries</label><output id="o_nb">1</output>
+      <input type="range" id="n_batteries" min="1" max="20" step="1" value="1"></div>
+    <div class="ctl"><label>Grid import limit</label><output id="o_imp">off</output>
+      <input type="range" id="max_import_kw" min="0" max="20" step="0.5" value="0"></div>
+    <div class="ctl"><label>Grid export limit</label><output id="o_exp">off</output>
+      <input type="range" id="max_export_kw" min="0" max="20" step="0.5" value="0"></div>
+    <div class="toggles" style="margin:2px 0 12px">
+      <div class="tg on" id="tgCurtail">PV curtailment</div>
+    </div>
+
+    <button id="solve">Solve</button>
+
+    <div class="stats" id="stats"></div>
+    <p class="hint">Hover the battery chart to replay the optimal policy from that
+      hypothetical state — no re-solve. Click to price a forced action there.</p>
+  </div>
+
+  <div class="charts" id="charts">
+    <div class="card"><h2><span>Coordination rounds — click one to plot it</span><em id="roundNow"></em></h2>
+      <div class="rounds" id="rounds"></div>
+      <div class="rmeta" id="rmeta"></div>
+      <div class="legend"><span><i style="background:var(--blue)"></i>objective — bill + comfort + breach, all in currency</span><span><i style="background:var(--red)"></i>grid breach (priced into the objective)</span><span><i style="background:var(--green)"></i>lowest objective, retained</span></div>
+      <canvas id="cRounds" style="height:112px"></canvas></div>
+
+    <div class="card"><h2><span>Prices &amp; λ — import below the band, export above it</span><em id="lamNow"></em></h2>
+      <div class="legend"><span><i style="background:var(--amber)"></i>import price</span><span><i style="background:var(--green)"></i>export price</span><span><i style="background:var(--purple)"></i>λ</span><span><i style="background:var(--purple);opacity:.4"></i>no-trade band (import below / export above)</span></div>
+      <canvas id="cPrice"></canvas></div>
+
+    <div class="card"><h2><span>Battery — state of energy</span><em id="socNow"></em></h2>
+      <div class="legend" id="legSoc"></div>
+      <canvas id="cSoc"></canvas></div>
+
+    <div class="card"><h2><span>Power flows</span><em id="netNow"></em></h2>
+      <div class="legend" id="legPower"></div>
+      <canvas id="cPower"></canvas></div>
+
+    <div class="card"><h2><span>Thermal</span><em id="thermNow"></em></h2>
+      <div class="legend"><span><i style="background:var(--green)"></i>tank °C</span><span><i style="background:var(--pink)"></i>room °C</span><span><i style="background:var(--muted)"></i>outdoor °C</span></div>
+      <canvas id="cTherm"></canvas></div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const DPR = window.devicePixelRatio || 1;
+let DATA = null, HOVER = null;
+/* Which coordination round the charts are showing. null = the retained one,
+   i.e. what coordinate() actually returned. Anything else is a look at a plan
+   that was computed and then rejected. */
+let ROUND = null;
+/* lambda for non-retained rounds, fetched once per round and kept. */
+const RLAM = {};
+/* Everything the charts read that varies by round. Built fresh on each draw so
+   there is exactly one place that decides "retained or round r". */
+let V = null;
+function buildView(){
+  if(!DATA){ V = null; return; }
+  if(ROUND === null || !DATA.rounds || !DATA.rounds[ROUND]){
+    V = {net_grid:DATA.net_grid, curtailment:DATA.curtailment, devices:DATA.devices,
+         lambda:DATA.lambda, import_below:DATA.import_below, export_above:DATA.export_above,
+         costs:DATA.costs, retained:true};
+    return;
+  }
+  const r = DATA.rounds[ROUND], l = RLAM[ROUND] || {};
+  V = {net_grid:r.net_grid, curtailment:r.curtailment, devices:r.devices,
+       lambda:l.lambda || null, import_below:l.import_below || null,
+       export_above:l.export_above || null,
+       costs:{...r.costs, baseline_cost:DATA.costs.baseline_cost,
+              savings:+(DATA.costs.baseline_cost - r.costs.net_cost).toFixed(4)},
+       retained:false, round:r};
+}
+
+const devs = {battery:true, wh:true, hvac:true};
+let curtail = true;
+$('#tgCurtail').onclick = () => { curtail=!curtail;
+  $('#tgCurtail').classList.toggle('on', curtail); solve(); };
+document.querySelectorAll('.tg').forEach(el => el.onclick = () => {
+  devs[el.dataset.dev] = !devs[el.dataset.dev];
+  el.classList.toggle('on', devs[el.dataset.dev]);
+  solve();
+});
+
+const fmt = {
+  batt_capacity: v => v + ' kWh', batt_charge: v => v + ' kW', batt_discharge: v => v + ' kW',
+  eta: v => (+v).toFixed(2), solar_peak: v => v + ' kW', hours: v => v + ' h', grid: v => v,
+  n_batteries: v => v, max_import_kw: v => (+v ? v + ' kW' : 'off'),
+  max_export_kw: v => (+v ? v + ' kW' : 'off')
+};
+const outs = {batt_capacity:'o_cap', batt_charge:'o_chg', batt_discharge:'o_dis',
+              eta:'o_eta', solar_peak:'o_sol', hours:'o_hrs', grid:'o_grid',
+              n_batteries:'o_nb', max_import_kw:'o_imp', max_export_kw:'o_exp'};
+Object.keys(outs).forEach(id => {
+  const el = $('#'+id);
+  const sync = () => $('#'+outs[id]).textContent = fmt[id](el.value);
+  el.addEventListener('input', sync); sync();
+  el.addEventListener('change', solve);
+});
+$('#tariff').onchange = solve; $('#terminal_mode').onchange = solve;
+$('#solve').onclick = solve;
+
+function params(){
+  return {
+    tariff: $('#tariff').value, terminal_mode: $('#terminal_mode').value,
+    batt_capacity:+$('#batt_capacity').value, batt_charge:+$('#batt_charge').value,
+    batt_discharge:+$('#batt_discharge').value, eta:+$('#eta').value,
+    solar_peak:+$('#solar_peak').value, hours:+$('#hours').value, grid:+$('#grid').value,
+    enable_battery: devs.battery && +$('#batt_capacity').value > 0,
+    enable_wh: devs.wh, enable_hvac: devs.hvac,
+    n_batteries: +$('#n_batteries').value,
+    max_import_kw: +$('#max_import_kw').value || null,
+    max_export_kw: +$('#max_export_kw').value || null,
+    allow_curtailment: curtail
+  };
+}
+
+/* Every backend call goes through here, and there are two transports.
+   Served by gui/server.py it is HTTP; in the standalone page
+   window.__HEMS_API__ is a Python function running in Pyodide and there is no
+   server at all. The route names are the same either way - they are the keys
+   of hemspolicy.webapi.ROUTES - so neither side knows which is in use. */
+async function api(route, payload){
+  if(window.__HEMS_API__) return window.__HEMS_API__(route, payload || {});
+  const r = await fetch('/api/' + route, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload || {})
+  });
+  return r.json();
+}
+
+/* Latest request wins. A solve is seconds of work, and a slider drag fires a
+   change event per stop, so without this the queue fills with solves whose
+   answers are already stale by the time they arrive. Coalesce instead: note
+   that another is wanted, and run exactly one more when this one lands. */
+let SOLVING = false, RESOLVE_WANTED = false;
+
+async function solve(){
+  if(SOLVING){ RESOLVE_WANTED = true; return; }
+  SOLVING = true;
+  const btn = $('#solve'); btn.disabled = true; btn.textContent = 'Solving…';
+  try{
+    const j = await api('solve', params());
+    if(j.error) throw new Error(j.error);
+    DATA = j; HOVER = null; $('#err').style.display='none';
+    // A new solve invalidates the round view and every cached round lambda.
+    ROUND = null; Object.keys(RLAM).forEach(k => delete RLAM[k]);
+    drawAll();
+  }catch(e){ $('#err').textContent = e.message; $('#err').style.display='block'; }
+  finally{
+    SOLVING = false;
+    btn.disabled=false; btn.textContent='Solve';
+    if(RESOLVE_WANTED){ RESOLVE_WANTED = false; solve(); }
+  }
+}
+
+function renderStats(){
+  const c = V.costs, m = DATA.meta;
+  const sign = c.savings >= 0 ? '+' : '';
+  const r = V.retained ? null : V.round;
+  $('#stats').innerHTML = `
+    ${r ? `<span class="viewing">round</span><span class="viewing">${r.index} of ${DATA.rounds.length}</span>` : ''}
+    <span>bill</span><span>${c.net_cost.toFixed(3)}</span>
+    <span>baseline</span><span>${c.baseline_cost.toFixed(3)}</span>
+    <span>savings</span><span style="color:${c.savings>=0?'var(--green)':'var(--red)'}">${sign}${c.savings.toFixed(3)}</span>
+    <span>import / export</span><span>${c.import_cost.toFixed(2)} / ${c.export_revenue.toFixed(2)}</span>
+    <span>rounds</span><span>${m.rounds_run}</span>
+    <span>solve</span><span>${m.solve_ms} ms</span>
+    <span>grid</span><span>${m.grid}</span>
+    ${(() => { const g = r ? {curtailed_kwh:r.curtailed_kwh, import_excess:r.import_excess,
+                             export_excess:r.export_excess} : DATA.grid; return `
+    ${g.curtailed_kwh ? `<span>PV curtailed</span><span style="color:var(--amber)">${g.curtailed_kwh.toFixed(1)} kWh</span>` : ''}
+    ${g.import_excess ? `<span>import breach</span><span style="color:var(--red)">+${g.import_excess.toFixed(2)} kW</span>` : ''}
+    ${g.export_excess ? `<span>export breach</span><span style="color:var(--red)">+${g.export_excess.toFixed(2)} kW</span>` : ''}`; })()}`;
+}
+
+/* ---------- tiny canvas chart helper ---------- */
+function setup(cv){
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w*DPR; cv.height = h*DPR;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,w,h);
+  return {ctx, w, h, L:44, R:8, T:8, B:20};
+}
+function scale(g, lo, hi){
+  const {L,R,T,B,w,h} = g;
+  return {
+    x: i => L + (i/(DATA.steps-1))*(w-L-R),
+    y: v => h-B - ((v-lo)/((hi-lo)||1))*(h-T-B),
+    lo, hi
+  };
+}
+function axes(g, s, unit){
+  const {ctx,w,h,L,R,B,T} = g;
+  ctx.strokeStyle='#243050'; ctx.fillStyle='#8b97b8'; ctx.lineWidth=1; ctx.font='10px ui-sans-serif';
+  for(let k=0;k<=3;k++){
+    const v = s.lo + (s.hi-s.lo)*k/3, y = Math.round(s.y(v))+.5;
+    ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(w-R,y); ctx.stroke();
+    ctx.textAlign='right'; ctx.fillText(v.toFixed(Math.abs(s.hi-s.lo)<3?2:1), L-5, y+3);
+  }
+  const hrs = DATA.hours;
+  ctx.textAlign='center';
+  for(let hh=0; hh<=hrs; hh+=Math.max(6, Math.round(hrs/8/6)*6)){
+    const i = hh/DATA.dt, x = s.x(Math.min(i, DATA.steps-1));
+    ctx.fillText(hh+'h', x, h-6);
+  }
+  if(unit){ ctx.textAlign='left'; ctx.fillText(unit, L-40, T+8); }
+}
+function line(g, s, arr, color, width=1.8, dash=null){
+  const {ctx} = g; if(!arr) return;
+  ctx.save(); ctx.strokeStyle=color; ctx.lineWidth=width;
+  if(dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  let started=false;
+  arr.forEach((v,i)=>{ if(v===null||v===undefined) return;
+    const x=s.x(i), y=s.y(v);
+    started ? ctx.lineTo(x,y) : (ctx.moveTo(x,y), started=true); });
+  ctx.stroke(); ctx.restore();
+}
+function fill(g, s, arr, color, alpha){
+  const {ctx} = g; if(!arr) return;
+  ctx.save(); ctx.globalAlpha=alpha; ctx.fillStyle=color;
+  ctx.beginPath(); ctx.moveTo(s.x(0), s.y(Math.max(s.lo,0)));
+  arr.forEach((v,i)=>ctx.lineTo(s.x(i), s.y(v)));
+  ctx.lineTo(s.x(arr.length-1), s.y(Math.max(s.lo,0))); ctx.closePath(); ctx.fill(); ctx.restore();
+}
+const range = (...arrs) => {
+  let lo=Infinity, hi=-Infinity;
+  arrs.forEach(a=>{ if(!a) return; a.forEach(v=>{ if(v===null||v===undefined) return;
+    if(v<lo)lo=v; if(v>hi)hi=v; }); });
+  if(!isFinite(lo)){lo=0;hi=1;}
+  const pad=(hi-lo)*0.08||0.5; return [lo-pad, hi+pad];
+};
+
+/* ---------- coordination rounds ---------- */
+/* The coordinator returns the BEST round, not the last one, ranked
+   lexicographically on (grid-limit violation, total objective). Neither key is
+   visible in the returned plan, so the strip shows both for every round and
+   marks the one that won. */
+function buildRounds(){
+  const host = $('#rounds'), rs = DATA.rounds || [];
+  host.innerHTML = '';
+  if(!rs.length){ $('#rmeta').textContent=''; return; }
+  const sel = DATA.selected_round;
+  rs.forEach(r => {
+    const el = document.createElement('div');
+    el.className = 'rd' + (r.selected ? ' sel' : '') + (r.violation > 1e-6 ? ' bad' : '')
+                        + (ROUND === r.index || (ROUND === null && r.selected) ? ' view' : '');
+    el.innerHTML = `<b>${r.selected ? '★' : ''}${r.index}</b>`
+                 + `<span class="v">${r.costs.total_objective.toFixed(3)}</span>`;
+    el.title = `round ${r.index}\nobjective ${r.costs.total_objective.toFixed(4)}`
+             + `\nviolation ${r.violation.toFixed(4)} kW·slots`
+             + `\nranked at ${r.score_objective.toFixed(4)}`
+             + `\nprimal ${r.primal_res.toFixed(3)}  dual ${r.dual_res.toFixed(3)}  ρ ${r.rho}`
+             + (r.selected ? '\n\nretained: best (violation, objective)' : '');
+    el.onclick = () => selectRound(r.index === sel && ROUND === null ? sel : r.index);
+    host.appendChild(el);
+  });
+  const b = document.createElement('div');
+  b.className = 'rd' + (ROUND === null ? ' view' : '');
+  b.innerHTML = '<b>↩</b><span class="v">retained</span>';
+  b.title = 'back to the plan coordinate() actually returned';
+  b.onclick = () => selectRound(null);
+  host.appendChild(b);
+  renderRoundMeta();
+}
+
+function renderRoundMeta(){
+  const rs = DATA.rounds || [];
+  if(!rs.length){ $('#rmeta').textContent = ''; return; }
+  const r = rs[ROUND === null ? DATA.selected_round : ROUND];
+  const viewing = ROUND === null
+    ? `<b>retained</b> (round ${DATA.selected_round})`
+    : `<span class="viewing">viewing round <b>${r.index}</b></span>`;
+  $('#rmeta').innerHTML = `${viewing}`
+    + `<span>objective <b>${r.costs.total_objective.toFixed(4)}</b></span>`
+    + `<span>bill <b>${r.costs.net_cost.toFixed(4)}</b></span>`
+    + `<span>breach <b style="color:${r.violation>1e-6?'var(--red)':'inherit'}">${r.violation.toFixed(3)}</b> kW·slots`
+    + (r.breach_cost ? `, priced at <b style="color:var(--red)">${r.breach_cost.toFixed(3)}</b>` : '')
+    + `</span>`
+    + `<span>primal <b>${r.primal_res.toFixed(3)}</b></span>`
+    + `<span>dual <b>${r.dual_res.toFixed(3)}</b></span>`
+    + `<span>ρ <b>${r.rho}</b></span>`
+    + `<span><b>${r.round_ms.toFixed(0)}</b> ms</span>`
+    + (r.fallback_applied
+        ? `<span style="color:var(--amber)">a device was swapped for its thermostat `
+          + `baseline after this round was ranked (ranked at `
+          + `${r.score_objective.toFixed(4)})</span>` : '');
+  $('#roundNow').textContent = rs.length + ' rounds · lowest objective wins';
+}
+
+async function selectRound(i){
+  ROUND = i;
+  if(i !== null && !(i in RLAM) && DATA.devices.battery){
+    try{
+      const j = await api('round', {r: i});
+      if(!j.error) RLAM[i] = j;
+    }catch(e){ /* leave lambda blank for this round */ }
+  }
+  drawAll();
+}
+
+/* Objective and violation across the rounds. The point of the panel is that
+   the sequence is not monotone - the loop overshoots and comes back - which is
+   the whole reason the coordinator keeps the best round rather than the last. */
+function drawRounds(){
+  const cv = $('#cRounds'), rs = DATA.rounds || [];
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w*DPR; cv.height = h*DPR;
+  const ctx = cv.getContext('2d'); ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0,w,h);
+  if(rs.length < 1) return;
+  const L=44, R=8, T=10, B=18;
+  const obj = rs.map(r => r.costs.total_objective);
+  const vio = rs.map(r => r.violation);
+  let lo = Math.min(...obj), hi = Math.max(...obj);
+  const pad = (hi-lo)*0.15 || 0.05; lo -= pad; hi += pad;
+  const x = i => rs.length === 1 ? (L+w-R)/2 : L + (i/(rs.length-1))*(w-L-R);
+  const y = v => h-B - ((v-lo)/((hi-lo)||1))*(h-T-B);
+
+  ctx.strokeStyle='#243050'; ctx.fillStyle='#8b97b8'; ctx.font='10px ui-sans-serif';
+  for(let k=0;k<=2;k++){
+    const v = lo + (hi-lo)*k/2, yy = Math.round(y(v))+.5;
+    ctx.beginPath(); ctx.moveTo(L,yy); ctx.lineTo(w-R,yy); ctx.stroke();
+    ctx.textAlign='right'; ctx.fillText(v.toFixed(3), L-5, yy+3);
+  }
+  // violation, on its own scale, as a filled area behind the objective
+  const vmax = Math.max(...vio);
+  if(vmax > 1e-9){
+    ctx.save(); ctx.globalAlpha=.22; ctx.fillStyle='#fca5a5';
+    ctx.beginPath(); ctx.moveTo(x(0), h-B);
+    vio.forEach((v,i)=>ctx.lineTo(x(i), h-B - (v/vmax)*(h-T-B)*0.6));
+    ctx.lineTo(x(rs.length-1), h-B); ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  ctx.strokeStyle='#60a5fa'; ctx.lineWidth=2; ctx.beginPath();
+  obj.forEach((v,i)=> i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)));
+  ctx.stroke();
+  rs.forEach((r,i)=>{
+    const viewed = ROUND === null ? r.selected : r.index === ROUND;
+    ctx.beginPath(); ctx.arc(x(i), y(obj[i]), viewed ? 5 : 3, 0, 7);
+    ctx.fillStyle = r.selected ? '#34d399' : (r.violation > 1e-6 ? '#fca5a5' : '#60a5fa');
+    ctx.fill();
+    if(viewed){ ctx.strokeStyle='#e6ecff'; ctx.lineWidth=1.5; ctx.stroke(); }
+    ctx.fillStyle='#8b97b8'; ctx.textAlign='center'; ctx.fillText(i, x(i), h-5);
+  });
+  // clicking the plot picks a round too
+  cv.onclick = ev => {
+    const rect = cv.getBoundingClientRect();
+    const frac = (ev.clientX - rect.left - L) / (rect.width - L - R);
+    selectRound(Math.max(0, Math.min(rs.length-1, Math.round(frac*(rs.length-1)))));
+  };
+}
+
+/* ---------- charts ---------- */
+function drawAll(){ buildView(); buildRounds(); renderStats();
+                    drawRounds(); buildLegends(); drawPrice(); drawSoc(); drawPower(); drawTherm(); }
+
+/* Legends are rebuilt from the solved data, so a 20-unit fleet gets 20 chips
+   and a 1-unit site gets one. Visibility state survives in SHOWN. */
+function buildLegends(){
+  const keys = (DATA.battery_keys||[]).filter(k => V.devices[k]);
+  const n = keys.length;
+  const caps = DATA.battery_capacities || [];
+  legend('#legSoc', keys.map((k,i) => ({
+    id: 'soc:'+k,
+    label: n>3 ? `${i+1}` : `battery ${i+1}`,
+    color: battColor(i,n),
+  })).concat(n ? [] : []), drawSoc);
+  if(n > 3){
+    const note = document.createElement('span');
+    note.style.color = 'var(--muted)';
+    note.textContent = `${n} units, ${caps.map(c=>c.toFixed(0)).join('/')} kWh`;
+    $('#legSoc').appendChild(note);
+  }
+  legend('#legPower', [
+    {id:'pw:pv',     label:'PV',              color:'#fbbf24'},
+    {id:'pw:pvused', label:'PV used (dashed)',color:'#fbbf24', dash:true},
+    {id:'pw:load',   label:'load',            color:'#8b97b8'},
+    ...keys.map((k,i) => ({id:'pw:'+k, label: n>3?`${i+1}`:`batt ${i+1}`,
+                           color: battColor(i,n)})),
+    {id:'pw:net',    label:'net grid',        color:'#f472b6'},
+  ], drawPower);
+}
+
+function drawPrice(){
+  const g = setup($('#cPrice'));
+  const [lo,hi] = range(DATA.buy, DATA.sell, V.lambda, V.import_below, V.export_above);
+  const s = scale(g, Math.min(0,lo), hi); axes(g,s,'/kWh');
+  // The no-trade band. Import while the meter price is below the lower edge,
+  // export while it is above the upper edge; inside, hold. Its width is the
+  // round-trip loss.
+  if(V.import_below && V.export_above){
+    const {ctx}=g;
+    ctx.save(); ctx.globalAlpha=.16; ctx.fillStyle='#c084fc';
+    ctx.beginPath();
+    V.import_below.forEach((v,i)=>{ const x=s.x(i),y=s.y(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    for(let i=V.export_above.length-1;i>=0;i--) ctx.lineTo(s.x(i), s.y(V.export_above[i]));
+    ctx.closePath(); ctx.fill(); ctx.restore();
+    line(g,s,V.import_below,'#c084fc',1,[4,3]);
+    line(g,s,V.export_above,'#c084fc',1,[4,3]);
+  }
+  line(g,s,DATA.buy,'#fbbf24'); line(g,s,DATA.sell,'#34d399');
+  line(g,s,V.lambda,'#c084fc',2.2);
+  // A round's lambda comes from a re-solve against THAT round's residual load,
+  // so it is absent until /api/round answers, and absent entirely without a
+  // battery. Say so rather than drawing an empty panel.
+  if(!V.lambda || V.lambda.every(v => v === null)){
+    const {ctx,w,h,B}=g; ctx.fillStyle='#8b97b8'; ctx.textAlign='right';
+    ctx.fillText(DATA.devices.battery ? 'λ for this round…' : 'λ needs a battery', w-12, h-B-6);
+  }
+}
+
+const BATT_COLORS = ['#60a5fa','#34d399','#fbbf24'];
+/* Any fleet size needs its own colour. Golden-angle hue rotation keeps
+   neighbouring units far apart in hue, which matters far more than a fixed
+   palette once there are twenty of them. */
+function battColor(i, n){
+  if(n <= 3) return BATT_COLORS[i];
+  return `hsl(${Math.round((i*137.508) % 360)} 72% 62%)`;
+}
+/* Which series are drawn. Keyed by series id and remembered across re-solves,
+   so changing a slider does not silently re-show what you just hid. */
+const SHOWN = {};
+const shown = id => SHOWN[id] !== false;
+function setShown(id, v){ SHOWN[id] = v; }
+
+/* Build a legend of clickable chips. Each entry is {id, label, color, dash}.
+   Clicking toggles that one; the all/none chips act on the whole group. */
+function legend(hostSel, entries, redraw){
+  const host = $(hostSel);
+  host.innerHTML = '';
+  entries.forEach(e => {
+    const el = document.createElement('span');
+    el.dataset.series = e.id;
+    el.innerHTML = `<i style="background:${e.color};${e.dash?'opacity:.55':''}"></i>${e.label}`;
+    el.classList.toggle('off', !shown(e.id));
+    el.onclick = () => { setShown(e.id, !shown(e.id));
+                         el.classList.toggle('off', !shown(e.id)); redraw(); };
+    host.appendChild(el);
+  });
+  if(entries.length > 4){
+    [['all', true], ['none', false]].forEach(([txt, v]) => {
+      const b = document.createElement('span');
+      b.className = 'act'; b.textContent = txt;
+      b.onclick = () => { entries.forEach(e => setShown(e.id, v));
+                          legend(hostSel, entries, redraw); redraw(); };
+      host.appendChild(b);
+    });
+  }
+}
+function drawSoc(){
+  const cv = $('#cSoc'), g = setup(cv);
+  const keys = (DATA.battery_keys||[]).filter(k => V.devices[k]);
+  if(!keys.length){ const{ctx,w,h}=g; ctx.fillStyle='#8b97b8'; ctx.textAlign='center';
+          ctx.fillText('battery disabled', w/2, h/2); return; }
+  const cap = Math.max(...DATA.battery_capacities);
+  const s = scale(g, 0, cap); axes(g,s,'kWh');
+  const n = keys.length;
+  keys.forEach((k,i) => {
+    if(!shown('soc:'+k)) return;
+    const t = V.devices[k].trajectory;
+    if(i===0 && n<=3) fill(g,s,t,battColor(0,n),.13);
+    line(g,s,t,battColor(i,n), n>8 ? 1.2 : 2);
+  });
+  // The hover replay comes from the retained snapshot, so it is only drawn
+  // over the retained plan - overlaying it on a rejected round would compare
+  // two different value functions.
+  if(HOVER && HOVER.soe && V.retained){
+    const pad = new Array(HOVER.start_step).fill(null).concat(HOVER.soe);
+    line(g,s,pad,'#c084fc',2.4);
+    const {ctx}=g; ctx.strokeStyle='#c084fc'; ctx.globalAlpha=.4;
+    ctx.beginPath(); ctx.moveTo(s.x(HOVER.start_step), 0); ctx.lineTo(s.x(HOVER.start_step), g.h-g.B); ctx.stroke();
+    ctx.globalAlpha=1;
+  }
+}
+
+function drawPower(){
+  const g = setup($('#cPower'));
+  const bp = (DATA.battery_keys||[]).map(k=>V.devices[k]&&V.devices[k].power).filter(Boolean);
+  const [lo,hi] = range(DATA.solar, DATA.load, V.net_grid, ...bp,
+    DATA.grid.max_import_kw!=null?[DATA.grid.max_import_kw]:null,
+    DATA.grid.max_export_kw!=null?[-DATA.grid.max_export_kw]:null);
+  const s = scale(g, lo, hi); axes(g,s,'kW');
+  const {ctx}=g; ctx.strokeStyle='#243050';
+  const y0=Math.round(s.y(0))+.5; ctx.beginPath(); ctx.moveTo(g.L,y0); ctx.lineTo(g.w-g.R,y0); ctx.stroke();
+  if(shown('pw:pv')){ fill(g,s,DATA.solar,'#fbbf24',.12); line(g,s,DATA.solar,'#fbbf24',1.4); }
+  if(shown('pw:load')) line(g,s,DATA.load,'#8b97b8',1.4);
+  const bk = DATA.battery_keys||[];
+  bk.forEach((k,i)=>{ if(V.devices[k] && shown('pw:'+k))
+    line(g,s,V.devices[k].power,battColor(i,bk.length),bk.length>8?1.1:1.6); });
+  // PV actually used, i.e. after curtailment - the gap to the solar line is
+  // the energy thrown away.
+  if(shown('pw:pvused') && V.curtailment && V.curtailment.some(v=>v>1e-9)){
+    const used = DATA.solar.map((v,i)=>v-V.curtailment[i]);
+    line(g,s,used,'#fbbf24',2.2,[5,3]);
+  }
+  if(shown('pw:net')) line(g,s,V.net_grid,'#f472b6',2);
+  [[DATA.grid.max_import_kw,'#fca5a5'],[DATA.grid.max_export_kw?-DATA.grid.max_export_kw:null,'#fca5a5']]
+   .forEach(([v,c])=>{ if(v==null) return;
+     ctx.save(); ctx.strokeStyle=c; ctx.setLineDash([6,4]); ctx.globalAlpha=.8;
+     const y=s.y(v); ctx.beginPath(); ctx.moveTo(g.L,y); ctx.lineTo(g.w-g.R,y); ctx.stroke(); ctx.restore(); });
+}
+
+function drawTherm(){
+  const g = setup($('#cTherm'));
+  const wh = V.devices.water_heater, hv = V.devices.hvac;
+  const [lo,hi] = range(wh&&wh.trajectory, hv&&hv.trajectory, DATA.outdoor_temp);
+  const s = scale(g, lo, hi); axes(g,s,'°C');
+  line(g,s,DATA.outdoor_temp,'#8b97b8',1.3,[4,3]);
+  if(wh) line(g,s,wh.trajectory,'#34d399',2);
+  if(hv) line(g,s,hv.trajectory,'#f472b6',2);
+}
+
+/* ---------- hover: counterfactual replay, no re-solve ---------- */
+const socCv = $('#cSoc');
+let HOVER_BUSY = false;
+socCv.addEventListener('mousemove', async ev => {
+  if(!DATA || !DATA.devices.battery) return;
+  // One in flight at a time. These are cheap, but the pointer generates them
+  // far faster than a round trip completes.
+  if(HOVER_BUSY) return;
+  // The stored policy is the retained round's. Replaying it over a rejected
+  // round's trajectory would splice two different value functions together.
+  if(!V.retained){ $('#socNow').textContent = 'policy replay is on the retained round only'; return; }
+  const r = socCv.getBoundingClientRect();
+  const L=44, R=8, cap=DATA.battery_capacity;
+  const frac = (ev.clientX - r.left - L) / (r.width - L - R);
+  const t = Math.max(0, Math.min(DATA.steps-1, Math.round(frac*(DATA.steps-1))));
+  const soe = Math.max(0, Math.min(cap, (1 - (ev.clientY-r.top-8)/(r.height-28))*cap));
+  HOVER_BUSY = true;
+  let res, pol;
+  try{
+    res = await api('rollout', {t, soe});
+    if(res.error) return;
+    pol = await api('policy', {t, soe});
+  } finally { HOVER_BUSY = false; }
+  HOVER = res;
+  $('#socNow').textContent = `t=${(t*DATA.dt).toFixed(2)}h  soe=${soe.toFixed(2)} kWh  →  ${pol.action_kw>0?'charge':'discharge'} ${Math.abs(pol.action_kw).toFixed(2)} kW`;
+  $('#lamNow').textContent = `λ here = ${pol.lambda_per_kwh.toFixed(4)} /kWh`;
+  drawSoc();
+});
+socCv.addEventListener('mouseleave', () => { HOVER=null; $('#socNow').textContent=''; drawSoc(); });
+socCv.addEventListener('click', async ev => {
+  if(!DATA || !HOVER || !V.retained) return;
+  const t = HOVER.start_step, soe = HOVER.soe[0];
+  const forced = DATA.devices.battery ? +prompt('Force what battery power (kW, + = charge)?', '5') : null;
+  if(forced === null || Number.isNaN(forced)) return;
+  const r = await api('evaluate', {t, soe, action: forced});
+  if(r.error){ alert(r.error); return; }
+  alert(`Forcing ${r.forced_action} kW instead of the optimal ${r.optimal_action} kW\n`
+      + `costs ${r.opportunity_cost.toFixed(5)} over the rest of the horizon.\n\n`
+      + `Evaluated in ${r.elapsed_ms} ms — a MILP would need a full re-solve.`);
+});
+
+addEventListener('resize', () => DATA && drawAll());
+
+/* ---------- deep links: ?n_batteries=2&max_import_kw=4&tariff=day_night ---------- */
+function applyQuery(){
+  const q = new URLSearchParams(location.search);
+  if(![...q].length) return;
+  for(const [k,v] of q){
+    if(k === 'curtail'){ curtail = v !== '0' && v !== 'false';
+      $('#tgCurtail').classList.toggle('on', curtail); continue; }
+    if(k in devs){ devs[k] = v !== '0' && v !== 'false';
+      const tg = document.querySelector(`.tg[data-dev="${k}"]`);
+      if(tg) tg.classList.toggle('on', devs[k]); continue; }
+    const el = document.getElementById(k);
+    if(!el) continue;
+    el.value = v;
+    el.dispatchEvent(new Event('input'));   // refresh the slider read-out
+  }
+}
+async function boot(){ applyQuery(); await solve(); }
+
+/* HEMS-BOOT-START -- generated by wasm/make_page.py. Replaces the direct
+   boot() call with a Pyodide bootstrap and installs window.__HEMS_API__, so
+   api() stops going over HTTP. Nothing above this line differs from the
+   served page.
+
+   Pyodide runs in a WEB WORKER, not on this thread. A solve is seconds of
+   straight-line numpy, and on the main thread that is seconds of frozen tab -
+   moving a slider produced "page not responding". In a worker the UI keeps
+   painting and the controls keep working while the solve runs. */
+
+const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/";
+
+/* The worker, as source. Built as an array rather than a template literal so
+   that neither backticks nor ${} collide with the outer page. It uses the
+   classic (importScripts) Pyodide build so this is a plain worker rather than
+   a module worker. */
+const WORKER_SRC = [
+  "self.importScripts('" + PYODIDE + "pyodide.js');",
+  "let py = null, api = null;",
+  "self.onmessage = async (e) => {",
+  "  const m = e.data;",
+  "  try {",
+  "    if (m.cmd === 'boot') {",
+  "      self.postMessage({id: m.id, stage: 'the Python runtime'});",
+  "      py = await self.loadPyodide({indexURL: '" + PYODIDE + "'});",
+  "      self.postMessage({id: m.id, stage: 'numpy'});",
+  "      await py.loadPackage('numpy');",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    if (m.cmd === 'loadPackage') {",
+  "      await py.loadPackage(m.pkg);",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    if (m.cmd === 'run') {",
+  "      await py.runPythonAsync(m.src);",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    if (m.cmd === 'ready') {",
+  "      api = py.globals.get('_api');",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    self.postMessage({id: m.id, result: api(m.route, m.payload)});",
+  "  } catch (err) {",
+  "    self.postMessage({id: m.id, error: String((err && err.message) || err)});",
+  "  }",
+  "};",
+].join("\n");
+
+function _status(msg, bad){
+  const e = $('#err');
+  if(!msg){ e.style.display = 'none'; return; }
+  e.style.background   = bad ? 'rgba(252,165,165,.12)' : 'rgba(96,165,250,.12)';
+  e.style.borderColor  = bad ? 'var(--red)'  : 'var(--blue)';
+  e.style.color        = bad ? 'var(--red)'  : 'var(--blue)';
+  e.textContent = msg;
+  e.style.display = 'block';
+}
+
+(async () => {
+  const btn = $('#solve');
+  btn.disabled = true; btn.textContent = 'Loading\u2026';
+  try{
+    const worker = new Worker(URL.createObjectURL(
+      new Blob([WORKER_SRC], {type: 'text/javascript'})));
+
+    let seq = 0;
+    const pending = new Map();
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if(m.stage){ _status('Loading ' + m.stage + '\u2026'); return; }
+      const p = pending.get(m.id);
+      if(!p) return;
+      pending.delete(m.id);
+      if(m.error) p({error: m.error});
+      else if(m.ready) p(true);
+      else p(JSON.parse(m.result));
+    };
+    worker.onerror = (e) => _status('Solver worker failed: ' + e.message, true);
+
+    const send = (msg) => new Promise(resolve => {
+      const id = ++seq;
+      pending.set(id, resolve);
+      worker.postMessage(Object.assign({id}, msg));
+    });
+
+    await send({cmd: 'boot'});
+
+    /* make_standalone.py splices its payload over the fetch line below, and
+       the wheel half of that payload is written against a main-thread
+       `pyodide` object. Pyodide is in the worker here, so this shim gives that
+       generated code the two methods it uses and forwards them. It also means
+       the tool needs no knowledge of the worker. */
+    const pyodide = {
+      loadPackage: (pkg) => send({cmd: 'loadPackage', pkg}),
+      runPythonAsync: (src) => send({cmd: 'run', src}),
+    };
+    void pyodide;
+
+    _status('Loading the solver…');
+    const code = await (await fetch(`hemspolicy_bundle.py?t=${Date.now()}`)).text();
+
+    await send({cmd: 'run', src: code});
+    await send({cmd: 'ready'});
+    window.__HEMS_API__ = (route, payload) =>
+      send({route, payload: JSON.stringify(payload || {})});
+
+    _status('');
+    await boot();
+  }catch(e){
+    _status('Could not start the in-browser solver: ' + e.message, true);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Solve';
+  }
+})();
+/* HEMS-BOOT-END */
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.npz
+.pytest_cache/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# The Cython kernel SOURCES live in wasm/build/, which the bare `build/` rule
+# above would otherwise swallow whole. Un-ignore the directory, then ignore
+# what the compiler and the cross-build leave inside it.
+!wasm/build/
+wasm/build/.venv/
+wasm/build/dist/
+wasm/build/build/
+wasm/build/_skbuild/
+wasm/build/.pyodide-xbuildenv*/
+wasm/build/*.so
+wasm/build/*.c
+wasm/build/*.egg-info/
+
+# Build outputs and material that is not ours to publish
+docs/theory.pdf
+refs/

@@ -1,0 +1,47 @@
+log: info
+interval: 10s
+database:
+  type: sqlite
+  dsn: /tmp/evcc-test.db
+
+meters:
+  - name: grid
+    type: custom
+    power:
+      source: const
+      value: 800
+  - name: pv1
+    type: custom
+    power:
+      source: const
+      value: 1200
+  - name: batt
+    type: custom
+    power:
+      source: const
+      value: 0
+    soc:
+      source: const
+      value: 55
+    capacity: 10
+
+tariffs:
+  currency: EUR
+  grid:
+    type: fixed
+    price: 0.30
+    zones:
+      - days: mon-sun
+        hours: 0-6
+        price: 0.15
+  feedin:
+    type: fixed
+    price: 0.08
+
+site:
+  meters:
+    grid: grid
+    pv:
+      - pv1
+    battery:
+      - batt

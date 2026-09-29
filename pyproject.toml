@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hems-policy"
+version = "0.1.0"
+description = "Value-function tier for home energy management: fast policy, marginal energy price, cheap counterfactuals."
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+service = ["fastapi>=0.110", "uvicorn>=0.27"]
+
+# `dw` (the Dantzig-Wolfe coordinator) sits at the repo root, beside its GUI and
+# wasm build; it ships with the library so hemspolicy.plan(method="dw") works.
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["hemspolicy*", "dw"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]

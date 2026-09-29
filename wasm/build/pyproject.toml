@@ -1,0 +1,13 @@
+[build-system]
+# numpy is deliberately absent: dp_kernels.pyx takes memoryviews and never
+# cimports numpy, so the numpy C API is not used at build time. Cython is
+# pinned because `pyodide build` resolves these in an isolated env and an
+# unpinned toolchain moves the wheel between otherwise identical builds.
+# numpy is still a runtime import; Pyodide supplies it.
+requires = ["setuptools", "wheel", "Cython==3.2.4"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dp_kernels"
+version = "0.1.0"
+description = "Compiled DP backward recursions for hems-policy"

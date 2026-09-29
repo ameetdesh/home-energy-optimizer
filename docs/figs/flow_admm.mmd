@@ -1,0 +1,12 @@
+%%{init: {"flowchart": {"wrappingWidth": 320}}}%%
+%% ADMM (proximal message passing): every device steps near its last plan; a shared price moves with the imbalance.
+flowchart TB
+  S(["<b>Start</b><br/>every plan zero but the household load's; price zero"]) --> A
+  subgraph R["One iteration, repeated"]
+    direction TB
+    A["<b>Every terminal, at the same time</b><br/>its cheapest plan near its last one, moved by the imbalance and the price<br/>devices: their own DP with a tether (strength ρ), no tariff; the tank and HVAC relaxed<br/>grid connection: the bill and the limits, in closed form"]
+    B["<b>The house</b><br/>average the imbalance; raise the price where it persists<br/>make the plan runnable (tank, HVAC on/off) and keep the best so far"]
+    A -- "plans" --> B
+    B -- "imbalance, price" --> A
+  end
+  B -- "the plans settle, or 100 iterations" --> E(["<b>Result</b><br/>the best runnable plan, then a polish: devices re-plan one at a time, kept only if cheaper<br/><i>no bound: how far from the best is unknown</i>"])

@@ -1,0 +1,80 @@
+{
+  "all_devices_dynamic": {
+    "baseline_cost": 3.073176493,
+    "battery_energy": -1.580802469,
+    "battery_throughput": 32.309197531,
+    "battery_traj_end": 0.0,
+    "devices": [
+      "battery",
+      "hvac",
+      "water_heater"
+    ],
+    "export_revenue": 1.916312588,
+    "hvac_energy": 1.125,
+    "hvac_throughput": 1.125,
+    "hvac_traj_end": 24.813939032,
+    "import_cost": 1.602574955,
+    "lambda_at_12": 0.085327688,
+    "lambda_at_76": 0.284766485,
+    "net_cost": -0.313737633,
+    "net_grid_sum": 17.208891725,
+    "rounds_run": 3,
+    "total_objective": 0.032947679,
+    "water_heater_energy": 19.98443615,
+    "water_heater_throughput": 19.98443615,
+    "water_heater_traj_end": 56.985638668
+  },
+  "battery_only_day_night": {
+    "baseline_cost": 1.378938991,
+    "battery_energy": -0.300540123,
+    "battery_throughput": 22.136959877,
+    "battery_traj_end": 2.361111111,
+    "devices": [
+      "battery"
+    ],
+    "export_revenue": 1.253382392,
+    "import_cost": 0.028137071,
+    "lambda_at_12": 0.088888889,
+    "lambda_at_76": 0.36,
+    "net_cost": -1.225245321,
+    "net_grid_sum": -62.107803492,
+    "rounds_run": 2,
+    "total_objective": -0.829411987
+  },
+  "battery_only_dynamic": {
+    "baseline_cost": -0.979254846,
+    "battery_energy": -2.208125,
+    "battery_throughput": 26.333125,
+    "battery_traj_end": 0.0,
+    "devices": [
+      "battery"
+    ],
+    "export_revenue": 3.646103329,
+    "import_cost": 0.516348239,
+    "lambda_at_12": 0.085327688,
+    "lambda_at_76": 0.20856305,
+    "net_cost": -3.12975509,
+    "net_grid_sum": -69.738142998,
+    "rounds_run": 2,
+    "total_objective": -2.864537713
+  },
+  "no_battery_day_night": {
+    "baseline_cost": 6.48967494,
+    "devices": [
+      "hvac",
+      "water_heater"
+    ],
+    "export_revenue": 1.434353936,
+    "hvac_energy": 1.125,
+    "hvac_throughput": 1.125,
+    "hvac_traj_end": 24.469130139,
+    "import_cost": 6.731111428,
+    "net_cost": 5.296757492,
+    "net_grid_sum": 21.647296995,
+    "rounds_run": 8,
+    "total_objective": 5.478534516,
+    "water_heater_energy": 19.513234998,
+    "water_heater_throughput": 19.513234998,
+    "water_heater_traj_end": 54.495011846
+  }
+}

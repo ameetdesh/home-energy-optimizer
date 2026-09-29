@@ -1,0 +1,9 @@
+# Build outputs - regenerate with wasm/build_wheel.sh
+dist/
+build/
+_skbuild/
+.pyodide-xbuildenv*/
+.venv/
+*.c
+*.so
+*.egg-info/

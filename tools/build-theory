@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# Build docs/theory.pdf from docs/theory.tex.
+#
+#   tools/build-theory              # build the PDF
+#   tools/build-theory --figs       # regenerate docs/figs/*.pdf first, then build
+#   tools/build-theory --check      # build into a temp dir; leave theory.pdf alone
+#
+# Engine: tectonic if present (it fetches missing packages on its own, which is
+# why this works on a TeX Live "basic" install - the document needs enumitem,
+# algorithm and algpseudocode, none of which basic ships). Falls back to
+# latexmk, then to three pdflatex passes for the table of contents and the
+# cross-references.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DOCS="$ROOT/docs"
+SRC="theory.tex"
+
+figs=0
+check=0
+for arg in "$@"; do
+  case "$arg" in
+    --figs)  figs=1 ;;
+    --check) check=1 ;;
+    -h|--help) sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$figs" = 1 ]; then
+  echo "==> regenerating figures"
+  PY="$ROOT/.venv/bin/python"
+  [ -x "$PY" ] || PY=python3
+  "$PY" "$ROOT/bench/make_theory_figs.py"
+  # the flow diagrams are Mermaid sources, rendered with mermaid-cli if present
+  if command -v mmdc >/dev/null 2>&1; then
+    for src in "$DOCS"/figs/*.mmd; do
+      mmdc -i "$src" -o "${src%.mmd}.pdf" --pdfFit -b white >/dev/null
+    done
+  else
+    echo "   (mmdc not found: docs/figs/*.mmd not re-rendered; npm i -g @mermaid-js/mermaid-cli)"
+  fi
+fi
+
+outdir="$DOCS"
+if [ "$check" = 1 ]; then
+  outdir="$(mktemp -d)"
+  trap 'rm -rf "$outdir"' EXIT
+fi
+
+cd "$DOCS"
+echo "==> building $SRC"
+if command -v tectonic >/dev/null 2>&1; then
+  tectonic --outdir "$outdir" "$SRC"
+elif command -v latexmk >/dev/null 2>&1; then
+  latexmk -pdf -interaction=nonstopmode -halt-on-error -outdir="$outdir" "$SRC"
+else
+  for _ in 1 2 3; do
+    pdflatex -interaction=nonstopmode -halt-on-error -output-directory "$outdir" "$SRC"
+  done
+fi
+
+# tectonic and latexmk leave only the PDF worth keeping; pdflatex leaves litter.
+rm -f "$DOCS"/theory.aux "$DOCS"/theory.log "$DOCS"/theory.out "$DOCS"/theory.toc \
+      "$DOCS"/theory.fls "$DOCS"/theory.fdb_latexmk
+
+if [ "$check" = 1 ]; then
+  echo "==> ok (built into $outdir; docs/theory.pdf untouched)"
+else
+  echo "==> wrote $DOCS/theory.pdf"
+fi
