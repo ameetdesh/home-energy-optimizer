@@ -2,7 +2,7 @@
 
 Run:  python3 dw/gui/server.py        then open http://127.0.0.1:8766
 
-The DW counterpart of gui/server.py, kept separate so the two can run side by
+The DW counterpart of admm/gui/server.py, kept separate so the two can run side by
 side (ADMM on 8765, DW on 8766). Stdlib HTTP only; the solve itself needs numpy
 and scipy (HiGHS), which the DW master uses.
 

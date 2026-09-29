@@ -140,7 +140,7 @@ def solve_water_heater(
 
     `admm_target`/`admm_rho`: an optional tether (admm_rho/2)(p - target)^2 dt
     on the element's power, as the battery DP has - ADMM's proximal step
-    (hemspolicy.exchange), which runs this on a relaxed (fractional) element.
+    (admm.coordinator), which runs this on a relaxed (fractional) element.
     `ref_price`: the price discomfort is valued at (default: the mean of `buy`),
     for callers whose `buy` is not the tariff.
     """

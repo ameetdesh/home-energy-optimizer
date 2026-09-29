@@ -369,7 +369,7 @@ class SocGate:
 
 @dataclass(frozen=True)
 class CoordinationConfig:
-    """ADMM parameters: proximal message passing (hemspolicy.exchange).
+    """ADMM parameters: proximal message passing (admm.coordinator).
 
     Every device takes its cheapest plan near a target, responding only to the
     house's imbalance and a shared price; the tank and HVAC iterate as relaxed
@@ -389,7 +389,7 @@ class CoordinationConfig:
     relax_levels: int = 13               # duty steps the on/off tank and HVAC may take while iterating
     # Each battery's step, each battery on its own: "dp", its DP on its state
     # grid; "lp", its LP (the Dantzig-Wolfe master's battery model) solved
-    # exactly (hemspolicy.battery_qp). Plain batteries only - an EV's charger
+    # exactly (admm.battery_qp). Plain batteries only - an EV's charger
     # minimum, goals and SoC gates stay with the DP.
     exchange_battery_step: str = "dp"
     # Start each LP battery step from that battery's previous solution (about a

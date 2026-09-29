@@ -1,6 +1,6 @@
 """Local GUI for exercising the headless core, and a prototype of the Phase 3 sidecar.
 
-Run:  .venv/bin/python gui/server.py    then open http://127.0.0.1:8765
+Run:  .venv/bin/python admm/gui/server.py    then open http://127.0.0.1:8765
 
 Deliberately stdlib-only (`http.server`), so it adds no dependency to a package
 whose whole point is being embeddable. It runs the *same* code the tests run -
@@ -51,11 +51,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))  # dw: the evcc endpoint plans with Dantzig-Wolfe
+sys.path.insert(0, str(ROOT))  # admm, and dw: the evcc endpoint plans with Dantzig-Wolfe
 
-from hemspolicy import webapi  # noqa: E402
+from admm import webapi  # noqa: E402
 from hemspolicy.evcc import (  # noqa: E402
     ContractError,
     health as evcc_health,
@@ -66,11 +66,11 @@ HERE = Path(__file__).resolve().parent
 
 
 class Handler(BaseHTTPRequestHandler):
-    """HTTP in front of `hemspolicy.webapi`.
+    """HTTP in front of `admm.webapi`.
 
     Every /api/<name> path maps straight onto webapi.ROUTES, so this class
     knows nothing about the solver - which is what lets the standalone page in
-    wasm/ call the same functions in the browser with no server at all.
+    admm/wasm/ call the same functions in the browser with no server at all.
     """
 
     def log_message(self, *_args):  # quiet

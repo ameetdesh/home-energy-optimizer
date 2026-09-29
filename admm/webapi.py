@@ -1,6 +1,6 @@
 """Backend for the testbed UI, independent of how the call arrives.
 
-`gui/server.py` wraps this in HTTP; the standalone page in `wasm/` calls the
+`admm/gui/server.py` wraps this in HTTP; the standalone page in `admm/wasm/` calls the
 same functions directly inside Pyodide. Keeping the logic here rather than in
 the server is what lets the two share an implementation instead of drifting -
 the same reason the solver core is a package rather than something the GUI
@@ -17,13 +17,13 @@ import threading
 
 import numpy as np
 
-from .coordinate import (
+from hemspolicy.coordinate import (
     _pricing_resolve,
     baseline_solution,
     coordinate,
     grid_penalty,
 )
-from .policy import (
+from hemspolicy.policy import (
     PolicySnapshot,
     HardLimits,
     action,
@@ -33,8 +33,8 @@ from .policy import (
     reservation_prices,
     rollout,
 )
-from .profiles import demo_forecasts
-from .types import (
+from hemspolicy.profiles import demo_forecasts
+from hemspolicy.types import (
     BatteryConfig,
     CoordinationConfig,
     CoordinationResult,

@@ -52,7 +52,7 @@ It uses [tectonic](https://tectonic-typesetting.github.io) if installed (it
 fetches missing LaTeX packages itself), else `latexmk`, else three `pdflatex`
 passes.
 
-Rebuilding the single-file browser pages (`wasm/build.sh`, `dw/wasm/build.sh`)
+Rebuilding the single-file browser pages (`admm/wasm/build.sh`, `dw/wasm/build.sh`)
 needs `make_standalone.py`, which is not in this repository yet; point
 `MAKE_STANDALONE` at it. The committed pages and the tests do not need it.
 
@@ -102,14 +102,14 @@ both can run at once and be compared on the same settings.
 
 | | ADMM coordinator, and the policy/evcc endpoints | Dantzig–Wolfe coordinator, with ADMM as an option (`dw/`) |
 |---|---|---|
-| start | `.venv/bin/python gui/server.py` | `.venv/bin/python dw/gui/server.py` |
+| start | `.venv/bin/python admm/gui/server.py` | `.venv/bin/python dw/gui/server.py` |
 | opens | <http://127.0.0.1:8765> | <http://127.0.0.1:8766> |
 | needs | numpy | numpy (the DW master uses the built-in solver in `dw/lpsolver.py`; scipy only for the optional HiGHS cross-check) |
 | shows | ADMM iterations, λ, policy replay on hover | column-generation iterations, lower bound, meter price π, λ from the master |
 
 ```bash
 # terminal 1 - ADMM
-.venv/bin/python gui/server.py            # http://127.0.0.1:8765
+.venv/bin/python admm/gui/server.py       # http://127.0.0.1:8765
 
 # terminal 2 - Dantzig-Wolfe
 .venv/bin/python dw/gui/server.py         # http://127.0.0.1:8766
@@ -335,7 +335,7 @@ src/hemspolicy/
   types.py         config + result dataclasses
   dp_battery.py    battery DP; returns the value function and policy
   dp_thermal.py    hot-water and HVAC DPs, and their thermostat baselines
-  coordinate.py    multi-device coordination (ADMM), grid limits, curtailment
+  coordinate.py    plan scoring shared by both coordinators; coordinate() runs ADMM
   planner.py       plan(): Dantzig-Wolfe (default) or ADMM, one result type
   policy.py        value function -> actions, prices, counterfactuals
   feeds.py         real forecast inputs
@@ -343,9 +343,11 @@ src/hemspolicy/
   evcc.py          evcc optimizer wire contract
   profiles.py      synthetic forecasts for tests and demos
 bench/             exact references: continuous LP, joint DP, MILP, duals
-gui/               local web UI (ADMM), the policy API and the evcc endpoint
-dw/                Dantzig-Wolfe coordinator, its comparison runner and its UI (dw/gui/);
+admm/              ADMM coordinator (coordinator.py), its exact LP battery step (battery_qp.py),
+                   and its app: webapi.py, gui/ (also the policy API and the evcc endpoint), wasm/
+dw/                Dantzig-Wolfe coordinator, its comparison runner and its app (dw/gui/, dw/wasm/);
                    dw/integrate.py hands its plan to Home Assistant and evcc
+wasm/              shared browser-build tooling: the compiled-kernel wheel, keep_names.py
 tools/             HA dashboard setup, evcc compatibility checks
 docs/theory.tex    theory notes (tools/build-theory makes the PDF)
 docs/NOTES.md      measured findings

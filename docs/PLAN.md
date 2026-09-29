@@ -157,11 +157,11 @@ differences with model differences).
 
 ## Phase 3 — The sidecar service (mostly done via the GUI)
 
-- [x] All five endpoints, in `gui/server.py` (stdlib-only). The GUI *is* the
+- [x] All five endpoints, in `admm/gui/server.py` (stdlib-only). The GUI *is* the
       sidecar draft: `/api/solve`, `/api/policy`, `/api/lambda`, `/api/rollout`,
       `/api/evaluate`, `/api/setpoint`.
 - [x] Persist `V`/`POL` between solves (`.npz`)
-- [ ] Split the service out of `gui/` into its own module once a second consumer
+- [ ] Split the service out of `admm/gui/` into its own module once a second consumer
       exists; add per-site keying instead of one global snapshot.
 - [x] Hard-constraint clamp + ramp limiting, exposed as `POST /api/setpoint` —
       the endpoint real hardware should call. Reports every binding limit.
@@ -179,7 +179,7 @@ environment variable (`core/site_optimizer.go:341`).
       generated client in `github.com/evcc-io/optimizer/client`, pinned by
       commit in evcc's `go.mod`. `POST /optimize/charge-schedule` and
       `GET /optimize/health`.
-- [x] Implemented in `src/hemspolicy/evcc.py`, served by `gui/server.py`.
+- [x] Implemented in `src/hemspolicy/evcc.py`, served by `admm/gui/server.py`.
       27 tests in `tests/test_evcc_contract.py` cover the unit conversions
       (W/Wh and per-Wh prices vs kW/kWh and per-kWh), the signed-to-split power
       mapping, the s_min offset, and evcc's short first slot.

@@ -13,11 +13,12 @@ dependencies = ["numpy>=1.24"]
 test = ["pytest>=7"]
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
 
-# `dw` (the Dantzig-Wolfe coordinator) sits at the repo root, beside its GUI and
-# wasm build; it ships with the library so hemspolicy.plan(method="dw") works.
+# The two coordinators, `dw` (Dantzig-Wolfe) and `admm`, sit at the repo root,
+# each beside its GUI and wasm build; they ship with the library so
+# hemspolicy.plan() and hemspolicy.coordinate() work.
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["hemspolicy*", "dw"]
+include = ["hemspolicy*", "dw", "admm"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
