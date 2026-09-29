@@ -137,7 +137,7 @@ def fig_coordination(hours: float = 24.0) -> dict[str, list[dict]]:
     batt = BatteryConfig(capacity_kwh=10.0)                 # the shipped grid
     wh = WaterHeaterConfig()                                # on/off element
     site = SiteConfig(horizon=h, battery=batt, water_heater=wh, hvac=None,
-                      coordination=CoordinationConfig(algorithm="exchange"))
+                      coordination=CoordinationConfig())
     t = np.arange(h.steps) * h.dt
     ts = np.arange(h.steps + 1) * h.dt
 

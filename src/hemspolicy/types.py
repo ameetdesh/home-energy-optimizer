@@ -369,46 +369,17 @@ class SocGate:
 
 @dataclass(frozen=True)
 class CoordinationConfig:
-    """ADMM / price-coordination loop parameters."""
+    """ADMM parameters: proximal message passing (hemspolicy.exchange).
 
-    rho: float = 5.0
-    max_rounds: int = 15
+    Every device takes its cheapest plan near a target, responding only to the
+    house's imbalance and a shared price; the tank and HVAC iterate as relaxed
+    copies, and every iteration recovers a runnable plan. See docs/theory.tex,
+    "The second coordinator: ADMM".
+    """
+
+    # Relative improvement below which an iteration does not count as a better
+    # plan (for exchange_patience).
     converge_tol: float = 0.002
-    residual_tol: float = 0.5
-    rho_adapt_ratio: float = 10.0
-    rho_adapt_factor: float = 1.5
-    rho_min: float = 0.5
-    rho_max: float = 100.0
-    # Boyd et al. 3.4.1: residual balancing is only safe if rho eventually
-    # stops moving; after this round it is held where it is.
-    rho_freeze_round: int = 25
-    # Stop when the best plan has not improved (by converge_tol, relative) for
-    # this many rounds - not when two consecutive rounds look alike, which
-    # stopped 29 of 72 test sites after 2-3 rounds with plenty left to find.
-    patience: int = 20
-    # Nesterov momentum on the targets and duals, restarted whenever the
-    # combined residual grows (Goldstein et al. 2014, "fast ADMM with restart").
-    momentum: bool = True
-    restart_eta: float = 0.999
-    # Limit cycles: the devices all re-plan at once against the others' LAST
-    # plans, so two can keep swapping the same slot. When a round repeats one
-    # of the last few, the load each device sees of the others is damped
-    # (halved step, down to damping_min) and so is the grid-limit price step.
-    damping_min: float = 0.125
-    # How devices learn about the grid limits. "exact": each device prices any
-    # energy beyond a limit at the objective's breach price, given the
-    # others' load (hemspolicy.meter), so it takes the headroom that is left
-    # and nothing hunts. "price": through limit prices mu raised and lowered
-    # round by round (GridLimits.price_step) - the earlier method; on 36 test
-    # sites with a limit it left the plan 1.65 above the DW bound on average,
-    # against 0.97 for "exact" (docs/theory.tex, Appendix on ADMM).
-    grid_mode: str = "exact"
-    # Which ADMM. "legacy": the loop in coordinate.py (each device re-plans
-    # against the others' last plans; the settings above). "exchange": textbook
-    # ADMM, proximal message passing (hemspolicy.exchange) - every device
-    # tethered, responding only to a shared price; the settings below.
-    algorithm: str = "legacy"
-    # textbook ADMM (algorithm = "exchange"):
     exchange_rounds: int = 100           # iteration budget (on 12 test sites, 300 came 0.02 closer to the DW bound, at twice the time)
     exchange_rho: float = 0.1            # starting rho (currency per kW^2-slot)
     exchange_rho_gain: float = 0.01      # the paper's rho rule: lambda = mu
@@ -427,11 +398,10 @@ class CoordinationConfig:
     kink_smoothing: float = 0.25         # kW: round the bill's kink at zero flow over |z| < this (12 test sites: 3x as many runs converge, plans 0.02 further from the DW bound)
     exchange_momentum: bool = False      # Nesterov extrapolation with restart (fast ADMM)
     enable_baseline_fallback: bool = True
-    # After the rounds: each device in turn re-plans against the others'
+    # After the iterations: each device in turn re-plans against the others'
     # CURRENT plans; a change is kept only if the objective falls, so it can
-    # never make the plan worse. Measured against the DW bound
-    # (bench/admm_variants.py --limits): mean distance 0.353 -> 0.270 without
-    # limits, larger gains where a limit was breached; ~0.15 s.
+    # never make the plan worse. On 12 test sites (bench/exchange_tune.py) the
+    # best iteration's plan lies 1.99 above the DW bound, 0.42 after polishing.
     polish: bool = True
     polish_sweeps: int = 3
 
@@ -441,10 +411,10 @@ class GridLimits:
     """Hard limits on the grid connection (fuse, or an operator dimming order).
 
     These are a COUPLING constraint: they bind the sum of every device's power
-    plus the inflexible load, so no per-device DP can enforce one on its own.
-    The coordinator prices them instead - a per-timestep multiplier that raises
-    the effective import price until the plan fits. That multiplier is a shadow
-    price on the constraint, the same object lambda is for stored energy.
+    plus the inflexible load, so no per-device plan can enforce one on its own.
+    The coordinators price them instead, at `breach_price` per kWh beyond the
+    limit: Dantzig-Wolfe in its master LP, ADMM in the grid connection's step
+    (and each device where it re-plans against the others).
 
     A plan that exceeds a limit is not cut back afterwards: the exceedance
     stays in the plan, is reported, and is charged at `breach_price`, so its
@@ -460,14 +430,6 @@ class GridLimits:
     # Curtailment is also the right answer to a negative export price: being
     # paid to stop generating beats paying to generate.
     allow_curtailment: bool = True
-    # Dual-ascent step size, as a fraction of the mean |import price| per kW of
-    # violation. 4.0 since the ADMM study (bench/admm_variants.py --limits,
-    # bench/admm_holdout.py): over 15 limit cases on two sites it halves the
-    # distance to the DW optimality bound against 1.0 (1.28 -> 0.62 and
-    # 1.90 -> 0.55) and removes most breaches at tight limits; it differs from
-    # 1.0 only when a limit binds hard. (An earlier note, on one site, had 4.0
-    # starting to overshoot; not seen in these cases.)
-    price_step: float = 4.0
     enforce: bool = True
     # What a kWh drawn (or pushed) beyond the limit costs, in currency per kWh,
     # on top of the energy's own price. ONE constant for the whole horizon: a
@@ -612,13 +574,13 @@ class DeviceSolution:
 
 @dataclass
 class RoundRecord:
-    """One coordination round, kept so a round can be inspected after the fact.
+    """One ADMM iteration, kept so it can be inspected after the fact.
 
-    The coordinator returns the BEST round, not the last one, and which round
-    that was is not obvious from the outside - the loop damps, overshoots and
-    occasionally gets worse before it gets better. These records are what make
-    that visible: every round's plan, what it cost, and how far the devices
-    still disagreed when it was scored.
+    The coordinator returns the BEST iteration's runnable plan, polished, not
+    the last one, and which iteration that was is not obvious from the outside -
+    ADMM is not a descent method, so the cost rises as well as falls. These
+    records are what make that visible: every iteration's runnable plan, what it
+    cost, and how far the house still was from balance when it was scored.
 
     Only 1-D series are kept. The value functions and policies are not: they
     are the largest object in a solve by two orders of magnitude, and anything
@@ -642,9 +604,9 @@ class RoundRecord:
     import_excess: float  # worst single-slot import breach, kW
     export_excess: float  # worst single-slot export breach, kW
 
-    # ADMM residuals as they stood when this round was scored. primal is how
-    # far the devices' plans sit from the coordinator's targets; dual is how
-    # far the targets themselves moved. Convergence needs both small.
+    # ADMM residuals as they stood when this iteration was scored: primal is
+    # the house's imbalance, sqrt(N) |pbar|; dual is how far the plans moved,
+    # rho |(p - pbar) - (p - pbar)_prev|. Convergence needs both small.
     primal_res: float
     dual_res: float
     rho: float
@@ -652,21 +614,18 @@ class RoundRecord:
     round_ms: float
     device_ms: dict[str, float]
 
-    # The residual load the battery was solved against. Enough to re-derive
-    # this round's value function and lambda without keeping either.
+    # The residual load the battery's runnable plan sits in: the rest of the
+    # house. Enough to re-derive this iteration's value function and lambda at
+    # the tariff without keeping either.
     battery_dp_load: np.ndarray | None = None
 
     selected: bool = False
 
-    # The objective this round was RANKED on. Held separately from
-    # `total_objective` because the retained round is re-pointed at the final
-    # plan afterwards if the baseline fallback swaps a device out, and the
-    # ranking that chose it happened before that. On every other round the two
-    # agree exactly.
+    # The objective this iteration was ranked on (the same as total_objective).
     score_objective: float = 0.0
     fallback_applied: bool = False
-    # Textbook ADMM only: the cost of this iteration's relaxed plan (fractional
-    # tank / HVAC), beside total_objective, the runnable plan recovered from it.
+    # The cost of this iteration's relaxed plan (fractional tank / HVAC),
+    # beside total_objective, the runnable plan recovered from it.
     relaxed_objective: float | None = None
 
 
@@ -685,7 +644,8 @@ class CoordinationResult:
     rounds: list[RoundRecord] = field(default_factory=list)
     selected_round: int = 0
     # Why the loop ended: "converged" (small residuals), "no improvement"
-    # (CoordinationConfig.patience rounds without a better plan) or "iteration cap".
+    # (CoordinationConfig.exchange_patience iterations without a better plan),
+    # "iteration cap", or "paused" (an ExchangeRun stopped part-way).
     stop_reason: str = ""
     # Context needed to replay the battery value function later (policy.py).
     # Economics-only battery solve (no ADMM term) used by the pricing/policy
@@ -700,8 +660,6 @@ class CoordinationResult:
     curtailment: np.ndarray | None = None
     curtailed_kwh: float = 0.0
     battery_dp_load: np.ndarray | None = None
-    battery_admm_target: np.ndarray | None = None
-    battery_rho: float = 0.0
     baseline_cost: float = 0.0
     # Which coordinator produced this: "admm" (coordinate) or "dw" (dw/).
     method: str = "admm"

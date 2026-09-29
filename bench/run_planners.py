@@ -65,7 +65,7 @@ def ha_site() -> SiteConfig:
         horizon=Horizon(dt=0.25, hours=24.0),
         battery=BatteryConfig(capacity_kwh=10.0, n_states=100, n_actions=51),
         water_heater=WaterHeaterConfig(), hvac=HvacConfig(),
-        coordination=CoordinationConfig(max_rounds=6),
+        coordination=CoordinationConfig(),
     )
 
 

@@ -1,10 +1,10 @@
-"""Tune textbook ADMM (hemspolicy.exchange) for speed without losing quality.
+"""Tune ADMM (hemspolicy.exchange) for speed without losing quality.
 
     .venv/bin/python bench/exchange_tune.py ['{"relax_levels": 5}' ...]
 
 On 12 of the 72 sites (each tariff x 1 or 3 batteries x a 7 kW limit or none;
 5 kW of PV, 10 kWh per battery, 48 hours), each variant - a set of
-CoordinationConfig overrides on top of algorithm "exchange" - is scored by
+CoordinationConfig overrides on top of the defaults - is scored by
 DWCoordinator.parts against the DW bound of the site's (on/off) problem, with
 its iterations, why it stopped, and its time. No argument runs a default set.
 """
@@ -33,7 +33,7 @@ from hemspolicy.types import CoordinationConfig  # noqa: E402
 SITES = [(t, nb, lim, 5, 10) for t, nb, lim in itertools.product(("dynamic", "day_night", "flat"), (1, 3), (7, None))]
 DEFAULT = [{}, {"relax_levels": 5}, {"kink_smoothing": 0.25}, {"exchange_momentum": True},
            {"exchange_rho": 0.03}, {"relax_levels": 5, "kink_smoothing": 0.25, "exchange_momentum": True},
-           {"max_rounds": 100}]
+           {"exchange_rounds": 300}]
 
 
 def load(s):
@@ -50,7 +50,7 @@ def bound(s):
 def task(args):
     s, over, b = args
     site, fc, _ = load(s)
-    cc = CoordinationConfig(**{"algorithm": "exchange", "max_rounds": 300, **over})
+    cc = CoordinationConfig(**over)
     t = time.perf_counter()
     res = coordinate(replace(site, coordination=cc), fc)
     sec = time.perf_counter() - t

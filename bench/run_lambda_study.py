@@ -68,7 +68,7 @@ def experiment_a() -> list[dict]:
         lp = lp_battery_with_duals(cfg, h, fc.buy, fc.sell, dp_load)
         site = SiteConfig(
             horizon=h, battery=cfg, water_heater=None, hvac=None,
-            coordination=CoordinationConfig(max_rounds=8),
+            coordination=CoordinationConfig(),
         )
         snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
 
@@ -102,7 +102,7 @@ def experiment_b() -> list[dict]:
     wh = WaterHeaterConfig()
     site = SiteConfig(
         horizon=h, battery=batt, water_heater=wh, hvac=None,
-        coordination=CoordinationConfig(max_rounds=15),
+        coordination=CoordinationConfig(),
     )
 
     for tariff in TARIFFS:

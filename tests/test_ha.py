@@ -48,7 +48,7 @@ def snap() -> PolicySnapshot:
         battery=BatteryConfig(capacity_kwh=10.0, n_states=100, n_actions=51),
         water_heater=None,
         hvac=None,
-        coordination=CoordinationConfig(max_rounds=6),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     fc = demo_forecasts(site.horizon, tariff="day_night")
     return PolicySnapshot.from_result(site, fc, coordinate(site, fc))

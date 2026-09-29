@@ -21,7 +21,6 @@ from hemspolicy import (
     coordinate,
     demo_forecasts,
     marginal_value,
-    solve_battery,
 )
 
 
@@ -31,7 +30,7 @@ def _battery_site(**batt) -> SiteConfig:
         battery=BatteryConfig(capacity_kwh=10.0, **batt),
         water_heater=None,
         hvac=None,
-        coordination=CoordinationConfig(max_rounds=8),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
 
 
@@ -112,39 +111,13 @@ def test_quadratic_terminal_zeroes_lambda_at_the_horizon_edge():
 
 
 # --------------------------------------------------------------------------
-# Defect 2: unseeded ADMM target disables the battery
+# Defect 2: a coordinated battery pinned off
 # --------------------------------------------------------------------------
 
 
-def test_admm_proximity_about_zero_would_disable_the_battery():
-    """Reproduces the failure mode directly, at the solver level.
-
-    With target = 0 and the default rho, the proximity penalty is
-    (5/2) * a^2 * 0.25 = 0.625 a^2 - about 15 currency at 5 kW, against
-    ~0.2/kWh of arbitrage. The battery does nothing. The coordinator now
-    warm-starts the target from a free solve so this cannot happen.
-    """
-    h = Horizon(dt=0.25, hours=24.0)
-    cfg = BatteryConfig(capacity_kwh=10.0)
-    fc = demo_forecasts(h, tariff="day_night")
-
-    free = solve_battery(cfg, h, fc.buy, fc.sell, dp_load=fc.net_fixed_demand)
-    pinned = solve_battery(
-        cfg,
-        h,
-        fc.buy,
-        fc.sell,
-        dp_load=fc.net_fixed_demand,
-        admm_target=np.zeros(h.steps),
-        admm_rho=5.0,
-    )
-
-    assert np.abs(free.power).sum() > 10.0
-    assert np.abs(pinned.power).sum() < 1e-6
-
-
-def test_coordinator_warm_starts_the_battery_target():
-    """End-to-end guard: the coordinated battery must not be pinned off."""
+def test_the_coordinated_battery_trades():
+    """End-to-end guard: the coordinated battery must not be pinned off (an
+    earlier coordinator tethered it to zero until its target was seeded)."""
     for tariff in ("flat", "day_night", "dynamic"):
         site = _battery_site()
         fc = demo_forecasts(site.horizon, tariff=tariff)
@@ -153,13 +126,13 @@ def test_coordinator_warm_starts_the_battery_target():
         assert throughput > 1.0, f"battery pinned off on {tariff}"
 
 
-def test_warm_start_also_applies_with_thermal_devices_present():
+def test_the_battery_trades_with_thermal_devices_present():
     site = SiteConfig(
         horizon=Horizon(dt=0.25, hours=24.0),
         battery=BatteryConfig(capacity_kwh=10.0),
         water_heater=WaterHeaterConfig(),
         hvac=HvacConfig(),
-        coordination=CoordinationConfig(max_rounds=8),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     fc = demo_forecasts(site.horizon, tariff="day_night")
     res = coordinate(site, fc)
@@ -250,7 +223,7 @@ def test_negative_export_price_does_not_buy_phantom_battery_cycles():
         horizon=h, battery=BatteryConfig(capacity_kwh=10.0),
         water_heater=None, hvac=None,
         grid=GridLimits(allow_curtailment=True),
-        coordination=CoordinationConfig(max_rounds=15),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     throughput = lambda r: float(np.abs(r.devices["battery"].power).sum() * h.dt)
     midday = slice(int(10 / h.dt), int(15 / h.dt))

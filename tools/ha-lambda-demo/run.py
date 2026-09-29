@@ -10,7 +10,7 @@ The two-tier structure the whole package argues for is visible here:
 
 * the **slow tier** re-plans on `--resolve-every` simulated minutes, the
   cadence forecasts actually change on - with Dantzig-Wolfe by default
-  (`--method admm` for the ADMM loop);
+  (`--method admm` for ADMM, each re-solve starting from the last one's state);
 * the **fast tier** publishes on every simulated slot from the stored value
   function - a table lookup, no solver involved.
 
@@ -35,7 +35,6 @@ import numpy as np  # noqa: E402
 
 from hemspolicy import (  # noqa: E402
     BatteryConfig,
-    CoordinationConfig,
     Horizon,
     HvacConfig,
     PolicySnapshot,
@@ -56,7 +55,6 @@ def build(hours: float, tariff: str, capacity: float, grid: int, thermal: bool) 
         ),
         water_heater=WaterHeaterConfig() if thermal else None,
         hvac=HvacConfig() if thermal else None,
-        coordination=CoordinationConfig(max_rounds=6),
     )
     return site, demo_forecasts(site.horizon, tariff=tariff)
 
@@ -86,7 +84,7 @@ def main() -> None:
     )
     ap.add_argument("--prefix", default="hems")
     ap.add_argument(
-        "--method", default="dw", choices=["dw", "admm", "admm_legacy"],
+        "--method", default="dw", choices=["dw", "admm"],
         help="coordinator for the slow tier (default: Dantzig-Wolfe)",
     )
     ap.add_argument(
@@ -141,7 +139,9 @@ def main() -> None:
                     ),
                 ),
             )
-            res = plan(resolve, fc, method=args.method)
+            # ADMM starts from where the last solve stood (the horizon has not
+            # moved - the same day is replayed - so there is nothing to shift).
+            res = plan(resolve, fc, method=args.method, warm=res.warm_start)
             snap = PolicySnapshot.from_result(resolve, fc, res)
             since_solve = 0.0
             tier = "SOLVE"

@@ -111,12 +111,13 @@ def strip_module(path: pathlib.Path) -> tuple[str, list[str]]:
         # hoisted to the top of the bundle and de-duplicated there.
         if isinstance(node, ast.ImportFrom) and (node.level > 0 or node.module == "__future__"):
             # A nested one must leave a statement behind, or it would empty an
-            # indented block. Rebind the flat name to what the import promised.
+            # indented block. Rebind a renamed import to its flat name; a plain
+            # one needs nothing (the flat name is a module global), and `x = x`
+            # inside a function would make x an unbound local.
             if node.col_offset:
                 pad = " " * node.col_offset
-                lines[node.lineno - 1] = pad + "; ".join(
-                    f"{a.asname or a.name} = {a.name}" for a in node.names
-                )
+                binds = [f"{a.asname} = {a.name}" for a in node.names if a.asname and a.asname != a.name]
+                lines[node.lineno - 1] = pad + ("; ".join(binds) or "pass")
                 drop.update(range(node.lineno, node.end_lineno))
             else:
                 drop.update(span)

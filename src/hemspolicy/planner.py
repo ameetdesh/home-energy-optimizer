@@ -1,8 +1,7 @@
 """One entry point for both coordinators.
 
     plan(site, fc)                          # Dantzig-Wolfe (the default)
-    plan(site, fc, method="admm")           # textbook ADMM, hemspolicy.exchange
-    plan(site, fc, method="admm_legacy")    # the older ADMM loop, hemspolicy.coordinate
+    plan(site, fc, method="admm")           # ADMM, hemspolicy.exchange
 
 Both return a `CoordinationResult`, so everything downstream - the policy
 snapshot, Home Assistant publishing, the evcc contract - is the same. The DW
@@ -15,17 +14,14 @@ this one) and is imported only when asked for.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from .coordinate import coordinate
 from .types import CoordinationResult, Forecasts, SiteConfig
 
-METHODS = ("dw", "admm", "admm_legacy")
+METHODS = ("dw", "admm")
 
 
-def _admm(cfg: SiteConfig, fc: Forecasts, algorithm: str, warm=None) -> CoordinationResult:
-    return coordinate(replace(cfg, coordination=replace(cfg.coordination, algorithm=algorithm)), fc,
-                      warm=warm)
+def _admm(cfg: SiteConfig, fc: Forecasts, warm=None) -> CoordinationResult:
+    return coordinate(cfg, fc, warm=warm)
 
 
 def plan(cfg: SiteConfig, fc: Forecasts, method: str = "dw", fallback: bool = True,
@@ -42,9 +38,7 @@ def plan(cfg: SiteConfig, fc: Forecasts, method: str = "dw", fallback: bool = Tr
     the slots that have passed (`WarmStart.shift`), to start from there.
     """
     if method == "admm":
-        return _admm(cfg, fc, "exchange", warm)
-    if method == "admm_legacy":
-        return _admm(cfg, fc, "legacy")
+        return _admm(cfg, fc, warm)
     if method != "dw":
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
     from dw.integrate import dw_plan
@@ -54,6 +48,6 @@ def plan(cfg: SiteConfig, fc: Forecasts, method: str = "dw", fallback: bool = Tr
     except (ValueError, RuntimeError) as exc:
         if not fallback:
             raise
-        res = _admm(cfg, fc, "exchange")
-        res.note = f"DW unavailable ({exc}); planned with textbook ADMM"
+        res = _admm(cfg, fc)
+        res.note = f"DW unavailable ({exc}); planned with ADMM"
         return res

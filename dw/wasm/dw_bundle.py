@@ -468,46 +468,17 @@ class SocGate:
 
 @dataclass(frozen=True)
 class CoordinationConfig:
-    """ADMM / price-coordination loop parameters."""
+    """ADMM parameters: proximal message passing (hemspolicy.exchange).
 
-    rho: float = 5.0
-    max_rounds: int = 15
+    Every device takes its cheapest plan near a target, responding only to the
+    house's imbalance and a shared price; the tank and HVAC iterate as relaxed
+    copies, and every iteration recovers a runnable plan. See docs/theory.tex,
+    "The second coordinator: ADMM".
+    """
+
+    # Relative improvement below which an iteration does not count as a better
+    # plan (for exchange_patience).
     converge_tol: float = 0.002
-    residual_tol: float = 0.5
-    rho_adapt_ratio: float = 10.0
-    rho_adapt_factor: float = 1.5
-    rho_min: float = 0.5
-    rho_max: float = 100.0
-    # Boyd et al. 3.4.1: residual balancing is only safe if rho eventually
-    # stops moving; after this round it is held where it is.
-    rho_freeze_round: int = 25
-    # Stop when the best plan has not improved (by converge_tol, relative) for
-    # this many rounds - not when two consecutive rounds look alike, which
-    # stopped 29 of 72 test sites after 2-3 rounds with plenty left to find.
-    patience: int = 20
-    # Nesterov momentum on the targets and duals, restarted whenever the
-    # combined residual grows (Goldstein et al. 2014, "fast ADMM with restart").
-    momentum: bool = True
-    restart_eta: float = 0.999
-    # Limit cycles: the devices all re-plan at once against the others' LAST
-    # plans, so two can keep swapping the same slot. When a round repeats one
-    # of the last few, the load each device sees of the others is damped
-    # (halved step, down to damping_min) and so is the grid-limit price step.
-    damping_min: float = 0.125
-    # How devices learn about the grid limits. "exact": each device prices any
-    # energy beyond a limit at the objective's breach price, given the
-    # others' load (hemspolicy.meter), so it takes the headroom that is left
-    # and nothing hunts. "price": through limit prices mu raised and lowered
-    # round by round (GridLimits.price_step) - the earlier method; on 36 test
-    # sites with a limit it left the plan 1.65 above the DW bound on average,
-    # against 0.97 for "exact" (docs/theory.tex, Appendix on ADMM).
-    grid_mode: str = "exact"
-    # Which ADMM. "legacy": the loop in coordinate.py (each device re-plans
-    # against the others' last plans; the settings above). "exchange": textbook
-    # ADMM, proximal message passing (hemspolicy.exchange) - every device
-    # tethered, responding only to a shared price; the settings below.
-    algorithm: str = "legacy"
-    # textbook ADMM (algorithm = "exchange"):
     exchange_rounds: int = 100           # iteration budget (on 12 test sites, 300 came 0.02 closer to the DW bound, at twice the time)
     exchange_rho: float = 0.1            # starting rho (currency per kW^2-slot)
     exchange_rho_gain: float = 0.01      # the paper's rho rule: lambda = mu
@@ -526,11 +497,10 @@ class CoordinationConfig:
     kink_smoothing: float = 0.25         # kW: round the bill's kink at zero flow over |z| < this (12 test sites: 3x as many runs converge, plans 0.02 further from the DW bound)
     exchange_momentum: bool = False      # Nesterov extrapolation with restart (fast ADMM)
     enable_baseline_fallback: bool = True
-    # After the rounds: each device in turn re-plans against the others'
+    # After the iterations: each device in turn re-plans against the others'
     # CURRENT plans; a change is kept only if the objective falls, so it can
-    # never make the plan worse. Measured against the DW bound
-    # (bench/admm_variants.py --limits): mean distance 0.353 -> 0.270 without
-    # limits, larger gains where a limit was breached; ~0.15 s.
+    # never make the plan worse. On 12 test sites (bench/exchange_tune.py) the
+    # best iteration's plan lies 1.99 above the DW bound, 0.42 after polishing.
     polish: bool = True
     polish_sweeps: int = 3
 
@@ -540,10 +510,10 @@ class GridLimits:
     """Hard limits on the grid connection (fuse, or an operator dimming order).
 
     These are a COUPLING constraint: they bind the sum of every device's power
-    plus the inflexible load, so no per-device DP can enforce one on its own.
-    The coordinator prices them instead - a per-timestep multiplier that raises
-    the effective import price until the plan fits. That multiplier is a shadow
-    price on the constraint, the same object lambda is for stored energy.
+    plus the inflexible load, so no per-device plan can enforce one on its own.
+    The coordinators price them instead, at `breach_price` per kWh beyond the
+    limit: Dantzig-Wolfe in its master LP, ADMM in the grid connection's step
+    (and each device where it re-plans against the others).
 
     A plan that exceeds a limit is not cut back afterwards: the exceedance
     stays in the plan, is reported, and is charged at `breach_price`, so its
@@ -559,14 +529,6 @@ class GridLimits:
     # Curtailment is also the right answer to a negative export price: being
     # paid to stop generating beats paying to generate.
     allow_curtailment: bool = True
-    # Dual-ascent step size, as a fraction of the mean |import price| per kW of
-    # violation. 4.0 since the ADMM study (bench/admm_variants.py --limits,
-    # bench/admm_holdout.py): over 15 limit cases on two sites it halves the
-    # distance to the DW optimality bound against 1.0 (1.28 -> 0.62 and
-    # 1.90 -> 0.55) and removes most breaches at tight limits; it differs from
-    # 1.0 only when a limit binds hard. (An earlier note, on one site, had 4.0
-    # starting to overshoot; not seen in these cases.)
-    price_step: float = 4.0
     enforce: bool = True
     # What a kWh drawn (or pushed) beyond the limit costs, in currency per kWh,
     # on top of the energy's own price. ONE constant for the whole horizon: a
@@ -711,13 +673,13 @@ class DeviceSolution:
 
 @dataclass
 class RoundRecord:
-    """One coordination round, kept so a round can be inspected after the fact.
+    """One ADMM iteration, kept so it can be inspected after the fact.
 
-    The coordinator returns the BEST round, not the last one, and which round
-    that was is not obvious from the outside - the loop damps, overshoots and
-    occasionally gets worse before it gets better. These records are what make
-    that visible: every round's plan, what it cost, and how far the devices
-    still disagreed when it was scored.
+    The coordinator returns the BEST iteration's runnable plan, polished, not
+    the last one, and which iteration that was is not obvious from the outside -
+    ADMM is not a descent method, so the cost rises as well as falls. These
+    records are what make that visible: every iteration's runnable plan, what it
+    cost, and how far the house still was from balance when it was scored.
 
     Only 1-D series are kept. The value functions and policies are not: they
     are the largest object in a solve by two orders of magnitude, and anything
@@ -741,9 +703,9 @@ class RoundRecord:
     import_excess: float  # worst single-slot import breach, kW
     export_excess: float  # worst single-slot export breach, kW
 
-    # ADMM residuals as they stood when this round was scored. primal is how
-    # far the devices' plans sit from the coordinator's targets; dual is how
-    # far the targets themselves moved. Convergence needs both small.
+    # ADMM residuals as they stood when this iteration was scored: primal is
+    # the house's imbalance, sqrt(N) |pbar|; dual is how far the plans moved,
+    # rho |(p - pbar) - (p - pbar)_prev|. Convergence needs both small.
     primal_res: float
     dual_res: float
     rho: float
@@ -751,21 +713,18 @@ class RoundRecord:
     round_ms: float
     device_ms: dict[str, float]
 
-    # The residual load the battery was solved against. Enough to re-derive
-    # this round's value function and lambda without keeping either.
+    # The residual load the battery's runnable plan sits in: the rest of the
+    # house. Enough to re-derive this iteration's value function and lambda at
+    # the tariff without keeping either.
     battery_dp_load: np.ndarray | None = None
 
     selected: bool = False
 
-    # The objective this round was RANKED on. Held separately from
-    # `total_objective` because the retained round is re-pointed at the final
-    # plan afterwards if the baseline fallback swaps a device out, and the
-    # ranking that chose it happened before that. On every other round the two
-    # agree exactly.
+    # The objective this iteration was ranked on (the same as total_objective).
     score_objective: float = 0.0
     fallback_applied: bool = False
-    # Textbook ADMM only: the cost of this iteration's relaxed plan (fractional
-    # tank / HVAC), beside total_objective, the runnable plan recovered from it.
+    # The cost of this iteration's relaxed plan (fractional tank / HVAC),
+    # beside total_objective, the runnable plan recovered from it.
     relaxed_objective: float | None = None
 
 
@@ -784,7 +743,8 @@ class CoordinationResult:
     rounds: list[RoundRecord] = field(default_factory=list)
     selected_round: int = 0
     # Why the loop ended: "converged" (small residuals), "no improvement"
-    # (CoordinationConfig.patience rounds without a better plan) or "iteration cap".
+    # (CoordinationConfig.exchange_patience iterations without a better plan),
+    # "iteration cap", or "paused" (an ExchangeRun stopped part-way).
     stop_reason: str = ""
     # Context needed to replay the battery value function later (policy.py).
     # Economics-only battery solve (no ADMM term) used by the pricing/policy
@@ -799,8 +759,6 @@ class CoordinationResult:
     curtailment: np.ndarray | None = None
     curtailed_kwh: float = 0.0
     battery_dp_load: np.ndarray | None = None
-    battery_admm_target: np.ndarray | None = None
-    battery_rho: float = 0.0
     baseline_cost: float = 0.0
     # Which coordinator produced this: "admm" (coordinate) or "dw" (dw/).
     method: str = "admm"
@@ -1407,10 +1365,8 @@ def solve_water_heater(
     """Solve the hot-water tank DP. `limits`: see hemspolicy.meter.
 
     `admm_target`/`admm_rho`: an optional tether (admm_rho/2)(p - target)^2 dt
-    on the element's power, as the battery DP has. The legacy ADMM loop leaves
-    it off - the on/off element is non-convex, so it coordinates through
-    `dp_load` alone - while textbook ADMM (hemspolicy.exchange) tethers every
-    device, running this on a relaxed (fractional) element.
+    on the element's power, as the battery DP has - ADMM's proximal step
+    (hemspolicy.exchange), which runs this on a relaxed (fractional) element.
     `ref_price`: the price discomfort is valued at (default: the mean of `buy`),
     for callers whose `buy` is not the tariff.
     """
@@ -1913,10 +1869,10 @@ def grid_penalty(cfg: SiteConfig, net_grid: np.ndarray, buy: np.ndarray,
     practice decides on the eighth decimal place of a breach that is
     infeasible either way.
 
-    This does NOT enforce anything. The multiplier that steers the device
-    solves is mu in `dual ascent` below, and anything safety-critical is
-    clamped outside the solver entirely (policy.clamp). This term scores a
-    finished plan; it does not produce one.
+    This does NOT enforce anything. The coordinators steer by pricing the
+    limit the same way (Dantzig-Wolfe's master, ADMM's grid connection), and
+    anything safety-critical is clamped outside the solver entirely
+    (policy.clamp). This term scores a finished plan; it does not produce one.
     """
     if not cfg.grid.active:
         return 0.0
@@ -2008,409 +1964,26 @@ def baseline_solution(cfg: SiteConfig, fc: Forecasts) -> tuple[np.ndarray, float
 
 
 def coordinate(cfg: SiteConfig, fc: Forecasts, progress=None, warm=None) -> CoordinationResult:
-    """Run the coordination loop and return the best round found.
+    """Plan a site by ADMM (hemspolicy.exchange) and return its best plan.
 
-    `progress`, if given, is called as progress(round, max_rounds) when a
-    round starts, progress(round, max_rounds, objective, None, best) when it
+    `progress`, if given, is called as progress(round, max_rounds) when an
+    iteration starts, progress(round, max_rounds, objective, None, best) when it
     has been scored (None: ADMM has no bound), and progress(-1, max_rounds)
-    before the fallback and polish - the same shape the DW app reads.
+    before the fallback and polish - the same shape the DW app reads. `warm`:
+    an earlier result's `warm_start` (see hemspolicy.exchange.WarmStart).
     """
-    if cfg.coordination.algorithm == "exchange":          # textbook ADMM
-        pass
-        return coordinate_exchange(cfg, fc, progress, warm)
-    cfg.validate()
-    fc.validate(cfg.horizon)
-
-    n = cfg.horizon.steps
-    dt = cfg.horizon.dt
-    cc = cfg.coordination
-    rho = cc.rho
-
-    # A grid limit needs materially more rounds than pure cost coordination:
-    # the multiplier has to climb from zero until the plan fits. Measured 14-20
-    # rounds for a hard-binding limit, against 2 with no limit at all, so the
-    # 15-round default would silently ship an infeasible plan.
-    max_rounds = cc.max_rounds
-    if cfg.grid.active:
-        max_rounds = max(max_rounds, 40)
-
-    # Fixed demand: inflexible load minus PV, plus the baseline behaviour of
-    # any device that is switched off (it still consumes, just not smartly).
-    fixed = fc.net_fixed_demand.copy()
-
-    # One device per battery, keyed "battery", "battery1", ... (SiteConfig
-    # .battery_key). evcc sends one BatteryConfig per stationary battery AND
-    # one per loadpoint, so N > 1 is the normal case for anyone with a charger.
-    batt_cfgs: dict[str, "object"] = {}
-    dev_keys: list[str] = []
-    for i, b in enumerate(cfg.battery_list):
-        if b.capacity_kwh > 0:
-            key = SiteConfig.battery_key(i)
-            batt_cfgs[key] = b
-            dev_keys.append(key)
-    if cfg.water_heater is not None:
-        dev_keys.append("water_heater")
-    if cfg.hvac is not None:
-        dev_keys.append("hvac")
-    n_dev = max(len(dev_keys), 1)
-
-    targets = {k: np.zeros(n) for k in dev_keys}
-    duals = {k: np.zeros(n) for k in dev_keys}
-
-    # Warm-start the coordination targets from each device's uncoordinated
-    # behaviour. For the thermal devices that is their thermostat baseline.
-    if "water_heater" in targets:
-        targets["water_heater"] = baseline_water_heater(
-            cfg.water_heater, cfg.horizon, fc.hot_water_demand
-        )[1].copy()
-    if "hvac" in targets:
-        targets["hvac"] = baseline_hvac(cfg.hvac, cfg.horizon, fc.outdoor_temp)[1].copy()
-
-    # The battery MUST be warm-started the same way, and the POC's omission of
-    # this silently disabled it: with target = 0 and dual = 0, round 0 applies
-    # a proximity penalty of (rho/2) * a^2 * dt about ZERO. At the default
-    # rho = 5 that is ~0.6 * a^2, i.e. ~15 currency at 5 kW, dwarfing the
-    # ~0.2/kWh available from arbitrage - so the battery is pinned off. The
-    # z-update then only moves the target by g'/rho (~0.008) per round, which
-    # cannot escape within max_rounds. Seeding from a free (rho = 0) solve
-    # starts the proximity term centred on something the battery actually
-    # wants to do. See docs/NOTES.md.
-    # Each battery is seeded from a free (rho = 0) solve, and each sees the
-    # batteries seeded before it, so two identical batteries do not both plan
-    # the same charge and then fight over it for several rounds.
-    # Export price the devices optimise against (see device_sell_price).
-    sell_dev = device_sell_price(fc.sell, cfg.grid)
-    # "exact" grid mode: the devices price the limits themselves (see
-    # CoordinationConfig.grid_mode); the limit prices mu then stay at zero.
-    limits = (Limits(cfg.grid.max_import_kw, cfg.grid.max_export_kw,
-                     breach_price(cfg.grid, fc.buy, fc.sell), cfg.grid.allow_curtailment)
-              if cfg.grid.active and cc.grid_mode == "exact" else None)
-
-    seed_load = fixed.copy()
-    for k in ("water_heater", "hvac"):
-        if k in dev_keys:
-            seed_load = seed_load + targets[k]
-    for key in [k for k in dev_keys if k in batt_cfgs]:
-        targets[key] = solve_battery(
-            batt_cfgs[key],
-            cfg.horizon,
-            fc.buy,
-            sell_dev,
-            dp_load=seed_load,
-            admm_rho=0.0,
-            soc_gates=cfg.soc_gates if key == "battery" else (),
-            limits=limits,
-        ).power.copy()
-        seed_load = seed_load + targets[key]
-
-    prev_power = {k: targets.get(k, np.zeros(n)).copy() for k in dev_keys}
-    # Momentum: the device and z steps use extrapolated targets and duals.
-    z_hat = {k: targets[k].copy() for k in dev_keys}
-    u_hat = {k: duals[k].copy() for k in dev_keys}
-    z_prev = {k: targets[k].copy() for k in dev_keys}
-    u_prev = {k: duals[k].copy() for k in dev_keys}
-    alpha, c_prev = 1.0, np.inf
-    damping = 1.0               # share of a device's new plan the others see
-    recent: list[np.ndarray] = []   # the last few rounds' meter flows
-
-    # Multipliers on the grid coupling constraint. A grid limit binds the SUM
-    # of every device's power plus the inflexible load, so no per-device DP can
-    # enforce it alone. Instead we price it: raise the effective import price
-    # (or cut the export price) until the plan fits. mu is a shadow price on
-    # the constraint - the same kind of object lambda is for stored energy.
-    mu_imp = np.zeros(n)
-    mu_exp = np.zeros(n)
-    # |buy|: a mean tariff near zero or below must not stall or reverse the step
-    grid_step = cfg.grid.price_step * max(float(np.mean(np.abs(fc.buy))), 1e-6)
-    grid_step_min = grid_step / 16.0
-    last_improve = 0
-
-    best_obj = np.inf
-    best: CoordinationResult | None = None
-    best_round = 0
-    records: list[RoundRecord] = []
-    rounds_run = 0
-    stop_reason = "iteration cap"
-
-    for r in range(max_rounds):
-        t_round = time.perf_counter()
-        if progress is not None:
-            progress(r + 1, max_rounds)
-        rounds_run = r + 1
-        sols: dict[str, DeviceSolution] = {}
-
-        # Each device sees everything EXCEPT itself as exogenous load.
-        def other_load(me: str) -> np.ndarray:
-            out = fixed.copy()
-            for k in dev_keys:
-                if k != me:
-                    out = out + prev_power[k]
-            return out
-
-        # Prices the devices actually see this round: the tariff plus the
-        # current grid-constraint multipliers.
-        buy_eff = fc.buy + mu_imp
-        sell_eff = sell_dev - mu_exp
-
-        # ---- Step 1: device DP updates -------------------------------------
-        batt_dp_load = other_load("battery")
-        batt_shifted = None
-        for key, bcfg in batt_cfgs.items():
-            shifted = z_hat[key] - u_hat[key]
-            sols[key] = solve_battery(
-                bcfg,
-                cfg.horizon,
-                buy_eff,
-                sell_eff,
-                dp_load=other_load(key),
-                admm_target=shifted,
-                admm_rho=rho,
-                soc_gates=cfg.soc_gates if key == "battery" else (),
-                limits=limits,
-            )
-            if key == "battery":
-                batt_shifted = shifted
-        if "water_heater" in dev_keys:
-            sols["water_heater"] = solve_water_heater(
-                cfg.water_heater,
-                cfg.horizon,
-                buy_eff,
-                sell_eff,
-                fc.hot_water_demand,
-                dp_load=other_load("water_heater"),
-                limits=limits,
-            )
-        if "hvac" in dev_keys:
-            sols["hvac"] = solve_hvac(
-                cfg.hvac,
-                cfg.horizon,
-                buy_eff,
-                sell_eff,
-                fc.outdoor_temp,
-                dp_load=other_load("hvac"),
-                limits=limits,
-            )
-
-        powers = {k: sols[k].power for k in dev_keys}
-        rho_snapshot = rho
-
-        # ---- Step 2: z-update (closed-form per-timestep bill minimisation) --
-        old_targets = {k: targets[k].copy() for k in dev_keys}
-        for t in range(n):
-            s_vals = {k: powers[k][t] + u_hat[k][t] for k in dev_keys}
-            S = sum(s_vals.values())
-            d_t = fixed[t]
-
-            v_import = S - n_dev * fc.buy[t] * dt / rho
-            v_export = S + n_dev * fc.sell[t] * dt / rho
-            if v_import + d_t > 0:
-                g_prime = fc.buy[t] * dt
-            elif v_export + d_t < 0:
-                g_prime = -fc.sell[t] * dt
-            else:
-                g_prime = 0.0
-
-            for k in dev_keys:
-                targets[k][t] = s_vals[k] - g_prime / rho
-
-        # ---- Step 3: dual update -------------------------------------------
-        for k in dev_keys:
-            duals[k] = u_hat[k] + powers[k] - targets[k]
-
-        # ---- Momentum, restarted when the combined residual grows ----------
-        # (Goldstein et al. 2014, fast ADMM with restart; here a restart just
-        # drops the extrapolation for a round.)
-        c_k = rho * sum(float(np.sum((duals[k] - u_hat[k]) ** 2) + np.sum((targets[k] - z_hat[k]) ** 2))
-                        for k in dev_keys)
-        if cc.momentum and c_k < cc.restart_eta * c_prev:
-            a_next = (1.0 + np.sqrt(1.0 + 4.0 * alpha * alpha)) / 2.0
-            w = (alpha - 1.0) / a_next
-            for k in dev_keys:
-                z_hat[k] = targets[k] + w * (targets[k] - z_prev[k])
-                u_hat[k] = duals[k] + w * (duals[k] - u_prev[k])
-            alpha, c_prev = a_next, c_k
-        else:                    # restart: no extrapolation this round
-            alpha = 1.0
-            c_prev = c_prev / cc.restart_eta if cc.momentum else c_k
-            for k in dev_keys:
-                z_hat[k], u_hat[k] = targets[k].copy(), duals[k].copy()
-        for k in dev_keys:
-            z_prev[k], u_prev[k] = targets[k].copy(), duals[k].copy()
-
-        # ---- Evaluate -------------------------------------------------------
-        net_grid = fixed.copy()
-        for k in dev_keys:
-            net_grid = net_grid + powers[k]
-        net_grid, curtail = apply_curtailment(net_grid, fc.solar, fc.sell, cfg.grid)
-
-        wh_temp = sols["water_heater"].trajectory if "water_heater" in sols else None
-        hvac_temp = sols["hvac"].trajectory if "hvac" in sols else None
-        soe = {k: sols[k].trajectory for k in batt_cfgs if k in sols} or None
-
-        # ---- Dual ascent on the grid limits --------------------------------
-        # Raise the price wherever the plan still exceeds a limit, relax it
-        # where there is headroom. Projected onto mu >= 0: a limit that is not
-        # binding must not subsidise.
-        if cfg.grid.active and limits is None:
-            if cfg.grid.max_import_kw is not None:
-                mu_imp = np.maximum(
-                    0.0, mu_imp + grid_step * (net_grid - cfg.grid.max_import_kw)
-                )
-            if cfg.grid.max_export_kw is not None:
-                mu_exp = np.maximum(
-                    0.0, mu_exp + grid_step * (-net_grid - cfg.grid.max_export_kw)
-                )
-
-        cost = net_cost(net_grid, fc.buy, fc.sell, dt)
-        obj = total_objective(cfg, net_grid, fc, wh_temp, hvac_temp, soe)
-
-        primal = sum(float(np.linalg.norm(powers[k] - targets[k])) for k in dev_keys)
-        dual = sum(float(rho * np.linalg.norm(targets[k] - old_targets[k])) for k in dev_keys)
-
-        # Physical breach, for reporting. It carries no weight in the ranking:
-        # `obj` already prices it (grid_penalty), so a cheaper-but-breaching
-        # round is not cheaper on the only number that decides.
-        violation = float(np.sum(breach_energy(cfg, net_grid)) / dt)
-        import_excess = (
-            float(np.maximum(net_grid - cfg.grid.max_import_kw, 0.0).max())
-            if cfg.grid.max_import_kw is not None else 0.0
-        )
-        export_excess = (
-            float(np.maximum(-net_grid - cfg.grid.max_export_kw, 0.0).max())
-            if cfg.grid.max_export_kw is not None else 0.0
-        )
-        import_cost = float(np.sum(np.maximum(net_grid, 0.0) * fc.buy * dt))
-        export_revenue = float(np.sum(np.maximum(-net_grid, 0.0) * fc.sell * dt))
-
-        records.append(
-            RoundRecord(
-                index=len(records),
-                powers={k: sols[k].power.copy() for k in dev_keys},
-                trajectories={k: sols[k].trajectory.copy() for k in dev_keys},
-                net_grid=net_grid.copy(),
-                curtailment=curtail.copy(),
-                import_cost=import_cost,
-                export_revenue=export_revenue,
-                net_cost=cost,
-                total_objective=obj,
-                violation=violation,
-                import_excess=import_excess,
-                export_excess=export_excess,
-                score_objective=obj,
-                primal_res=primal,
-                dual_res=dual,
-                rho=rho_snapshot,
-                round_ms=(time.perf_counter() - t_round) * 1000.0,
-                device_ms={k: sols[k].solve_ms for k in dev_keys},
-                battery_dp_load=batt_dp_load.copy(),
-            )
-        )
-
-        if obj < best_obj - cc.converge_tol * max(abs(best_obj), 1e-6) or not np.isfinite(best_obj):
-            last_improve = r
-        if obj < best_obj:
-            best_obj = obj
-            best_round = records[-1].index
-            best = CoordinationResult(
-                devices=dict(sols),
-                net_grid=net_grid,
-                import_cost=import_cost,
-                export_revenue=export_revenue,
-                net_cost=cost,
-                total_objective=obj,
-                rounds_run=rounds_run,
-                grid_import_excess=import_excess,
-                grid_export_excess=export_excess,
-                curtailment=curtail.copy(),
-                curtailed_kwh=float(curtail.sum() * dt),
-                battery_dp_load=batt_dp_load.copy(),
-                battery_admm_target=(batt_shifted.copy() if batt_shifted is not None else None),
-                battery_rho=rho_snapshot if "battery" in dev_keys else 0.0,
-            )
-
-        if progress is not None:
-            progress(r + 1, max_rounds, float(obj), None, float(best_obj))
-
-        # A limit cycle: this round's meter flow repeats one from 2-4 rounds
-        # ago (repeating the LAST round is a fixed point, not a cycle). Damp
-        # what the devices see of each other and the grid-limit price step,
-        # and tighten the tether (rho only ever rises here, up to rho_max, so
-        # it still settles).
-        cycle = (bool(recent) and np.max(np.abs(net_grid - recent[-1])) > 1e-6
-                 and any(np.max(np.abs(net_grid - g)) < 1e-6 for g in recent[:-1]))
-        if cycle:
-            damping = max(damping / 2.0, cc.damping_min)
-            grid_step = max(grid_step / 2.0, grid_step_min)
-        recent = (recent + [net_grid.copy()])[-4:]
-        for k in dev_keys:
-            prev_power[k] = (1.0 - damping) * prev_power[k] + damping * powers[k]
-
-        # Adaptive rho (Boyd et al. 3.4.1): keep the residuals balanced, then
-        # hold it. The scaled duals are y / rho, so they are rescaled with it,
-        # or every change of rho would also kick the prices.
-        rho_old = rho
-        if cycle and cc.rho_adapt_factor > 1.0:    # "adapt rho" off: rho stays put
-            rho = min(rho * 2.0, cc.rho_max)
-        elif r < cc.rho_freeze_round:
-            if primal > cc.rho_adapt_ratio * max(dual, 1e-6):
-                rho = min(rho * cc.rho_adapt_factor, cc.rho_max)
-            elif dual > cc.rho_adapt_ratio * max(primal, 1e-6):
-                rho = max(rho / cc.rho_adapt_factor, cc.rho_min)
-        if rho != rho_old:
-            for k in dev_keys:
-                for u in (duals, u_hat, u_prev):
-                    u[k] = u[k] * (rho_old / rho)
-            alpha, c_prev = 1.0, np.inf     # momentum restarts with a new rho
-            for k in dev_keys:
-                z_hat[k], u_hat[k] = targets[k].copy(), duals[k].copy()
-
-        # Converging on cost is not enough while the plan is still infeasible.
-        # A stall ends the loop either way: the best round is chosen on an
-        # objective that already prices any breach.
-        feasible = not cfg.grid.active or violation <= 1e-6
-        if feasible and r > 0 and primal < cc.residual_tol and dual < cc.residual_tol:
-            stop_reason = "converged"
-            break
-        if r - last_improve >= cc.patience:
-            stop_reason = "no improvement"
-            break
-
-    if progress is not None:
-        progress(-1, max_rounds)
-    assert best is not None, "coordination produced no rounds"
-    best.rounds_run = rounds_run
-    best.stop_reason = stop_reason
-    records[best_round].selected = True
-    best.rounds = records
-    best.selected_round = best_round
-
-    # The fallback can swap a device for its thermostat baseline AFTER the
-    # round was scored, so when it does, the retained record has to be
-    # refreshed or it would describe a plan the caller never receives.
-    if cc.enable_baseline_fallback and _apply_baseline_fallback(cfg, fc, best, dev_keys):
-        _refresh_selected_record(records[best_round], best, cfg)
-
-    if cc.polish and _polish(cfg, fc, best, dev_keys, fc.buy + mu_imp, sell_dev - mu_exp,
-                             cc.polish_sweeps, limits):
-        _refresh_selected_record(records[best_round], best, cfg)
-
-    if "battery" in best.devices:
-        best.battery_pricing = _pricing_resolve(cfg, fc, best, limits)
-
-    best.baseline_cost = baseline_solution(cfg, fc)[1]
-    return best
+    pass
+    return coordinate_exchange(cfg, fc, progress, warm)
 
 
 def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: list[str],
             buy: np.ndarray, sell: np.ndarray, sweeps: int, limits: Limits | None = None) -> bool:
     """Gauss-Seidel best response from the returned plan; keep only improvements.
 
-    ADMM settles where each device is a best response to the others' LAST
-    plans - consistent, but often not where the house would be best off. Here
-    the devices re-plan one at a time, each against the others' CURRENT plans
-    (at the tariff plus the final grid-limit prices), and a re-plan is kept
-    only if `total_objective` falls. So it is monotone: it cannot undo what
-    the rounds found. Updates `res` in place; returns whether anything changed.
+    The devices re-plan one at a time, each against the others' CURRENT plans
+    (at `buy`/`sell`, with the grid limits priced), and a re-plan is kept only
+    if `total_objective` falls. So it is monotone: it cannot undo what the
+    iterations found. Updates `res` in place; returns whether anything changed.
     """
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
@@ -2466,55 +2039,18 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     return True
 
 
-def _refresh_selected_record(
-    rec: RoundRecord, res: CoordinationResult, cfg: SiteConfig
-) -> None:
-    """Re-point a round record at the plan that is actually being returned.
-
-    Only used for the retained round, and only after the baseline fallback has
-    had its say. The rejected rounds are left exactly as they were scored -
-    they are a record of what the loop tried, not of what it would have
-    returned.
-    """
-    violation = 0.0
-    if cfg.grid.active:
-        if cfg.grid.max_import_kw is not None:
-            violation += float(
-                np.maximum(res.net_grid - cfg.grid.max_import_kw, 0.0).sum()
-            )
-        if cfg.grid.max_export_kw is not None:
-            violation += float(
-                np.maximum(-res.net_grid - cfg.grid.max_export_kw, 0.0).sum()
-            )
-    rec.powers = {k: sol.power.copy() for k, sol in res.devices.items()}
-    rec.trajectories = {k: sol.trajectory.copy() for k, sol in res.devices.items()}
-    rec.net_grid = res.net_grid.copy()
-    if res.curtailment is not None:
-        rec.curtailment = res.curtailment.copy()
-    rec.import_cost = res.import_cost
-    rec.export_revenue = res.export_revenue
-    rec.net_cost = res.net_cost
-    rec.total_objective = res.total_objective
-    rec.import_excess = res.grid_import_excess
-    rec.export_excess = res.grid_export_excess
-    rec.violation = violation
-    rec.fallback_applied = True
-
-
 def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
                      limits: Limits | None = None) -> DeviceSolution:
     """Re-solve the battery on pure economics, holding the other devices fixed.
 
-    The value function produced INSIDE the coordination loop carries the ADMM
-    proximity term -(rho/2)(a - target)^2, which is internal machinery, not
-    money. Differentiating it gives a "price" polluted by rho: at rho = 5 and a
-    10 kW action span that term reaches ~60 currency, swamping a 0.30/kWh
-    tariff and producing nonsense marginal values.
-
-    So the pricing/execution tier gets its own solve: same dp_load as the
-    winning round (i.e. the other devices' agreed plans), but rho = 0. dV/ds is
-    then an honest marginal value of stored energy, CONDITIONAL on those plans
-    - which is exactly what the price signal claims to be, and no more.
+    A coordinator's own device solves carry its machinery - ADMM's proximal
+    term -(rho/2)(a - target)^2, or Dantzig-Wolfe's master prices instead of
+    the tariff - and differentiating such a value function gives a "price"
+    polluted by it. So the pricing/execution tier gets its own solve: the
+    battery at the tariff, against the other devices' planned powers, with no
+    tether. dV/ds is then an honest marginal value of stored energy,
+    CONDITIONAL on those plans - which is exactly what the price signal claims
+    to be, and no more.
     """
     dp_load = (
         res.battery_dp_load
@@ -2889,14 +2425,14 @@ class WarmStart:
 
 def coordinate_exchange(cfg: SiteConfig, fc: Forecasts, progress=None, warm: WarmStart | None = None
                         ) -> CoordinationResult:
-    """Plan the site by textbook ADMM (see the module docstring)."""
+    """Plan the site by ADMM (see the module docstring)."""
     run = ExchangeRun(cfg, fc, progress, warm)
     run.step()
     return run.result()
 
 
 class ExchangeRun:
-    """A textbook ADMM solve that can stop after any iteration and carry on.
+    """An ADMM solve that can stop after any iteration and carry on.
 
     `step(n)` runs up to n more iterations (all that remain by default) and
     says whether the run has finished; `result()` is the best runnable plan so
@@ -3077,7 +2613,9 @@ class ExchangeRun:
                                if g.max_export_kw is not None else 0.0),
                 primal_res=r_res, dual_res=s_res, rho=self.rho,
                 round_ms=(time.perf_counter() - t_round) * 1000.0, device_ms=dev_ms,
-                battery_dp_load=self.zero.copy(), relaxed_objective=relaxed_obj))
+                battery_dp_load=(self.base + sum(run[jj].power for jj in keys if jj != "battery")
+                                 if "battery" in run else None),
+                relaxed_objective=relaxed_obj))
             if not np.isfinite(self.best_obj) or obj < self.best_obj - cc.converge_tol * abs(self.best_obj):
                 self.last_improve = k
             if obj < self.best_obj:
@@ -3113,7 +2651,7 @@ class ExchangeRun:
         if self.progress is not None and self.done:
             self.progress(-1, self.max_rounds)
         if self.best_sols is None:
-            raise RuntimeError("textbook ADMM: no iteration has run yet")
+            raise RuntimeError("ADMM: no iteration has run yet")
         devices = dict(self.best_sols)
         net = self.base + sum(devices[j].power for j in keys)
         net, curtail = apply_curtailment(net, fc.solar, fc.sell, g)
@@ -3180,10 +2718,9 @@ class PolicySnapshot:
             raise ValueError("result has no battery solution to snapshot")
         if cfg.battery is None:
             raise ValueError("site config has no battery")
-        # Prefer the economics-only solve; fall back to the coordinated one
-        # only if pricing was not run (e.g. a bare solve_battery result).
+        # Prefer the economics-only solve; fall back to the plan's own battery
+        # solution only if pricing was not run.
         sol = res.battery_pricing or res.devices["battery"]
-        clean = res.battery_pricing is not None
         n = cfg.horizon.steps
         return cls(
             horizon=cfg.horizon,
@@ -3199,16 +2736,6 @@ class PolicySnapshot:
                 if res.battery_dp_load is not None
                 else np.zeros(n)
             ),
-            admm_target=(
-                None
-                if clean
-                else (
-                    res.battery_admm_target.copy()
-                    if res.battery_admm_target is not None
-                    else None
-                )
-            ),
-            admm_rho=0.0 if clean else res.battery_rho,
             generated_at=time.time(),
         )
 
@@ -3663,7 +3190,7 @@ def clamp_fleet(
     more than one unit can move: each is told the full headroom is available,
     each takes it, and together they overshoot by a factor of the fleet size.
     That is the same double-counting a simultaneous best response produces
-    (docs/theory.tex, "Why iterating the local solve is not enough"), except
+    (docs/theory.tex, "Why devices cannot simply take turns"), except
     that here there are no coordination rounds to damp it - this runs once,
     between plans.
 
@@ -3732,7 +3259,7 @@ def fleet_action(
     reply to the whole deviation is simultaneous best response: every unit
     covers the spike in full, so a fleet of m covers it m times, and the next
     tick sees the over-correction and reverses it. That is the oscillation of
-    docs/theory.tex 3.2, now with no proximal term and no rho to damp it,
+    docs/theory.tex section 1.5, with nothing to damp it,
     because at inference there are no coordination rounds.
 
     So the replies are computed in sequence, each unit seeing the deviation net
@@ -3843,7 +3370,7 @@ def build_site(p: dict) -> SiteConfig:
             max_export_kw=(float(p["max_export_kw"]) if p.get("max_export_kw") else None),
             allow_curtailment=bool(p.get("allow_curtailment", True)),
         ),
-        coordination=CoordinationConfig(max_rounds=int(p.get("max_rounds", 15))),
+        coordination=CoordinationConfig(exchange_rounds=int(p.get("max_rounds", 100))),
     )
 
 
@@ -5935,9 +5462,9 @@ def solve_admm(p: dict, progress=None) -> dict:
     # converges to the optimum - and rounding the kink would only move it.
     # With the on/off tank or HVAC the rounding helps runs converge.
     exact = lp and site.water_heater is None and site.hvac is None
-    cc = CoordinationConfig(algorithm="exchange", exchange_rho=float(p.get("xrho", 0.1)),
+    cc = CoordinationConfig(exchange_rho=float(p.get("xrho", 0.1)),
                             exchange_rho_gain=0.01 if p.get("rho_adapt", True) else 0.0,
-                            exchange_rounds=rounds, max_rounds=rounds, polish=bool(p.get("polish", True)),
+                            exchange_rounds=rounds, polish=bool(p.get("polish", True)),
                             exchange_battery_step="lp" if lp else "dp",
                             exchange_warm_battery=bool(p.get("warm_start", False)),
                             **({"kink_smoothing": 0.0} if exact else {}))

@@ -58,7 +58,7 @@ def scenario_small(milp: bool, max_iter: int):
     batt = BatteryConfig(capacity_kwh=10.0, n_states=50, n_actions=21)
     wh = WaterHeaterConfig()
     site = SiteConfig(horizon=h, battery=batt, water_heater=wh, hvac=None,
-                      coordination=CoordinationConfig(max_rounds=15))
+                      coordination=CoordinationConfig())
     for tariff in TARIFFS:
         fc = demo_forecasts(h, tariff=tariff)
         base = baseline_obj(site, fc)

@@ -39,7 +39,7 @@ def snap() -> PolicySnapshot:
         battery=BatteryConfig(capacity_kwh=10.0),
         water_heater=None,
         hvac=None,
-        coordination=CoordinationConfig(max_rounds=6),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     fc = demo_forecasts(site.horizon, tariff="day_night")
     return PolicySnapshot.from_result(site, fc, coordinate(site, fc))
@@ -152,7 +152,7 @@ def test_lambda_tracks_the_cheap_window():
         battery=BatteryConfig(capacity_kwh=10.0),
         water_heater=None,
         hvac=None,
-        coordination=CoordinationConfig(max_rounds=6),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     fc = demo_forecasts(site.horizon, tariff="day_night")
     snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))

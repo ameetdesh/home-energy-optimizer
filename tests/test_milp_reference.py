@@ -104,7 +104,7 @@ def test_milp_is_at_least_as_good_as_the_decomposition(small):
     h, batt, wh = small
     site = SiteConfig(
         horizon=h, battery=batt, water_heater=wh, hvac=None,
-        coordination=CoordinationConfig(max_rounds=15),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     for tariff in ("flat", "day_night"):
         fc, m = _solve(h, batt, wh, tariff)

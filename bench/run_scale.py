@@ -54,7 +54,7 @@ def site_with(n_batteries: int, thermal: bool, hours: float = 24.0) -> SiteConfi
         batteries=tuple(unit() for _ in range(n_batteries - 1)),
         water_heater=WaterHeaterConfig() if thermal else None,
         hvac=HvacConfig() if thermal else None,
-        coordination=CoordinationConfig(algorithm="exchange"),
+        coordination=CoordinationConfig(),
     )
 
 

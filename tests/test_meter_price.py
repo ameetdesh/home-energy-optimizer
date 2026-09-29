@@ -43,7 +43,7 @@ def case():
     fc = demo_forecasts(h, tariff="day_night")
     site = SiteConfig(
         horizon=h, battery=cfg, water_heater=None, hvac=None,
-        coordination=CoordinationConfig(max_rounds=8),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
     lp = lp_battery_with_duals(cfg, h, fc.buy, fc.sell, fc.net_fixed_demand)
@@ -98,7 +98,7 @@ def test_dp_meter_price_tracks_the_lp(tariff, mean_tol, max_tol):
     cfg = BatteryConfig(capacity_kwh=10.0, n_states=200, n_actions=81)
     fc = demo_forecasts(h, tariff=tariff)
     site = SiteConfig(horizon=h, battery=cfg, water_heater=None, hvac=None,
-                      coordination=CoordinationConfig(max_rounds=8))
+                      coordination=CoordinationConfig(exchange_rounds=20))
     snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
     lp = lp_battery_with_duals(cfg, h, fc.buy, fc.sell, fc.net_fixed_demand)
 
@@ -120,7 +120,7 @@ def test_export_route_is_keyed_on_surplus_not_on_the_battery():
     cfg = BatteryConfig(capacity_kwh=10.0, n_states=200, n_actions=81)
     fc = demo_forecasts(h, tariff="day_night")
     site = SiteConfig(horizon=h, battery=cfg, water_heater=None, hvac=None,
-                      coordination=CoordinationConfig(max_rounds=8))
+                      coordination=CoordinationConfig(exchange_rounds=20))
     snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
 
     evening = int(21.0 / h.dt)
@@ -199,7 +199,7 @@ def test_two_batteries_can_have_different_lambdas():
     b1 = BatteryConfig(capacity_kwh=25.0, p_charge_max_kw=3.0, p_discharge_max_kw=3.0,
                        eta=0.85, n_states=100, n_actions=51)
     site = SiteConfig(horizon=h, battery=b0, batteries=(b1,), water_heater=None,
-                      hvac=None, coordination=CoordinationConfig(max_rounds=12))
+                      hvac=None, coordination=CoordinationConfig(exchange_rounds=20))
     res = coordinate(site, fc)
 
     def lam_for(cfg, key):
@@ -230,7 +230,7 @@ def test_the_published_snapshot_prices_battery_zero_only():
     fc = demo_forecasts(h, tariff="day_night")
     b = BatteryConfig(capacity_kwh=10.0, n_states=60, n_actions=25)
     site = SiteConfig(horizon=h, battery=b, batteries=(b,), water_heater=None,
-                      hvac=None, coordination=CoordinationConfig(max_rounds=8))
+                      hvac=None, coordination=CoordinationConfig(exchange_rounds=20))
     res = coordinate(site, fc)
     snap = PolicySnapshot.from_result(site, fc, res)
 

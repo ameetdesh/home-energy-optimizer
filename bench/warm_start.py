@@ -45,7 +45,7 @@ CHANGES = {"PV 5 -> 6 kW": {"solar_peak": 6}, "battery 10 -> 12 kWh": {"batt_cap
 
 
 def config(step: str, warm_battery: bool = True) -> CoordinationConfig:
-    return CoordinationConfig(algorithm="exchange", exchange_battery_step=step, exchange_warm_battery=warm_battery)
+    return CoordinationConfig(exchange_battery_step=step, exchange_warm_battery=warm_battery)
 
 
 def solve(site, fc, cc, warm=None):
