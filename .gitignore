@@ -20,6 +20,5 @@ wasm/build/*.so
 wasm/build/*.c
 wasm/build/*.egg-info/
 
-# Build outputs and material that is not ours to publish
-docs/theory.pdf
+# Material that is not ours to publish
 refs/

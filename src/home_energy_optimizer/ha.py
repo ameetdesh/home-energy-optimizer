@@ -1,10 +1,12 @@
-"""Publish the policy tier to Home Assistant.
+"""Publish the plan and its prices to Home Assistant.
 
-This is the cheapest way to put the one thing neither EMHASS nor evcc offers in
-front of a user: **lambda, the marginal value of a stored kWh**. Once it is an
-HA sensor, any automation - for a device the optimizer has never heard of - can
-ask "is my value per kWh above lambda?" and get a globally consistent,
-forecast-aware answer. No modelling, no binaries in someone's MILP.
+Every signal becomes an ordinary sensor, so any automation - for a device the
+optimiser has never heard of - can compare its own value per kWh with one.
+`publish_site` publishes the coordinated plan: power flows, device states and,
+from Dantzig-Wolfe, the meter price and the plan's gap. `publish_policy` adds,
+between plans, what the battery's own solver gives at its measured state when
+that solver is a dynamic programme: the setpoint, lambda (the marginal value of
+a stored kWh) and the prices derived from it.
 
 Entity naming and the `forecast` attribute follow EMHASS's convention
 (`utils.py` `custom_*_id`), so the same ApexCharts card configs work.

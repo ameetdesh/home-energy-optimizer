@@ -23,3 +23,11 @@ What changed on the way here:
 
 `docs/NOTES.md` records the measurements, including where the approach is worse
 than an exact solve and by how much.
+
+## Where the emphasis is now
+
+The value function turned out to be one convenience among several. The project
+is now about cooperation: devices with different optimisers - dynamic, linear or
+quadratic programmes, or someone else's black box - answering one interface,
+coordinated into one plan for the house by Dantzig–Wolfe or ADMM, with the
+saving shared fairly among them.
