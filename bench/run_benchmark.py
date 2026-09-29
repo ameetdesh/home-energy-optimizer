@@ -112,7 +112,7 @@ def bench_decomposition(hours: float = 24.0) -> list[dict]:
         battery=batt,
         water_heater=wh,
         hvac=None,
-        coordination=CoordinationConfig(algorithm="exchange"),
+        coordination=CoordinationConfig(),
     )
 
     for tariff in TARIFFS:
@@ -164,7 +164,7 @@ def bench_milp(hours: float = 24.0) -> list[dict]:
     batt = BatteryConfig(capacity_kwh=10.0)                 # the shipped grid
     wh = WaterHeaterConfig()
     site = SiteConfig(horizon=h, battery=batt, water_heater=wh, hvac=None,
-                      coordination=CoordinationConfig(algorithm="exchange"))
+                      coordination=CoordinationConfig())
     for tariff in TARIFFS:
         fc = demo_forecasts(h, tariff=tariff)
         t0 = time.perf_counter()

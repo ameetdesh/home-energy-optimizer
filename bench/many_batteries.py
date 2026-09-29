@@ -61,7 +61,7 @@ def above_bound(s, fc, devices) -> tuple[float, float]:
 
 def lp8(kink: float) -> str:
     s, fc = site(8)
-    cc = CoordinationConfig(algorithm="exchange", exchange_battery_step="lp", kink_smoothing=kink)
+    cc = CoordinationConfig(exchange_battery_step="lp", kink_smoothing=kink)
     run = ExchangeRun(replace(s, coordination=cc), fc)
     run.step()
     res = run.result()
@@ -73,7 +73,7 @@ def lp8(kink: float) -> str:
 
 def convex(eps: float) -> str:
     s, fc = site(3, thermal=False)
-    cc = CoordinationConfig(algorithm="exchange", exchange_battery_step="lp", kink_smoothing=0.0,
+    cc = CoordinationConfig(exchange_battery_step="lp", kink_smoothing=0.0,
                             exchange_eps=eps, exchange_rounds=3000, exchange_patience=3000)
     run = ExchangeRun(replace(s, coordination=cc), fc)
     run.step()
@@ -96,7 +96,7 @@ def exact(n_batteries: int) -> str:
 def dp(args) -> str:
     n_batteries, grid = args
     s, fc = site(n_batteries, grid)
-    run = ExchangeRun(replace(s, coordination=CoordinationConfig(algorithm="exchange")), fc)
+    run = ExchangeRun(replace(s, coordination=CoordinationConfig()), fc)
     run.step()
     recs = run.records
     keys = [k for k in recs[0].powers if k.startswith("battery")]

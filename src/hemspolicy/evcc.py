@@ -51,7 +51,6 @@ import numpy as np
 from .planner import METHODS, plan
 from .types import (
     BatteryConfig,
-    CoordinationConfig,
     Forecasts,
     GridLimits,
     Horizon,
@@ -214,8 +213,6 @@ def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
         batteries=tuple(configs[1:]),
         water_heater=None,  # evcc's contract carries batteries only
         hvac=None,
-        # One device needs no coordination; several do.
-        coordination=CoordinationConfig(max_rounds=1 if len(configs) == 1 else 12),
     )
 
     forecasts = Forecasts(
@@ -342,7 +339,7 @@ def optimize_charge_schedule(payload: dict, method: str | None = None) -> dict:
 
     Returns evcc's `OptimizationResult`. Contract violations raise
     `ContractError`, which the caller should surface as a 400 with evcc's
-    `Error` shape. `method` is "dw", "admm" (textbook ADMM) or "admm_legacy";
+    `Error` shape. `method` is "dw" or "admm";
     unset, it is read from the `HEMS_METHOD` environment variable, and defaults
     to "dw".
     """

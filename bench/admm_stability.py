@@ -1,10 +1,10 @@
 """ADMM variants on 72 sites, scored against the Dantzig-Wolfe lower bound.
 
-    .venv/bin/python bench/admm_stability.py                   # textbook ADMM, the defaults
-    .venv/bin/python bench/admm_stability.py '{"algorithm": "exchange", "kink_smoothing": 0}'
+    .venv/bin/python bench/admm_stability.py                   # ADMM, the defaults
+    .venv/bin/python bench/admm_stability.py '{"kink_smoothing": 0}'
 
 Each argument is a set of CoordinationConfig overrides (JSON); no argument runs
-textbook ADMM (algorithm "exchange") with its defaults. The sites are the
+ADMM with its defaults. The sites are the
 testbed's (dw/webapi.py _site_fc): the three tariffs x 1-3 batteries x a 7 kW
 import limit or none x 5 or 8 kW of PV x 10 or 20 kWh per battery, a 50-state
 battery grid, 48 hours (the site builder's default).
@@ -14,8 +14,8 @@ each plan scored by DWCoordinator.parts, the basis the bound is stated on, so
 each number is a guaranteed distance from the best possible plan - split
 by whether a limit applies; how many runs stopped within 3 iterations or ran
 into the iteration cap; the mean time; and how many plans exceed the import
-limit, and by how much. The 72-site numbers in docs/theory.tex (Appendix on
-tuning ADMM) come from this script.
+limit, and by how much. The 72-site numbers in docs/theory.tex (Appendix
+"Numerical evidence", ADMM on the test sites) come from this script.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def _bound(key):
 def _run(args):
     key, over, bound = args
     site, fc = _load(key)
-    cc = CoordinationConfig(**{"rho": 6.0, "max_rounds": 100, **over})
+    cc = CoordinationConfig(**over)
     t = time.perf_counter()
     res = coordinate(replace(site, coordination=cc), fc)
     ms = (time.perf_counter() - t) * 1000
@@ -67,7 +67,7 @@ def _run(args):
 
 
 def main() -> None:
-    variants = [json.loads(a) for a in sys.argv[1:]] or [{"algorithm": "exchange"}]
+    variants = [json.loads(a) for a in sys.argv[1:]] or [{}]
     workers = max(1, (os.cpu_count() or 2) - 2)        # the sites are independent
     with ProcessPoolExecutor(workers) as pool:
         bounds = list(pool.map(_bound, SITES))
@@ -77,7 +77,7 @@ def main() -> None:
             r = np.array([o[1] for o in out])
             ms = [o[2] for o in out]
             brk = np.array([o[4] for o in out])
-            cap = out[0][3].exchange_rounds if out[0][3].algorithm == "exchange" else out[0][3].max_rounds
+            cap = out[0][3].exchange_rounds
             lim = np.array([k[2] is not None for k in SITES])
             print(f"{json.dumps(over) or '{}':40s} mean {d.mean():.3f} worst {d.max():.3f} | "
                   f"limit {d[lim].mean():.3f} (worst {d[lim].max():.3f}) no limit {d[~lim].mean():.3f} | "

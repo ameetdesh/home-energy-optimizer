@@ -48,7 +48,6 @@ import argparse
 import itertools
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -64,7 +63,7 @@ from hemspolicy.coordinate import breach_price, coordinate, device_sell_price  #
 from hemspolicy.dp_battery import solve_battery  # noqa: E402
 from hemspolicy.dp_thermal import _relaxation, solve_hvac, solve_water_heater  # noqa: E402
 from hemspolicy.meter import Limits  # noqa: E402
-from hemspolicy.types import CoordinationConfig, SiteConfig  # noqa: E402
+from hemspolicy.types import SiteConfig  # noqa: E402
 
 SITES = list(itertools.product(("dynamic", "day_night", "flat"), (1, 2, 3), (7, None), (5, 8), (10, 20)))
 
@@ -395,7 +394,7 @@ def main() -> None:
         r = co.run(max_iter=40)
         dw_ms = (time.perf_counter() - t) * 1000
         t = time.perf_counter()
-        res = coordinate(replace(site, coordination=CoordinationConfig(rho=6.0, max_rounds=100)), fc)
+        res = coordinate(site, fc)
         admm_ms = (time.perf_counter() - t) * 1000
         admm = co.parts({k: Column(d.power, d.trajectory, 0.0, "admm") for k, d in res.devices.items()})["total"]
         t = time.perf_counter()

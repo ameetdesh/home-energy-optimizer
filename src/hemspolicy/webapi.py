@@ -102,7 +102,7 @@ def build_site(p: dict) -> SiteConfig:
             max_export_kw=(float(p["max_export_kw"]) if p.get("max_export_kw") else None),
             allow_curtailment=bool(p.get("allow_curtailment", True)),
         ),
-        coordination=CoordinationConfig(max_rounds=int(p.get("max_rounds", 15))),
+        coordination=CoordinationConfig(exchange_rounds=int(p.get("max_rounds", 100))),
     )
 
 
@@ -145,7 +145,6 @@ def _round_result(res, rec):
         total_objective=rec.total_objective,
         rounds_run=res.rounds_run,
         battery_dp_load=rec.battery_dp_load,
-        battery_rho=0.0,
     )
 
 

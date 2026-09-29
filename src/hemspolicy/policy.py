@@ -59,10 +59,9 @@ class PolicySnapshot:
             raise ValueError("result has no battery solution to snapshot")
         if cfg.battery is None:
             raise ValueError("site config has no battery")
-        # Prefer the economics-only solve; fall back to the coordinated one
-        # only if pricing was not run (e.g. a bare solve_battery result).
+        # Prefer the economics-only solve; fall back to the plan's own battery
+        # solution only if pricing was not run.
         sol = res.battery_pricing or res.devices["battery"]
-        clean = res.battery_pricing is not None
         n = cfg.horizon.steps
         return cls(
             horizon=cfg.horizon,
@@ -78,16 +77,6 @@ class PolicySnapshot:
                 if res.battery_dp_load is not None
                 else np.zeros(n)
             ),
-            admm_target=(
-                None
-                if clean
-                else (
-                    res.battery_admm_target.copy()
-                    if res.battery_admm_target is not None
-                    else None
-                )
-            ),
-            admm_rho=0.0 if clean else res.battery_rho,
             generated_at=time.time(),
         )
 
@@ -542,7 +531,7 @@ def clamp_fleet(
     more than one unit can move: each is told the full headroom is available,
     each takes it, and together they overshoot by a factor of the fleet size.
     That is the same double-counting a simultaneous best response produces
-    (docs/theory.tex, "Why iterating the local solve is not enough"), except
+    (docs/theory.tex, "Why devices cannot simply take turns"), except
     that here there are no coordination rounds to damp it - this runs once,
     between plans.
 
@@ -611,7 +600,7 @@ def fleet_action(
     reply to the whole deviation is simultaneous best response: every unit
     covers the spike in full, so a fleet of m covers it m times, and the next
     tick sees the over-correction and reverses it. That is the oscillation of
-    docs/theory.tex 3.2, now with no proximal term and no rho to damp it,
+    docs/theory.tex section 1.5, with nothing to damp it,
     because at inference there are no coordination rounds.
 
     So the replies are computed in sequence, each unit seeing the deviation net

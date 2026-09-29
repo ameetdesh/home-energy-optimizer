@@ -117,7 +117,7 @@ def test_dp_lambda_tracks_the_lp_dual(horizon, tariff):
 
     site = SiteConfig(
         horizon=horizon, battery=cfg, water_heater=None, hvac=None,
-        coordination=CoordinationConfig(max_rounds=8),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
     lam_dp = np.array(
@@ -142,7 +142,7 @@ def test_dp_lambda_converges_to_the_lp_dual_with_grid_refinement(horizon):
         lp = lp_battery_with_duals(cfg, horizon, fc.buy, fc.sell, fc.net_fixed_demand)
         site = SiteConfig(
             horizon=horizon, battery=cfg, water_heater=None, hvac=None,
-            coordination=CoordinationConfig(max_rounds=8),
+            coordination=CoordinationConfig(exchange_rounds=20),
         )
         snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
         lam = np.array(
@@ -169,7 +169,7 @@ def joint_case(horizon):
     wh = WaterHeaterConfig()
     site = SiteConfig(
         horizon=horizon, battery=batt, water_heater=wh, hvac=None,
-        coordination=CoordinationConfig(max_rounds=15),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     out = {}
     for tariff in ("flat", "day_night", "dynamic"):

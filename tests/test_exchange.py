@@ -59,7 +59,7 @@ def test_batteries_alone_come_close_to_the_bound():
     ADMM lands within the grid's reach of the Dantzig-Wolfe bound."""
     site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 2, "grid": 50, "hours": 24,
                             "enable_wh": False, "enable_hvac": False, "max_import_kw": 7})
-    res = coordinate(replace(site, coordination=CoordinationConfig(algorithm="exchange", exchange_rounds=300)), fc)
+    res = coordinate(replace(site, coordination=CoordinationConfig(exchange_rounds=300)), fc)
     assert _score(site, fc, res) < 0.1
     assert res.stop_reason in ("converged", "no improvement", "iteration cap")
     assert 0 <= res.selected_round < len(res.rounds) == res.rounds_run
@@ -71,7 +71,7 @@ def test_the_plan_is_runnable_by_the_real_devices():
     last, the HVAC's power one of its three actions (duty-capped)."""
     site, fc, _ = _site_fc({"tariff": "day_night", "n_batteries": 1, "grid": 50, "hours": 24})
     seen = []
-    res = coordinate(replace(site, coordination=CoordinationConfig(algorithm="exchange", exchange_rounds=60)), fc,
+    res = coordinate(replace(site, coordination=CoordinationConfig(exchange_rounds=60)), fc,
                      progress=lambda *a: seen.append(a))
     assert len(res.devices["water_heater"].actions) == 2          # the real on/off element
     assert len(res.devices["hvac"].actions) == 3                  # the real off / cool / heat unit
@@ -102,7 +102,7 @@ def test_a_paused_run_resumes_exactly():
     from hemspolicy.exchange import ExchangeRun
 
     site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24})
-    site = replace(site, coordination=CoordinationConfig(algorithm="exchange", exchange_rounds=25))
+    site = replace(site, coordination=CoordinationConfig(exchange_rounds=25))
     whole = ExchangeRun(site, fc)
     whole.step()
     chunked = ExchangeRun(site, fc)
@@ -172,12 +172,12 @@ def test_lp_batteries_reach_the_optimum_of_a_convex_site():
     co = DWCoordinator(site, fc)
     r = co.run(max_iter=40)
     assert r.upper - r.lower < 1e-6
-    cc = CoordinationConfig(algorithm="exchange", exchange_battery_step="lp", kink_smoothing=0.0,
+    cc = CoordinationConfig(exchange_battery_step="lp", kink_smoothing=0.0,
                             exchange_eps=1e-4, exchange_rounds=600, exchange_patience=600)
     res = coordinate(replace(site, coordination=cc), fc)
     assert res.stop_reason == "converged"
     assert _score(site, fc, res) < 0.01
-    dp = coordinate(replace(site, coordination=CoordinationConfig(algorithm="exchange")), fc)
+    dp = coordinate(replace(site, coordination=CoordinationConfig()), fc)
     assert dp.stop_reason == "iteration cap"
 
 
@@ -211,7 +211,7 @@ def test_a_solve_can_start_where_the_last_one_stood():
     from hemspolicy.exchange import ExchangeRun
 
     base = {"tariff": "dynamic", "n_batteries": 1, "grid": 50, "hours": 24, "max_import_kw": 7}
-    cc = CoordinationConfig(algorithm="exchange", exchange_rounds=40)
+    cc = CoordinationConfig(exchange_rounds=40)
     site_a, fc_a, _ = _site_fc(base)
     first = ExchangeRun(replace(site_a, coordination=cc), fc_a)
     first.step()

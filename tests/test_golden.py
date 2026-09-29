@@ -40,7 +40,7 @@ def scenarios() -> dict[str, tuple[SiteConfig, str]]:
         battery=BatteryConfig(capacity_kwh=10.0),
         water_heater=WaterHeaterConfig(),
         hvac=HvacConfig(),
-        coordination=CoordinationConfig(max_rounds=8),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     return {
         "battery_only_day_night": (full.without("water_heater", "hvac"), "day_night"),

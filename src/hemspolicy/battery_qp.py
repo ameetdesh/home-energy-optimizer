@@ -1,7 +1,7 @@
 """An exact ADMM step for a battery: the prox of its LP model, by a small
 interior point method (numpy only).
 
-Textbook ADMM's step for a device is prox_{f,rho}(v) = argmin f(p) + (rho/2)|p - v|^2.
+ADMM's step for a device is prox_{f,rho}(v) = argmin f(p) + (rho/2)|p - v|^2.
 For a battery modelled as the Dantzig-Wolfe master models it - charge c and
 discharge e per slot, stored energy s after each slot, bounds on all three,
 the energy left at the end worth its terminal price - that step is a convex QP:

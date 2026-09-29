@@ -366,9 +366,9 @@ def solve_admm(p: dict, progress=None) -> dict:
     # converges to the optimum - and rounding the kink would only move it.
     # With the on/off tank or HVAC the rounding helps runs converge.
     exact = lp and site.water_heater is None and site.hvac is None
-    cc = CoordinationConfig(algorithm="exchange", exchange_rho=float(p.get("xrho", 0.1)),
+    cc = CoordinationConfig(exchange_rho=float(p.get("xrho", 0.1)),
                             exchange_rho_gain=0.01 if p.get("rho_adapt", True) else 0.0,
-                            exchange_rounds=rounds, max_rounds=rounds, polish=bool(p.get("polish", True)),
+                            exchange_rounds=rounds, polish=bool(p.get("polish", True)),
                             exchange_battery_step="lp" if lp else "dp",
                             exchange_warm_battery=bool(p.get("warm_start", False)),
                             **({"kink_smoothing": 0.0} if exact else {}))

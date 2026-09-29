@@ -167,7 +167,7 @@ def publish_policy(
     `measured_other_load_kw` - the meter reading MINUS this battery. That is
     the only part of this path that reacts to real time: the value function was
     solved against a forecast and cannot know that a load just switched on
-    (docs/theory.tex section 9). Without `limits` the raw policy action is
+    (docs/theory.tex, "What is guaranteed, and what is not"). Without `limits` the raw policy action is
     published unchanged, which is the previous behaviour.
 
     For more than one storage unit sharing the limit, do NOT call this per unit

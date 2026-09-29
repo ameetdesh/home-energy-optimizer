@@ -43,7 +43,7 @@ def solve(buy, sell, solar=None, load=0.5):
     )
     cfg = BatteryConfig(capacity_kwh=10.0, n_states=200, n_actions=81)
     site = SiteConfig(horizon=h, battery=cfg, water_heater=None, hvac=None,
-                      coordination=CoordinationConfig(max_rounds=8))
+                      coordination=CoordinationConfig(exchange_rounds=20))
     res = coordinate(site, fc)
     return h, cfg, fc, res, PolicySnapshot.from_result(site, fc, res)
 
@@ -99,7 +99,7 @@ def test_a_lossless_battery_has_no_spread():
                    outdoor_temp=np.full(n, 20.0), hot_water_demand=np.zeros(n))
     cfg = BatteryConfig(capacity_kwh=10.0, eta=1.0, n_states=100, n_actions=41)
     site = SiteConfig(horizon=h, battery=cfg, water_heater=None, hvac=None,
-                      coordination=CoordinationConfig(max_rounds=8))
+                      coordination=CoordinationConfig(exchange_rounds=20))
     snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
     r = reservation_prices(snap, 40, 5.0)
     assert r["spread"] == pytest.approx(0.0, abs=1e-9)
@@ -127,7 +127,7 @@ def test_a_lossier_battery_has_a_wider_band():
     def spread(eta):
         cfg = BatteryConfig(capacity_kwh=10.0, eta=eta, n_states=100, n_actions=41)
         site = SiteConfig(horizon=h, battery=cfg, water_heater=None, hvac=None,
-                          coordination=CoordinationConfig(max_rounds=8))
+                          coordination=CoordinationConfig(exchange_rounds=20))
         snap = PolicySnapshot.from_result(site, fc, coordinate(site, fc))
         return reservation_prices(snap, 40, 5.0)["spread"]
 

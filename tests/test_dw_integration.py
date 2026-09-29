@@ -26,7 +26,7 @@ from hemspolicy import (  # noqa: E402
 )
 from hemspolicy.coordinate import apply_curtailment  # noqa: E402
 from hemspolicy.evcc import ContractError, optimize_charge_schedule  # noqa: E402
-from hemspolicy.ha import publish_site  # noqa: E402
+from hemspolicy.ha import publish_policy, publish_site  # noqa: E402
 from test_evcc_contract import make_request  # noqa: E402
 from test_ha import FakeHA  # noqa: E402
 
@@ -233,6 +233,30 @@ def test_home_assistant_says_admm_has_no_certificate():
     publish_site(ha, site, fc, plan(site, fc, method="admm"), t=0)
     assert "sensor.hems_meter_price" not in ha.states
     assert ha.states["sensor.hems_plan_gap"]["state"] == "unknown"
+
+
+@pytest.mark.parametrize("method", ["dw", "admm"])
+def test_home_assistant_runs_with_either_coordinator(method):
+    """The HA runner's two tiers (tools/ha-lambda-demo/run.py) with each
+    coordinator: plan, snapshot, publish the policy and the site, then re-solve
+    from a new state - ADMM starting from where the last solve stood."""
+    site = site_with(water_heater=None)
+    fc = demo_forecasts(site.horizon, tariff="day_night")
+    res = plan(site, fc, method=method)
+    assert res.method == method and res.battery_pricing is not None
+    snap = PolicySnapshot.from_result(site, fc, res)
+    ha = FakeHA()
+    soe = site.battery.capacity_kwh * site.battery.soc_initial_frac
+    out = publish_policy(ha, snap, 0, soe)
+    publish_site(ha, site, fc, res, t=0)
+    assert np.isfinite(out["lambda"]) and np.isfinite(out["action_kw"])
+    assert {"sensor.hems_lambda", "sensor.hems_battery_action", "sensor.hems_plan_gap"} <= set(ha.states)
+    assert ("sensor.hems_meter_price" in ha.states) == (method == "dw")
+    assert (res.warm_start is not None) == (method == "admm")
+    moved = replace(site, battery=replace(site.battery, soc_initial_frac=0.8))
+    again = plan(moved, fc, method=method, warm=res.warm_start)
+    assert again.method == method
+    assert np.isfinite(publish_policy(ha, PolicySnapshot.from_result(moved, fc, again), 4, 8.0)["lambda"])
 
 
 # --------------------------------------------------------------------------
@@ -451,51 +475,6 @@ def test_stored_energy_is_valued_at_the_average_import_price():
     from dw.webapi import _site_fc
     site, fc, _ = _site_fc({"tariff": "day_night", "n_batteries": 2})
     assert all(b.terminal_price == pytest.approx(float(np.mean(fc.buy))) for b in site.battery_list)
-
-
-def test_admm_ends_without_a_limit_cycle():
-    """Sites where the old loop swapped plans every round until the cap (three
-    batteries under a 7 kW limit): with the limits priced exactly and the
-    cycle damping, it stops well before the cap. (A few watts over the limit
-    remain where the 50-state grid has no action that lands on it exactly:
-    priced, not clipped.)"""
-    from dataclasses import replace
-
-    from dw.webapi import _site_fc
-    from hemspolicy.coordinate import coordinate
-    from hemspolicy.types import CoordinationConfig
-
-    site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 3, "grid": 50, "max_import_kw": 7,
-                            "solar_peak": 5, "batt_capacity": 10})
-    res = coordinate(replace(site, coordination=CoordinationConfig(rho=6.0, max_rounds=100)), fc)
-    assert res.rounds_run < 100
-    assert res.grid_import_excess < 0.05
-
-
-def test_admm_does_not_stop_while_improving():
-    """The old rule stopped as soon as two rounds scored within 0.2% - after
-    2-3 rounds on 29 of 72 test sites. Now a run ends only on converged
-    residuals or after `patience` rounds without improving the best plan."""
-    from dataclasses import replace
-
-    from dw.webapi import _site_fc
-    from hemspolicy.coordinate import coordinate
-    from hemspolicy.types import CoordinationConfig
-
-    for tariff in ("day_night", "dynamic", "flat"):
-        site, fc, _ = _site_fc({"tariff": tariff, "n_batteries": 2, "grid": 50, "max_import_kw": 7})
-        cc = CoordinationConfig(rho=6.0, max_rounds=100)
-        res = coordinate(replace(site, coordination=cc), fc)
-        if res.rounds_run == cc.max_rounds:
-            continue
-        last = res.rounds[-1]
-        converged = last.primal_res < cc.residual_tol and last.dual_res < cc.residual_tol
-        best, improved = np.inf, 0
-        for i, o in enumerate(res.round_objectives):
-            if not np.isfinite(best) or o < best - cc.converge_tol * abs(best):
-                improved = i
-            best = min(best, o)
-        assert converged or res.rounds_run - 1 - improved >= cc.patience, tariff
 
 
 def test_every_control_the_page_script_wires_exists():

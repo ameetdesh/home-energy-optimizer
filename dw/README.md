@@ -69,6 +69,12 @@ own discretisation (§6.3).
 
 ## 0. Where the last thread left off
 
+> **Since replaced.** The ADMM loop described in this section and compared in
+> §6 (Jacobi rounds against the others' last plans, a z-step on the kink, dual
+> ascent on limit multipliers) has been removed. The package's ADMM is now
+> proximal message passing (`hemspolicy.exchange`); `docs/theory.tex` describes
+> both coordinators as they are and compares them.
+
 The previous sessions finished with PR #8: compiled DP kernels and a wasm
 wheel, 3.3× faster in the browser. Before that the coordinator got two things.
 The GUI can now show every round. Grid breaches are priced into the objective

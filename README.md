@@ -100,12 +100,12 @@ safe, bound_by = clamp(action(snap, t, soe), other_load_kw=3.1,
 There are two testbed UIs, one per coordinator. They use different ports, so
 both can run at once and be compared on the same settings.
 
-| | ADMM coordinator (the default in the package) | Dantzig–Wolfe coordinator (`dw/`) |
+| | ADMM coordinator, and the policy/evcc endpoints | Dantzig–Wolfe coordinator, with ADMM as an option (`dw/`) |
 |---|---|---|
 | start | `.venv/bin/python gui/server.py` | `.venv/bin/python dw/gui/server.py` |
 | opens | <http://127.0.0.1:8765> | <http://127.0.0.1:8766> |
 | needs | numpy | numpy (the DW master uses the built-in solver in `dw/lpsolver.py`; scipy only for the optional HiGHS cross-check) |
-| shows | coordination rounds, λ, policy replay on hover | column-generation iterations, lower bound, meter price π, λ from the master |
+| shows | ADMM iterations, λ, policy replay on hover | column-generation iterations, lower bound, meter price π, λ from the master |
 
 ```bash
 # terminal 1 - ADMM
@@ -126,7 +126,8 @@ drag the hourly dots (on the bold lines) on the Prices and Power charts, and it
 re-solves on release. The draw is the heat taken from the tank, in kW. Export is kept at
 or below import; **reset** (or a new tariff or horizon) restores the preset.
 The same page can plan with **ADMM** instead (Method), with a slider for its
-tether ρ and an "Adapt ρ" switch, so the two can be compared on one site.
+tether ρ, an "Adapt ρ" switch, each battery's step (its DP or its exact LP) and
+a cold or warm start, so the two can be compared on one site.
 While a solve runs, the runnable plan, lower bound and gap update after every
 iteration (ADMM has no bound). With **Batteries in LP** off, DW keeps every
 plan and smooths prices harder ("auto" pool and smoothing), which closes the
@@ -152,7 +153,7 @@ Publishes the plan and the price signals as HA sensors. Walkthrough below.
 ```python
 from hemspolicy import plan
 res = plan(site, fc)                  # Dantzig-Wolfe (default)
-res = plan(site, fc, method="admm")   # the ADMM loop
+res = plan(site, fc, method="admm")   # ADMM (proximal message passing)
 res.gap, res.lower_bound              # DW only: the plan is within `gap` of the best
 res.meter_price                       # DW only: cost of one more kWh at the meter, per slot
 ```
@@ -210,7 +211,7 @@ API.
 HA_TOKEN=<your token> .venv/bin/python tools/ha-lambda-demo/run.py --speed 2
 ```
 
-The slow tier plans with Dantzig–Wolfe; add `--method admm` for the ADMM loop.
+The slow tier plans with Dantzig–Wolfe; add `--method admm` for ADMM (each re-solve starts from the last one's state).
 `--speed 2` runs a simulated day in about 12 real minutes, slow enough for the
 history graphs to draw curves. `--speed 400` is a day in 4 seconds, useful as a
 smoke test. Then open <http://localhost:8123/hems-policy>.
@@ -319,7 +320,7 @@ goals, and a charger's minimum power as a semi-continuous floor. `docs/PLAN.md`
 lists what is and is not mapped. Requests are planned with Dantzig–Wolfe: an
 EV bids charging plans from its DP, evcc's grid limits are enforced in the
 plan, and the response carries an extra `_hems_policy_certificate`. Start the
-server with `HEMS_METHOD=admm` for the ADMM loop.
+server with `HEMS_METHOD=admm` for ADMM.
 
 **Real forecasts.** `hemspolicy.feeds` provides keyless Open-Meteo PV and
 temperature, CSV and list ingestion, and measured-value blending — anchoring the
@@ -342,7 +343,7 @@ src/hemspolicy/
   evcc.py          evcc optimizer wire contract
   profiles.py      synthetic forecasts for tests and demos
 bench/             exact references: continuous LP, joint DP, MILP, duals
-gui/               local web UI (ADMM coordinator)
+gui/               local web UI (ADMM), the policy API and the evcc endpoint
 dw/                Dantzig-Wolfe coordinator, its comparison runner and its UI (dw/gui/);
                    dw/integrate.py hands its plan to Home Assistant and evcc
 tools/             HA dashboard setup, evcc compatibility checks

@@ -1,4 +1,4 @@
-"""Textbook ADMM: proximal message passing on the house, the DPs as device steps.
+"""ADMM: proximal message passing on the house, the device solvers as its steps.
 
 This is the ADMM of Kraning, Chu, Lavaei & Boyd ("Dynamic Network Energy
 Management via Proximal Message Passing", Foundations and Trends in
@@ -11,7 +11,8 @@ beyond a grid limit at the breach price) and every device. Each iteration
          p_d <- argmin f_d(p) + (rho/2) |p - (p_d - pbar - u)|^2,
      the grid connection in closed form, the PV by clipping, and the
      batteries, tank and HVAC by their own DPs with a tether and no bill (the
-     grid connection carries the bill);
+     grid connection carries the bill) - or, as an option, each plain battery
+     by its LP, solved exactly (hemspolicy.battery_qp);
   2. the net averages the imbalance and moves the price: u <- u + pbar;
   3. rho adapts by the paper's proportional-derivative rule, then is held.
 
@@ -19,10 +20,10 @@ Optionally (`exchange_momentum`) the targets and prices are extrapolated with
 Nesterov weights, dropped for an iteration whenever the combined residual grows
 - fast ADMM with restart (Goldstein, O'Donoghue, Setzer & Baraniuk, 2014).
 
-Unlike the legacy loop (coordinate() with algorithm "legacy"), no device sees the
-others' plans: each responds only to the shared price and its own last plan,
-which is what lets several devices move together. For convex devices this
-converges to the optimal plan and prices.
+No device sees the others' plans: each responds only to the shared price and
+its own last plan, which is what lets several devices move together. For
+convex devices with exact steps the cost and the prices converge to optimal
+ones.
 
 The on/off tank and three-way HVAC are not convex. As the paper prescribes,
 the iterations use relaxed copies that may run a fraction of each slot
@@ -32,7 +33,8 @@ plans, two quick DP solves - and the best runnable plan seen is kept, reported
 as it improves, and polished at the end (each device in turn re-plans, kept
 only if the objective falls).
 
-No LP or QP solver is used: dynamic programmes and closed-form steps only.
+Dynamic programmes and closed-form steps only, unless the batteries take LP
+steps (a small interior point method in numpy).
 """
 
 from __future__ import annotations
@@ -180,14 +182,14 @@ class WarmStart:
 
 def coordinate_exchange(cfg: SiteConfig, fc: Forecasts, progress=None, warm: WarmStart | None = None
                         ) -> CoordinationResult:
-    """Plan the site by textbook ADMM (see the module docstring)."""
+    """Plan the site by ADMM (see the module docstring)."""
     run = ExchangeRun(cfg, fc, progress, warm)
     run.step()
     return run.result()
 
 
 class ExchangeRun:
-    """A textbook ADMM solve that can stop after any iteration and carry on.
+    """An ADMM solve that can stop after any iteration and carry on.
 
     `step(n)` runs up to n more iterations (all that remain by default) and
     says whether the run has finished; `result()` is the best runnable plan so
@@ -368,7 +370,9 @@ class ExchangeRun:
                                if g.max_export_kw is not None else 0.0),
                 primal_res=r_res, dual_res=s_res, rho=self.rho,
                 round_ms=(time.perf_counter() - t_round) * 1000.0, device_ms=dev_ms,
-                battery_dp_load=self.zero.copy(), relaxed_objective=relaxed_obj))
+                battery_dp_load=(self.base + sum(run[jj].power for jj in keys if jj != "battery")
+                                 if "battery" in run else None),
+                relaxed_objective=relaxed_obj))
             if not np.isfinite(self.best_obj) or obj < self.best_obj - cc.converge_tol * abs(self.best_obj):
                 self.last_improve = k
             if obj < self.best_obj:
@@ -404,7 +408,7 @@ class ExchangeRun:
         if self.progress is not None and self.done:
             self.progress(-1, self.max_rounds)
         if self.best_sols is None:
-            raise RuntimeError("textbook ADMM: no iteration has run yet")
+            raise RuntimeError("ADMM: no iteration has run yet")
         devices = dict(self.best_sols)
         net = self.base + sum(devices[j].power for j in keys)
         net, curtail = apply_curtailment(net, fc.solar, fc.sell, g)

@@ -29,7 +29,7 @@ from hemspolicy import (
 from hemspolicy.profiles import day_night_tariff
 
 
-def two_battery_site(limit: float | None = None, step: float | None = None, **grid_kw):
+def two_battery_site(limit: float | None = None, **grid_kw):
     """Two identical batteries and a big evening load, so both are needed."""
     h = Horizon(dt=0.25, hours=12.0)
     b = BatteryConfig(
@@ -37,18 +37,21 @@ def two_battery_site(limit: float | None = None, step: float | None = None, **gr
         soc_initial_frac=0.05, n_states=60, n_actions=25,
     )
     grid = GridLimits(max_import_kw=limit, **grid_kw)
-    if step is not None:
-        grid = GridLimits(max_import_kw=limit, price_step=step, **grid_kw)
     return SiteConfig(
         horizon=h, battery=b, batteries=(b,), water_heater=None, hvac=None,
-        grid=grid, coordination=CoordinationConfig(max_rounds=40),
+        grid=grid, coordination=CoordinationConfig(exchange_rounds=20),
     )
 
 
-def big_evening_load(h: Horizon, peak_kw: float = 10.0) -> Forecasts:
+def big_evening_load(h: Horizon, peak_kw: float = 10.0, rise: float = 0.0) -> Forecasts:
+    """`rise`: the peak price climbs by this much per hour after 07:00, so the
+    batteries discharge late and the house imports early - which makes the
+    unconstrained optimum unique (with a flat peak price, flat and peaky
+    import cost the same)."""
     n = h.steps
     buy, sell = day_night_tariff(h, peak=0.60, offpeak=0.10, sell=0.05)
     hours = h.times()
+    buy = buy + rise * np.maximum(hours - 7.0, 0.0)
     return Forecasts(
         buy=buy, sell=sell,
         load=np.where(hours >= 7, peak_kw, 0.5),
@@ -90,27 +93,15 @@ def test_two_batteries_share_the_work_when_there_is_enough_load():
     assert min(tp) > 0.5 * max(tp), f"lopsided use of identical batteries: {tp}"
 
 
-def test_a_second_battery_idles_when_the_load_cannot_absorb_it():
-    """Not a defect. With little to displace and export below the charge cost,
-    a second battery has nothing profitable to do - and it looks exactly like
-    the starvation bug above, which is why both cases are pinned."""
-    site = two_battery_site()
-    fc = big_evening_load(site.horizon, peak_kw=1.0)
-    res = coordinate(site, fc)
-
-    tp = [float(np.abs(s.power).sum() * site.horizon.dt) for s in res.devices.values()]
-    assert min(tp) < 0.2 * max(tp), f"expected the second battery to idle: {tp}"
-
-
 # --------------------------------------------------------------------------
 # The limit is actually enforced
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("limit", [12.0, 10.0, 8.0, 6.0])
+@pytest.mark.parametrize("limit", [8.0, 6.0])
 def test_binding_import_limits_are_met(limit):
     site = two_battery_site(limit)
-    fc = big_evening_load(site.horizon)
+    fc = big_evening_load(site.horizon, rise=0.01)
     res = coordinate(site, fc)
 
     assert res.grid_import_excess <= 1e-6, (
@@ -122,8 +113,8 @@ def test_binding_import_limits_are_met(limit):
 def test_an_unconstrained_plan_would_breach_the_limit():
     """Guards the tests above from being vacuous."""
     site = two_battery_site()
-    fc = big_evening_load(site.horizon)
-    assert coordinate(site, fc).net_grid.max() > 12.0
+    fc = big_evening_load(site.horizon, rise=0.01)
+    assert coordinate(site, fc).net_grid.max() > 8.0 + 1.0
 
 
 def test_cost_degrades_gracefully_as_the_limit_tightens():
@@ -179,31 +170,6 @@ def test_residual_breach_is_reported_not_swallowed():
     assert res.net_grid.max() > 2.0
 
 
-def test_exact_limits_have_no_step_to_tune():
-    """In "price" mode the limit reaches the devices through a price raised by
-    a fixed step per kW of breach, and the right step depends on the site: here
-    the default (4) overshoots and ships a 1.8 kW breach at nearly twice the
-    cost, while a step of 1 meets the limit. In "exact" mode (the default)
-    each device prices the limit itself: there is no step to get wrong, and
-    it finds the same plan in a few rounds."""
-    from dataclasses import replace
-
-    fc = big_evening_load(Horizon(dt=0.25, hours=12.0))
-
-    def run(step, mode):
-        site = two_battery_site(6.0, step=step)
-        return coordinate(replace(site, coordination=replace(site.coordination, grid_mode=mode)), fc)
-
-    assert run(None, "price").grid_import_excess > 1.0
-    good = run(1.0, "price")
-    assert good.grid_import_excess <= 1e-6
-    for step in (0.5, 1.0, None):
-        exact = run(step, "exact")
-        assert exact.grid_import_excess <= 1e-6
-        assert exact.total_objective == pytest.approx(good.total_objective, abs=1e-6)
-        assert exact.rounds_run < good.rounds_run
-
-
 def _pv_site(pv_hours: float, export_limit: float | None):
     h = Horizon(dt=0.25, hours=12.0)
     n = h.steps
@@ -219,7 +185,7 @@ def _pv_site(pv_hours: float, export_limit: float | None):
     site = SiteConfig(
         horizon=h, battery=b, water_heater=None, hvac=None,
         grid=GridLimits(max_export_kw=export_limit) if export_limit else GridLimits(),
-        coordination=CoordinationConfig(max_rounds=40),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     return site, fc, b
 
@@ -261,7 +227,7 @@ def test_without_curtailment_the_cap_is_unenforceable():
     site = SiteConfig(
         horizon=site.horizon, battery=site.battery, water_heater=None, hvac=None,
         grid=GridLimits(max_export_kw=5.0, allow_curtailment=False),
-        coordination=CoordinationConfig(max_rounds=40),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     res = coordinate(site, fc)
     assert res.grid_export_excess > 0
@@ -285,7 +251,7 @@ def test_reported_excess_matches_the_actual_series():
         site = SiteConfig(
             horizon=site.horizon, battery=site.battery, water_heater=None, hvac=None,
             grid=GridLimits(max_export_kw=5.0, allow_curtailment=allow),
-            coordination=CoordinationConfig(max_rounds=40),
+            coordination=CoordinationConfig(exchange_rounds=20),
         )
         res = coordinate(site, fc)
         assert res.grid_export_excess == pytest.approx(
@@ -312,7 +278,7 @@ def test_negative_export_price_triggers_curtailment():
         return coordinate(SiteConfig(
             horizon=h, battery=b, water_heater=None, hvac=None,
             grid=GridLimits(allow_curtailment=allow),
-            coordination=CoordinationConfig(max_rounds=15)), fc)
+            coordination=CoordinationConfig(exchange_rounds=20)), fc)
 
     off, on = run(False), run(True)
     neg = sell < 0

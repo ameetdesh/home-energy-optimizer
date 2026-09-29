@@ -37,7 +37,7 @@ ORDER = [
     ("src/hemspolicy/dp_thermal.py", None),
     ("src/hemspolicy/coordinate.py", None),
     ("src/hemspolicy/battery_qp.py", None),   # the exact LP battery step
-    ("src/hemspolicy/exchange.py", None),     # textbook ADMM (imports from coordinate)
+    ("src/hemspolicy/exchange.py", None),     # ADMM (imports from coordinate)
     ("src/hemspolicy/policy.py", None),       # the ADMM mode's value of a stored kWh
     ("src/hemspolicy/webapi.py", ["build_site"]),
     ("dw/lpsolver.py", None),

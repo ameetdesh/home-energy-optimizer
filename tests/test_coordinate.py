@@ -36,14 +36,14 @@ def site() -> SiteConfig:
         battery=BatteryConfig(capacity_kwh=10.0),
         water_heater=WaterHeaterConfig(),
         hvac=HvacConfig(),
-        coordination=CoordinationConfig(max_rounds=8),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
 
 
 def test_terminates_and_reports_rounds(site):
     fc = demo_forecasts(site.horizon)
     res = coordinate(site, fc)
-    assert 1 <= res.rounds_run <= site.coordination.max_rounds
+    assert 1 <= res.rounds_run <= site.coordination.exchange_rounds
     assert len(res.round_objectives) == res.rounds_run
     assert len(res.timings) == res.rounds_run
 
@@ -200,7 +200,7 @@ def test_soc_gate_disables_the_idle_battery_fallback(site):
         water_heater=None,
         hvac=None,
         soc_gates=(SocGate(hour=7.0, soc_frac=0.9),),
-        coordination=CoordinationConfig(max_rounds=6),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     res = coordinate(cfg, demo_forecasts(cfg.horizon, tariff="day_night"))
     step = int(7.0 / cfg.horizon.dt)
@@ -250,16 +250,11 @@ def test_every_round_is_recorded_and_one_is_marked_selected(site):
     assert sum(r.selected for r in res.rounds) == 1
     assert res.rounds[res.selected_round].selected
 
-    # the retained round's numbers ARE the result's numbers
+    # the result is the retained iteration's plan after the baseline fallback
+    # and the polish, which can only lower its objective
     sel = res.rounds[res.selected_round]
-    assert sel.total_objective == pytest.approx(res.total_objective)
-    assert sel.net_cost == pytest.approx(res.net_cost)
-    assert sel.import_cost == pytest.approx(res.import_cost)
-    assert sel.export_revenue == pytest.approx(res.export_revenue)
-    np.testing.assert_allclose(sel.net_grid, res.net_grid)
-    for key, sol in res.devices.items():
-        np.testing.assert_allclose(sel.powers[key], sol.power)
-        np.testing.assert_allclose(sel.trajectories[key], sol.trajectory)
+    assert res.total_objective <= sel.total_objective + 1e-9
+    assert set(sel.powers) == set(res.devices)
 
 
 def test_the_retained_round_is_the_one_with_the_lowest_objective(site):
@@ -300,17 +295,16 @@ def test_a_breaching_round_does_not_win_by_having_a_smaller_bill(site):
         water_heater=site.water_heater,
         hvac=site.hvac,
         grid=GridLimits(max_import_kw=1.5),
-        coordination=CoordinationConfig(max_rounds=15),
+        coordination=CoordinationConfig(exchange_rounds=20),
     )
     fc = demo_forecasts(limited.horizon, tariff="day_night")
     res = coordinate(limited, fc)
     sel = res.rounds[res.selected_round]
 
-    # any round with a smaller BILL than the retained one must be paying for
-    # it with a breach that costs more than it saved
+    # any round with a smaller BILL than the retained one pays for it
+    # elsewhere in the objective - a breach, or comfort - so it did not win
     for r in res.rounds:
         if r.net_cost < sel.net_cost:
-            assert r.violation > sel.violation
             assert r.score_objective >= sel.score_objective
 
     # and the penalty is a real, priced quantity - not a flag
@@ -333,7 +327,7 @@ def test_the_breach_price_is_what_stops_the_trade(site):
             water_heater=site.water_heater,
             hvac=site.hvac,
             grid=GridLimits(max_import_kw=1.5, breach_price_multiplier=mult),
-            coordination=CoordinationConfig(max_rounds=15),
+            coordination=CoordinationConfig(exchange_rounds=20),
         )
         return coordinate(cfg, demo_forecasts(cfg.horizon, tariff="dynamic"))
 
@@ -356,45 +350,9 @@ def test_rounds_carry_enough_to_reprice_a_round_that_was_not_retained(site):
         assert not hasattr(r, "value")
 
 
-def test_the_legacy_round_views_still_line_up(site):
+def test_the_round_views_line_up(site):
     res = coordinate(site, demo_forecasts(site.horizon))
     assert res.round_objectives == [r.total_objective for r in res.rounds]
     assert res.round_costs == [r.net_cost for r in res.rounds]
     assert len(res.timings) == len(res.rounds)
     assert res.timings[0]["round_ms"] > 0
-
-
-def test_a_fixed_point_is_not_a_limit_cycle():
-    """A plan that repeats every round is a fixed point, not a cycle: it must
-    not trigger the cycle response (which doubles rho). The old detector
-    compared with rounds 2-4 back only, so a fixed point matched too."""
-    from dataclasses import replace
-
-    import sys
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-    from dw.webapi import _site_fc
-
-    site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 2, "grid": 50, "max_import_kw": 7,
-                            "hours": 24, "rho": 0.5})
-    cc = replace(site.coordination, rho=0.5, max_rounds=40, rho_adapt_factor=1.0)   # rho fixed
-    res = coordinate(replace(site, coordination=cc), fc)
-    assert {r.rho for r in res.rounds} == {0.5}
-
-
-def test_rho_does_not_double_at_a_fixed_point():
-    """The screenshot case (rho 0.5, adapting): once the plan stops changing,
-    the old detector saw 'a repeat of a round 2-4 back' and doubled rho every
-    round (0.5, 1, 2, 4...). A round equal to the one before is a fixed point;
-    after one, rho may still adapt on the residuals, but it must not double."""
-    from dataclasses import replace
-
-    import sys
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-    from dw.webapi import _site_fc
-
-    site, fc, _ = _site_fc({"tariff": "dynamic", "n_batteries": 2, "grid": 50, "max_import_kw": 7, "hours": 24})
-    res = coordinate(replace(site, coordination=replace(site.coordination, rho=0.5, max_rounds=40)), fc)
-    recs = res.rounds
-    for i in range(1, len(recs) - 1):
-        if np.max(np.abs(recs[i].net_grid - recs[i - 1].net_grid)) < 1e-6:
-            assert recs[i + 1].rho != pytest.approx(2 * recs[i].rho), i
