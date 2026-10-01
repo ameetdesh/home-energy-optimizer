@@ -325,7 +325,10 @@ class DWCoordinator:
                 mins[dev.key] = v
 
     def _ask(self, dev: Device, query: Query, source: str) -> Column:
-        """A participant's answer to `query`, as a column."""
+        """Ask participant `dev` the interface query `query`; return its answer
+        as a pool column tagged `source` (how it was proposed: "price",
+        "load_aware"). The column is marked inexact when the participant's
+        solve failed and it answered with a stand-in plan."""
         a = dev.cfg.respond(query)
         return Column(np.asarray(a.plan_kw, dtype=float).copy(), np.asarray(a.trajectory, dtype=float).copy(),
                       float(a.private_cost), source, detail=a.detail, exact=a.status == "ok")
@@ -833,11 +836,16 @@ class DWCoordinator:
         return extended_objective(self.cfg, self.fc, net, trajs)
 
     def participants_cost(self, plan: dict[str, Column]) -> float:
-        """The participants' private costs in a plan (their own models price them)."""
+        """The sum of the participants' private costs (currency) in `plan`
+        (device key -> chosen column), as their own models priced them. The
+        site's own devices are not included: `evaluate` prices those."""
         return float(sum(plan[d.key].cost for d in self.devices if d.kind == "participant" and d.key in plan))
 
     def score(self, plan: dict[str, Column]) -> float:
-        """A plan's objective: `evaluate` plus the participants' private costs."""
+        """The objective (currency) of `plan` (device key -> chosen column):
+        the bill and the site's own devices' costs (`evaluate`), plus the
+        participants' private costs. Infinite if the plan breaks the export
+        ceiling and cannot curtail its way under it."""
         return (self.evaluate({k: c.power for k, c in plan.items()}, {k: c.trajectory for k, c in plan.items()})
                 + self.participants_cost(plan))
 
@@ -935,7 +943,14 @@ class DWCoordinator:
         the on/off plans that will run rather than a fractional mix of them. A
         participant says whether it is on/off (`onoff`); a device of the site's
         own is when it cannot run a blend. The bound is unaffected: it is
-        re-stated from every plan ever proposed (`_seen_min`)."""
+        re-stated from every plan ever proposed (`_seen_min`).
+
+        `iters`: the most pricing rounds after fixing. `heuristic_columns`: also
+        ask each free device its best response to the rest (as `run` does).
+        `history`: `run`'s per-iteration log, appended to ("dive 1", ...). `t0`:
+        `run`'s start time (perf_counter), for the log's elapsed ms. Changes the
+        device pools in place; returns nothing. Does nothing if the integer
+        master fails, or if every device or none is on/off."""
         try:
             _, lam_int, _, _, _ = self.solve_master(integer=True)
         except RuntimeError:

@@ -890,24 +890,46 @@ class Answer:
 
 @runtime_checkable
 class Participant(Protocol):
-    """What a coordinator needs from a participant."""
+    """What a coordinator needs from a participant.
 
-    key: str
+    Two optional attributes refine how the coordinator treats it:
+    `onoff` (bool) - True if its plans are on/off schedules, so the coordinator
+    fixes it to one plan before re-pricing the others (DWCoordinator.run's
+    dive); taken as `not modulating` when absent. `blend(weights, details)` -
+    its own result for a weighted mix of its plans, given each plan's
+    `Answer.detail`; called only when `modulating` is True.
+    """
+
+    key: str              # unique name in the coordinator (e.g. "battery", "deferrable0+deferrable1")
     max_power_kw: float   # the most it can draw or supply in one slot (bounds the meter)
     modulating: bool      # can a weighted blend of its plans run as it is?
 
-    def respond(self, query: Query) -> Answer: ...
+    def respond(self, query: Query) -> Answer:
+        """Its answer to `query`: the plan it would run and that plan's private
+        cost. If its solve fails it still answers with a plan it can run (for
+        example its last good one), with status "fallback" or "infeasible"; the
+        coordinator then uses that plan but proves no bound from it."""
+        ...
 
-    def baseline(self) -> Answer: ...
+    def baseline(self) -> Answer:
+        """A feasible plan to start from, with no price given (for example its
+        thermostat or its plan at the import tariff)."""
+        ...
 
 
 # --------------------------------------------------------------------- JSON
 def _series(x) -> list[float] | None:
+    """An array (or None) as a flat list of floats for JSON (or None)."""
     return None if x is None else [float(v) for v in np.asarray(x, dtype=float).ravel()]
 
 
 def query_to_dict(q: Query, step_minutes: float, start: str | None = None) -> dict:
-    """The query as device-query.v1 JSON."""
+    """The query as a device-query.v1 JSON object (a dict ready for json.dumps).
+
+    `q`: the query. `step_minutes`: the slot length. `start`: the first slot's
+    start, ISO 8601, if known. The slot count is read from `price_draw`, or from
+    `target_kw` for a proximal query; one of them must be set.
+    """
     out: dict = {"version": SCHEMA_VERSION, "kind": q.kind,
                  "horizon": {"step_minutes": float(step_minutes),
                              "slots": len(next(a for a in (q.price_draw, q.target_kw) if a is not None))}}
@@ -923,13 +945,19 @@ def query_to_dict(q: Query, step_minutes: float, start: str | None = None) -> di
 
 
 def query_from_dict(d: dict) -> Query:
+    """A device-query.v1 JSON object (as parsed by json.loads) back as a Query.
+    The horizon is not kept: a Query's arrays carry the slot count."""
     arr = lambda k: None if d.get(k) is None else np.asarray(d[k], dtype=float)   # noqa: E731
     return Query(kind=d["kind"], price_draw=arr("price_draw"), price_supply=arr("price_supply"),
                  residual_kw=arr("residual_kw"), target_kw=arr("target_kw"), rho=float(d.get("rho", 0.0)))
 
 
 def answer_to_dict(a: Answer, solver: str | None = None) -> dict:
-    """The answer as device-answer.v1 JSON (`detail` stays behind)."""
+    """The answer as a device-answer.v1 JSON object (a dict ready for json.dumps).
+
+    `a`: the answer; its `detail` stays behind (it is in-process only).
+    `solver`: an optional label for what produced it (for logs).
+    """
     out = {"version": SCHEMA_VERSION, "plan_kw": _series(a.plan_kw),
            "private_cost": float(a.private_cost), "trajectory": _series(a.trajectory),
            "status": a.status}
@@ -939,12 +967,18 @@ def answer_to_dict(a: Answer, solver: str | None = None) -> dict:
 
 
 def answer_from_dict(d: dict) -> Answer:
+    """A device-answer.v1 JSON object (as parsed by json.loads) back as an
+    Answer, with no `detail`. A missing status reads as "ok"."""
     return Answer(plan_kw=np.asarray(d["plan_kw"], dtype=float), private_cost=float(d["private_cost"]),
                   trajectory=np.asarray(d["trajectory"], dtype=float), status=d.get("status", "ok"))
 
 
 def schema(name: str) -> dict:
-    """The packaged JSON Schema: "device-query" or "device-answer"."""
+    """The packaged JSON Schema as a dict.
+
+    `name`: "device-query" or "device-answer". Raises FileNotFoundError for
+    any other name.
+    """
     text = resources.files("home_energy_optimizer").joinpath(f"schemas/{name}.v{SCHEMA_VERSION}.json").read_text()
     return json.loads(text)
 
@@ -4326,7 +4360,10 @@ class DWCoordinator:
                 mins[dev.key] = v
 
     def _ask(self, dev: Device, query: Query, source: str) -> Column:
-        """A participant's answer to `query`, as a column."""
+        """Ask participant `dev` the interface query `query`; return its answer
+        as a pool column tagged `source` (how it was proposed: "price",
+        "load_aware"). The column is marked inexact when the participant's
+        solve failed and it answered with a stand-in plan."""
         a = dev.cfg.respond(query)
         return Column(np.asarray(a.plan_kw, dtype=float).copy(), np.asarray(a.trajectory, dtype=float).copy(),
                       float(a.private_cost), source, detail=a.detail, exact=a.status == "ok")
@@ -4834,11 +4871,16 @@ class DWCoordinator:
         return extended_objective(self.cfg, self.fc, net, trajs)
 
     def participants_cost(self, plan: dict[str, Column]) -> float:
-        """The participants' private costs in a plan (their own models price them)."""
+        """The sum of the participants' private costs (currency) in `plan`
+        (device key -> chosen column), as their own models priced them. The
+        site's own devices are not included: `evaluate` prices those."""
         return float(sum(plan[d.key].cost for d in self.devices if d.kind == "participant" and d.key in plan))
 
     def score(self, plan: dict[str, Column]) -> float:
-        """A plan's objective: `evaluate` plus the participants' private costs."""
+        """The objective (currency) of `plan` (device key -> chosen column):
+        the bill and the site's own devices' costs (`evaluate`), plus the
+        participants' private costs. Infinite if the plan breaks the export
+        ceiling and cannot curtail its way under it."""
         return (self.evaluate({k: c.power for k, c in plan.items()}, {k: c.trajectory for k, c in plan.items()})
                 + self.participants_cost(plan))
 
@@ -4936,7 +4978,14 @@ class DWCoordinator:
         the on/off plans that will run rather than a fractional mix of them. A
         participant says whether it is on/off (`onoff`); a device of the site's
         own is when it cannot run a blend. The bound is unaffected: it is
-        re-stated from every plan ever proposed (`_seen_min`)."""
+        re-stated from every plan ever proposed (`_seen_min`).
+
+        `iters`: the most pricing rounds after fixing. `heuristic_columns`: also
+        ask each free device its best response to the rest (as `run` does).
+        `history`: `run`'s per-iteration log, appended to ("dive 1", ...). `t0`:
+        `run`'s start time (perf_counter), for the log's elapsed ms. Changes the
+        device pools in place; returns nothing. Does nothing if the integer
+        master fails, or if every device or none is on/off."""
         try:
             _, lam_int, _, _, _ = self.solve_master(integer=True)
         except RuntimeError:

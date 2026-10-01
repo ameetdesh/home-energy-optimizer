@@ -63,13 +63,21 @@ RUNTIME_IGNORED = ("debug", "stage_times")
 
 
 def _per_load_keys():
+    """The optim_conf keys that hold one entry per deferrable load, so are cut
+    to a participant's loads (EMHASS's own list, plus a few it handles apart)."""
     from emhass.utils import DEF_LOAD_ARRAY_PARAMS
     return set(DEF_LOAD_ARRAY_PARAMS) | {"minimum_power_of_deferrable_loads", "cost_forecast_per_deferrable_load",
                                          "is_electric_load", "def_load_config"}
 
 
 def unsupported(optim_conf: dict, plant_conf: dict, costfun: str, runtime: dict) -> str | None:
-    """Why this configuration cannot be split per device yet, or None."""
+    """Why this configuration cannot be split per device yet, or None if it can.
+
+    `optim_conf`, `plant_conf`: EMHASS's configuration dicts. `costfun`: EMHASS's
+    cost function ("profit", "cost" or "self-consumption"). `runtime`: the
+    remaining keyword arguments of perform_optimization. Returns a short reason
+    for the log (the option that blocks it), or None.
+    """
     oc, pc = optim_conf, plant_conf
     if costfun not in ("profit", "cost"):
         return f"costfun {costfun!r} (supported: profit, cost)"
@@ -110,6 +118,17 @@ class EmhassParticipant:
 
     The model is built once and re-solved at each query's prices: EMHASS holds
     prices, PV and load in CVXPY parameters, so a re-solve does not rebuild it.
+
+    `opt`: the calling EMHASS Optimization (its configuration is copied, then
+    restricted). `key`: the participant's name in the coordinator. `battery`:
+    whether the participant includes EMHASS's battery. `loads`: indices of its
+    deferrable loads in EMHASS's configuration. `data_opt`: EMHASS's input
+    DataFrame (its index sets the horizon). `soc_init`, `soc_final`: the
+    battery's start and end-of-day state of charge (fractions, 0-1). `runtime`:
+    perform_optimization's other keyword arguments; the per-load lists are cut
+    to `loads`. `buy`: the import tariff per slot (currency/kWh), for its
+    baseline. `reach_w`: grid limits (W) for its own model, sized above every
+    flow the house can make.
     """
 
     def __init__(self, opt, key: str, battery: bool, loads: list[int], data_opt, soc_init, soc_final, runtime: dict,
@@ -172,6 +191,16 @@ class EmhassParticipant:
         self._last: tuple | None = None   # (query key, answer): a repeated query is not re-solved
 
     def _run(self, pv_w, load_w, buy, sell) -> Answer:
+        """Solve EMHASS's model of this participant once and read off its answer.
+
+        `pv_w`, `load_w`: the PV and load (W per slot) it is metered with - zero
+        in a price response, the rest of the house in a best response. `buy`,
+        `sell`: the import and export prices (currency/kWh per slot). Returns the
+        plan (kW, + = drawn), its private cost (EMHASS's objective less the
+        bill) and its state: stored energy (kWh) with a battery, else energy used
+        so far. If the solve fails, returns the last good answer with status
+        "fallback"; raises RuntimeError if there has been none.
+        """
         t0 = time.perf_counter()
         res = self.opt.perform_optimization(self.data, pv_w, load_w, np.asarray(buy, dtype=float),
                                             np.asarray(sell, dtype=float), soc_init=self.soc_init,
@@ -202,6 +231,8 @@ class EmhassParticipant:
         return self._good
 
     def respond(self, q: Query) -> Answer:
+        """Answer a coordinator's query (interface.Participant). A query equal
+        to the last one returns the same answer without solving again."""
         key = (q.kind,) + tuple(None if a is None else np.asarray(a, dtype=float).tobytes()
                                 for a in (q.price_draw, q.price_supply, q.residual_kw))
         if self._last is not None and self._last[0] == key:
@@ -211,6 +242,10 @@ class EmhassParticipant:
         return a
 
     def _respond(self, q: Query) -> Answer:
+        """Map the query to an EMHASS solve: a price response meters the
+        participant alone; a best response meters it under `q.residual_kw`,
+        split into PV (exported part) and load (imported part). A proximal
+        query raises NotImplementedError."""
         if q.kind == "price_response":
             zero = np.zeros(self.n)
             return self._run(zero, zero, q.price_draw, q.price_supply)
@@ -235,6 +270,10 @@ class EmhassParticipant:
 
 # ------------------------------------------------------------------ the call
 def _groups(optim_conf: dict, devices: list[str]) -> list[dict]:
+    """The participant groups: `optim_conf["participants"]`, with every device
+    in `devices` it leaves out as its own group, solved by EMHASS. With no
+    `participants`, one EMHASS group per device. Each group is a dict with
+    "devices" (names), "solver" and, if given, "config"."""
     spec = optim_conf.get("participants") or []
     if not spec:
         return [{"devices": [d], "solver": "emhass"} for d in devices]
@@ -250,6 +289,8 @@ def _groups(optim_conf: dict, devices: list[str]) -> list[dict]:
 
 
 def _config(cls, overrides: dict):
+    """An instance of the config dataclass `cls` (e.g. WaterHeaterConfig) from
+    `overrides`, ignoring keys it has no field for; the rest keep defaults."""
     names = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in overrides.items() if k in names})
 
@@ -257,7 +298,12 @@ def _config(cls, overrides: dict):
 def _battery(plant_conf: dict, soc_init: float, buy: np.ndarray) -> BatteryConfig:
     """EMHASS's battery as this package's: its SoC window becomes the store, and
     energy left at the end is valued at the horizon's average import price (as
-    the package's own planner does), not pinned to soc_final."""
+    the package's own planner does), not pinned to soc_final.
+
+    `plant_conf`: EMHASS's plant configuration (W, Wh, fractions). `soc_init`:
+    the starting state of charge (fraction of nominal capacity). `buy`: the
+    import tariff per slot (currency/kWh). Returns a BatteryConfig in kW/kWh.
+    """
     pc = plant_conf
     cap = float(pc["battery_nominal_energy_capacity"]) / 1000.0
     lo, hi = float(pc["battery_minimum_state_of_charge"]), float(pc["battery_maximum_state_of_charge"])
@@ -284,8 +330,22 @@ def _linear_battery(oc: dict, pc: dict) -> bool:
 
 def optimize(opt, data_opt, p_pv, p_load, unit_load_cost, unit_prod_price, soc_init=None, soc_final=None,
              **runtime):
-    """Plan with the coordinator `opt.optim_conf["optimization_backend"]` names;
-    return EMHASS's opt_res, or None to let EMHASS run its default solver."""
+    """Plan with the coordinator `opt.optim_conf["optimization_backend"]` names.
+
+    Called by EMHASS's Optimization.perform_optimization with its own
+    arguments. `opt`: that Optimization (configuration, logger, time step).
+    `data_opt`: its input DataFrame, one row per slot. `p_pv`, `p_load`: PV and
+    house load forecasts (W per slot). `unit_load_cost`, `unit_prod_price`:
+    import and export prices (currency/kWh per slot). `soc_init`, `soc_final`:
+    the battery's start and end-of-day state of charge (fractions); EMHASS's
+    battery_target_state_of_charge when None. `runtime`: perform_optimization's
+    other keyword arguments.
+
+    Returns a DataFrame with the columns perform_optimization returns (the same
+    names and units) plus `fed_meter_price`, `fed_lower_bound` and `fed_gap`.
+    Returns None, after logging why, when it cannot plan this configuration or
+    the coordinator fails; EMHASS then runs its default solver.
+    """
     log = opt.logger
     oc, pc = opt.optim_conf, opt.plant_conf
     backend = oc.get("optimization_backend", "cvxpy")
@@ -385,7 +445,14 @@ def optimize(opt, data_opt, p_pv, p_load, unit_load_cost, unit_prod_price, soc_i
 
 
 def _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site):
-    """The plan as EMHASS's opt_res: the same columns and units, plus fed_*."""
+    """The coordinator's result `r` as EMHASS's opt_res: the same columns and
+    units as perform_optimization returns, plus fed_* columns.
+
+    `co`: the coordinator that produced `r`. The other arguments are those
+    `optimize` worked with: EMHASS's inputs (W, currency/kWh), the device names,
+    the EMHASS participants (whose own results fill their devices' columns) and
+    the package's SiteConfig. Returns a DataFrame indexed like `data_opt`.
+    """
     import pandas as pd
 
     dt, n = float(opt.time_step), len(data_opt)
