@@ -20,6 +20,9 @@ service = ["fastapi>=0.110", "uvicorn>=0.27"]
 where = ["src"]
 include = ["home_energy_optimizer*"]
 
+[tool.setuptools.package-data]
+home_energy_optimizer = ["schemas/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]

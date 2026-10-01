@@ -32,6 +32,7 @@ ORDER = [
     ("src/home_energy_optimizer/_kernels.py", None),
     ("src/home_energy_optimizer/interp.py", None),
     ("src/home_energy_optimizer/types.py", None),
+    ("src/home_energy_optimizer/interface.py", None),          # the device query the coordinator sends participants
     ("src/home_energy_optimizer/profiles.py", None),
     ("src/home_energy_optimizer/meter.py", None),
     ("src/home_energy_optimizer/dp_battery.py", None),
