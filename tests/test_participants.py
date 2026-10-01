@@ -126,3 +126,32 @@ def test_the_json_follows_the_packaged_schemas():
     with pytest.raises(jsonschema.ValidationError):            # a price response needs its prices
         jsonschema.validate({"version": 1, "kind": "price_response", "horizon": {"step_minutes": 15, "slots": 2}},
                             schema("device-query"))
+
+
+def test_a_participant_gets_the_same_share_as_the_same_device_built_in(day):
+    """The saving split (dw.attribution.ledger) gives the tank the same bill,
+    private-cost change and net gain whether it is built in or a participant."""
+    from dataclasses import replace
+
+    from home_energy_optimizer.dw.attribution import ledger
+
+    h, batt, wh = day
+    fc = demo_forecasts(h, tariff="dynamic")
+    dark = replace(fc, solar=np.zeros_like(fc.solar))
+
+    def split(as_participant):
+        """Plan the day with and without PV (the tank built in, or as a
+        participant) and return the ledger's rows by player name."""
+        out = []
+        for f in (fc, dark):
+            site = SiteConfig(horizon=h, battery=batt, water_heater=None if as_participant else wh, hvac=None,
+                              coordination=CoordinationConfig())
+            parts = [TankParticipant(wh, h, f)] if as_participant else []
+            co = DWCoordinator(site, f, participants=parts)
+            out += [co, co.run().plan]
+        return {r["player"]: r for r in ledger(*out)["rows"]}
+
+    native, via = split(False), split(True)
+    for col in ("bill_before", "bill_after", "private_cost_change", "net_gain"):
+        assert via["water_heater"][col] == pytest.approx(native["water_heater"][col], abs=1e-6)
+        assert via["battery"][col] == pytest.approx(native["battery"][col], abs=1e-6)
