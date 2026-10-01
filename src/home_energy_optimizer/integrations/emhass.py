@@ -303,14 +303,21 @@ def _battery(plant_conf: dict, soc_init: float, buy: np.ndarray) -> BatteryConfi
     `plant_conf`: EMHASS's plant configuration (W, Wh, fractions). `soc_init`:
     the starting state of charge (fraction of nominal capacity). `buy`: the
     import tariff per slot (currency/kWh). Returns a BatteryConfig in kW/kWh.
+
+    Power limits are at the meter here. EMHASS bounds the meter-side power by
+    each limit twice - directly, and through the efficiency (charging at most
+    limit / charge efficiency, discharging at most limit * discharge
+    efficiency) - so the tighter of the two is used: with efficiencies below 1,
+    the charge limit as given and the discharge limit times its efficiency.
     """
     pc = plant_conf
     cap = float(pc["battery_nominal_energy_capacity"]) / 1000.0
     lo, hi = float(pc["battery_minimum_state_of_charge"]), float(pc["battery_maximum_state_of_charge"])
-    return BatteryConfig(capacity_kwh=cap * hi, p_charge_max_kw=float(pc["battery_charge_power_max"]) / 1000.0,
-                         p_discharge_max_kw=float(pc["battery_discharge_power_max"]) / 1000.0,
-                         eta_charge=float(pc["battery_charge_efficiency"]),
-                         eta_discharge=float(pc["battery_discharge_efficiency"]),
+    eta_c, eta_d = float(pc["battery_charge_efficiency"]), float(pc["battery_discharge_efficiency"])
+    chg, dis = float(pc["battery_charge_power_max"]) / 1000.0, float(pc["battery_discharge_power_max"]) / 1000.0
+    return BatteryConfig(capacity_kwh=cap * hi, p_charge_max_kw=min(chg, chg / eta_c),
+                         p_discharge_max_kw=min(dis, dis * eta_d),
+                         eta_charge=eta_c, eta_discharge=eta_d,
                          soc_initial_frac=min(max(soc_init / hi, 0.0), 1.0), soe_min_frac=lo / hi,
                          terminal_mode="linear", terminal_price=float(np.mean(buy)))
 
