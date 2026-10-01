@@ -47,7 +47,7 @@ It feeds [Home Assistant](https://www.home-assistant.io) and
 [evcc](https://evcc.io). Try it in your browser:
 [Smart Home Energy Optimizer](https://ameetdesh.github.io/multi_device_optimizer_standalone.html).
 The theory, with the evidence behind every number, is in
-[docs/theory.pdf](docs/theory.pdf). The Python package is
+[docs/theory.pdf](https://github.com/ameetdesh/home-energy-optimizer/blob/main/docs/theory.pdf). The Python package is
 `home-energy-optimizer` (import `home_energy_optimizer`).
 
 ---
@@ -69,7 +69,7 @@ python3 -m venv .venv
 
 ## Theory notes
 
-[docs/theory.pdf](docs/theory.pdf) sets out the problem, the device interface
+[docs/theory.pdf](https://github.com/ameetdesh/home-energy-optimizer/blob/main/docs/theory.pdf) sets out the problem, the device interface
 and both coordinators, with the evidence behind every number. It is built from
 `docs/theory.tex`:
 
@@ -404,7 +404,7 @@ docs/PLAN.md       state and next steps
 ## Evidence
 
 All measured; each number and the script behind it is in
-[docs/theory.pdf](docs/theory.pdf), Appendix C.
+[docs/theory.pdf](https://github.com/ameetdesh/home-energy-optimizer/blob/main/docs/theory.pdf), Appendix C.
 
 **Cooperation pays.** For a battery and an on/off water heater over a day,
 against a mixed-integer solver over the same model (exact, 15–39 s),
@@ -428,4 +428,4 @@ LP's dual, and is published with a ±0.04/kWh band.
 
 ## Licence
 
-MIT; see [LICENSE](LICENSE).
+MIT; see [LICENSE](https://github.com/ameetdesh/home-energy-optimizer/blob/main/LICENSE).
