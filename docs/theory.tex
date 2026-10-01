@@ -848,7 +848,7 @@ though not a better final plan (Appendix~\ref{app:admm}).
 \paragraph{Cost and quality.} On $72$ test sites ADMM's plans come within $0.51$
 of the Dantzig--Wolfe bound on average (Dantzig--Wolfe's own: $0.10$), at about
 ten times its time. Against a MILP over the same model it captures
-$98.1$--$99.7\%$ of the available savings, Dantzig--Wolfe $99.5$--$99.7\%$
+$97.3$--$99.1\%$ of the available savings, Dantzig--Wolfe $98.7$--$99.4\%$
 (Figure~\ref{fig:gapsum}).
 
 %=============================================================================
@@ -1495,9 +1495,11 @@ it is meaningless.
 Figures~\ref{fig:gapdisc}--\ref{fig:gapsum} measure the two losses against exact
 references (\texttt{bench/make\_theory\_figs.py}). The DP battery's loss is its
 grid; the coordinators' loss is coordination plus the grids, measured against a
-MILP over the same model that closes to a $10^{-4}$ relative gap in $15$--$39$~s
+MILP over the same model that closes to a $10^{-4}$ relative gap in $14$--$38$~s
 (\texttt{bench/milp\_full.py}; that time is a property of one untuned
-formulation, not of MILP solvers in general).
+formulation, not of MILP solvers in general). Every plan, the MILP's included, is
+scored by one function (\texttt{extended\_objective}) on the objective they all
+optimise, the tank's end-of-day shortfall included.
 
 \begin{figure}[htbp]
 \centering
@@ -1516,8 +1518,8 @@ difference, at a cost in solve time.}
 Dantzig--Wolfe (green) and ADMM (blue, dashed) against a MILP over the same model
 (grey). The strategies have the same shape --- discharge overnight, refill on PV,
 heat the tank into the surplus --- and differ in timing and in how hot the tank is
-taken. Capture: Dantzig--Wolfe $99.5$--$99.7\%$ in $0.6$--$0.7$~s; ADMM
-$98.1$--$99.7\%$ in $4$--$8$~s.}
+taken. Capture: Dantzig--Wolfe $98.7$--$99.4\%$ in $0.6$--$0.7$~s; ADMM
+$97.3$--$99.1\%$ in $4$--$8$~s.}
 \label{fig:gapcoord}
 \end{figure}
 

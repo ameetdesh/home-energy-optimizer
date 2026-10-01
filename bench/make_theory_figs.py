@@ -34,6 +34,7 @@ import numpy as np
 from bench.milp_full import milp_battery_water_heater
 from bench.reference import lp_battery
 from bench.run_benchmark import capture
+from home_energy_optimizer.dw.coordinator import extended_objective
 from home_energy_optimizer.dw.integrate import dw_plan
 from home_energy_optimizer import (
     BatteryConfig,
@@ -44,7 +45,7 @@ from home_energy_optimizer import (
     coordinate,
     demo_forecasts,
 )
-from home_energy_optimizer.coordinate import baseline_solution, net_cost, total_objective
+from home_energy_optimizer.coordinate import baseline_solution, net_cost
 from home_energy_optimizer.dp_battery import solve_battery, terminal_price
 from home_energy_optimizer.dp_thermal import baseline_water_heater
 
@@ -148,19 +149,25 @@ def fig_coordination(hours: float = 24.0) -> dict[str, list[dict]]:
         fc = demo_forecasts(h, tariff=tariff)
         m = milp_battery_water_heater(batt, wh, h, fc.buy, fc.sell, fc.hot_water_demand,
                                       fc.net_fixed_demand)
+        # Every plan is scored by one function, on the objective all of them
+        # optimise: total_objective plus the tank's end-of-day shortfall. Scored
+        # without it, a plan that leaves the tank cold at midnight looks cheaper.
+        ref = extended_objective(site, fc, m["p_batt"] + m["p_wh"] + fc.net_fixed_demand,
+                                 {"battery": m["soe"], "water_heater": m["temp"]})
         base_net, _ = baseline_solution(site, fc)
         wh_temp, _ = baseline_water_heater(wh, h, fc.hot_water_demand)
         idle = np.full(h.steps + 1, batt.capacity_kwh * batt.soc_initial_frac)
-        base_obj = total_objective(site, base_net, fc, wh_temp, None, idle)
+        base_obj = extended_objective(site, fc, base_net, {"battery": idle, "water_heater": wh_temp})
         plans = {}
         for key, solve in (("dw", dw_plan), ("admm", coordinate)):
             t0 = time.perf_counter()
             res = solve(site, fc)
             ms = (time.perf_counter() - t0) * 1000
             plans[key] = res
-            rows[key].append({"tariff": tariff, "capture": capture(base_obj, res.total_objective, m["objective"]),
-                              "gap": res.total_objective - m["objective"],
-                              "available": base_obj - m["objective"], "ms": ms,
+            obj = extended_objective(site, fc, res.net_grid,
+                                     {k: d.trajectory for k, d in res.devices.items()})
+            rows[key].append({"tariff": tariff, "capture": capture(base_obj, obj, ref),
+                              "gap": obj - ref, "available": base_obj - ref, "ms": ms,
                               "ref_ms": m["solve_ms"], "mip_gap": m["mip_gap"]})
 
         ax = axes[0, j]
