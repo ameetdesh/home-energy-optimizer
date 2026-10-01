@@ -61,6 +61,7 @@ from home_energy_optimizer.dp_thermal import (
     solve_water_heater,
     wh_discomfort,
 )
+from home_energy_optimizer.interface import Query
 from home_energy_optimizer.types import Forecasts, SiteConfig
 
 
@@ -145,12 +146,14 @@ class Column:
     mix: list | None = None  # for a kept blend: [(weight, source, born), ...]
     born: int = 0            # iteration that proposed it (0 = seed, -1 = polish)
     runnable: bool = True    # False for an aggregate of an on/off device (a blend it cannot run)
+    detail: object = None    # a participant's own result for this plan (interface.Answer.detail)
+    exact: bool = True       # False: a participant's stand-in, not the optimum of the query asked
 
 
 @dataclass
 class Device:
     key: str
-    kind: str                # battery | water_heater | hvac
+    kind: str                # battery | water_heater | hvac | participant (interface.Participant)
     cfg: object
     columns: list[Column] = field(default_factory=list)
     stamp: int = 0           # iteration number given to columns added now
@@ -177,6 +180,8 @@ class Device:
             return self.cfg.n_duty_levels > 2
         if self.kind == "battery":
             return self.cfg.charge_deadband_kw <= 0.0 or self.duty_cycle_ok
+        if self.kind == "participant":
+            return bool(self.cfg.modulating)
         return False
 
     def add(self, col: Column, tol: float = 1e-9) -> bool:
@@ -215,7 +220,14 @@ class DWResult:
 
 class DWCoordinator:
     def __init__(self, cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,
-                 tank_in_master: bool = False, solver: str = "numpy", ev_duty_cycle: bool = False):
+                 tank_in_master: bool = False, solver: str = "numpy", ev_duty_cycle: bool = False,
+                 participants=(), export_ceiling: np.ndarray | None = None,
+                 soe_targets: dict | None = None):
+        """`participants`: devices answered through the interface (interface.
+        Participant) rather than modelled here, priced in the master beside the
+        site's own. `export_ceiling`: a hard per-slot cap on export, kW (for
+        example "export no more than the PV surplus"). `soe_targets`: battery
+        key -> the stored energy (kWh) a battery held in the master must end at."""
         cfg.validate()
         fc.validate(cfg.horizon)
         self.cfg, self.fc = cfg, fc
@@ -265,6 +277,10 @@ class DWCoordinator:
                 self.devices.append(Device("water_heater", "water_heater", cfg.water_heater))
         if cfg.hvac is not None:
             self.devices.append(Device("hvac", "hvac", cfg.hvac))
+        for p in participants:
+            self.devices.append(Device(p.key, "participant", p))
+        self.export_ceiling = None if export_ceiling is None else np.asarray(export_ceiling, dtype=float)
+        self.soe_targets = dict(soe_targets or {})
 
         self._build_meter_block()
         # Running minimum of (cost + price . power) per device at every price
@@ -308,9 +324,21 @@ class DWCoordinator:
             if v < mins.get(dev.key, np.inf):
                 mins[dev.key] = v
 
+    def _ask(self, dev: Device, query: Query, source: str) -> Column:
+        """Ask participant `dev` the interface query `query`; return its answer
+        as a pool column tagged `source` (how it was proposed: "price",
+        "load_aware"). The column is marked inexact when the participant's
+        solve failed and it answered with a stand-in plan."""
+        a = dev.cfg.respond(query)
+        return Column(np.asarray(a.plan_kw, dtype=float).copy(), np.asarray(a.trajectory, dtype=float).copy(),
+                      float(a.private_cost), source, detail=a.detail, exact=a.status == "ok")
+
     def price_solve(self, dev: Device, price_kwh: np.ndarray):
         """The pricing DP, returning its solution too (value function and
-        policy), which is what the sensitivity variants replay."""
+        policy), which is what the sensitivity variants replay. A participant
+        returns no solution, so it offers no sensitivity variants."""
+        if dev.kind == "participant":
+            return self._ask(dev, Query("price_response", price_kwh, price_kwh), "price"), None
         sol = self._solve(dev, price_kwh, price_kwh, dp_load=None)
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "price"), sol
@@ -322,6 +350,8 @@ class DWCoordinator:
         its argmax is the column of most negative reduced cost (up to the DP's
         own discretisation - the same caveat every lambda in this package has).
         """
+        if dev.kind == "participant":
+            return self._ask(dev, Query("price_response", price_kwh, price_kwh), "price")
         sol = self._solve(dev, price_kwh, price_kwh, dp_load=None)
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "price")
@@ -337,6 +367,8 @@ class DWCoordinator:
         """
         buy = np.maximum(self.fc.buy, price_kwh)
         sell = np.minimum(self.fc.sell, price_kwh)
+        if dev.kind == "participant":
+            return self._ask(dev, Query("best_response", buy, sell, residual_kw=self.d + others), "load_aware")
         sol = self._solve(dev, buy, sell, dp_load=self.d + others)
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "load_aware")
@@ -405,6 +437,10 @@ class DWCoordinator:
             elif dev.kind == "water_heater":
                 temp, pw = baseline_water_heater(dev.cfg, h, fc.hot_water_demand)
                 dev.add(Column(pw, temp, self.private_cost(dev, temp), "thermostat"))
+            elif dev.kind == "participant":
+                a = dev.cfg.baseline()
+                dev.add(Column(np.asarray(a.plan_kw, dtype=float), np.asarray(a.trajectory, dtype=float),
+                               float(a.private_cost), "baseline", detail=a.detail))
             else:
                 temp, pw = baseline_hvac(dev.cfg, h, fc.outdoor_temp)
                 dev.add(Column(pw, temp, self.private_cost(dev, temp), "thermostat"))
@@ -434,10 +470,14 @@ class DWCoordinator:
         reach = (np.abs(fc.load) + np.abs(fc.solar)
                  + sum(max(b.p_charge_max_kw, b.p_discharge_max_kw) for b in cfg.battery_list)
                  + (cfg.water_heater.power_kw if cfg.water_heater is not None else 0.0)
-                 + (cfg.hvac.power_kw if cfg.hvac is not None else 0.0))
+                 + (cfg.hvac.power_kw if cfg.hvac is not None else 0.0)
+                 + sum(float(d.cfg.max_power_kw) for d in self.devices if d.kind == "participant"))
         inf = 2.0 * reach + 1.0
         imp_cap = np.minimum(g.max_import_kw, inf) if g.max_import_kw is not None else inf
         exp_cap = np.minimum(g.max_export_kw, inf) if g.max_export_kw is not None else inf
+        if self.export_ceiling is not None:
+            # a hard cap: no over-cap block below lets the master buy past it
+            exp_cap = np.minimum(exp_cap, self.export_ceiling)
         curtail_ok = g is not None and g.allow_curtailment
 
         blocks = []  # (coef in balance row, cost per slot, upper bound per slot)
@@ -589,6 +629,8 @@ class DWCoordinator:
             ub[E0 : E0 + n] = b.p_discharge_max_kw
             ub[S0 : S0 + n] = b.capacity_kwh
             lb[S0 : S0 + n] = b.soe_floor_kwh
+            if key in self.soe_targets:
+                lb[S0 + n - 1] = ub[S0 + n - 1] = self.soe_targets[key]
             t = np.arange(n)
             A[t, C0 + t] = -1.0          # meter balance: minus consumption
             A[t, E0 + t] = +1.0
@@ -676,6 +718,14 @@ class DWCoordinator:
         cfg, dt = dev.cfg, self.dt
         power = sum(wi * c.power for wi, c in zip(w, dev.columns))
         mix = [(float(wi), c.source, c.born) for wi, c in zip(w, dev.columns) if wi > 1e-6]
+        if dev.kind == "participant":
+            # A participant that says it modulates has linear dynamics and a
+            # convex cost: the mix of its plans runs as it is (within each slot,
+            # as a share of the slot per plan), at no more than the mixed cost.
+            used = [(wi, c) for wi, c in zip(w, dev.columns) if wi > 1e-12]
+            detail = cfg.blend([wi for wi, _ in used], [c.detail for _, c in used]) if hasattr(cfg, "blend") else None
+            return Column(power, sum(wi * c.trajectory for wi, c in used), float(sum(wi * c.cost for wi, c in used)),
+                          "blend", mix, detail=detail)
         if dev.kind == "battery":
             cap, s = cfg.capacity_kwh, cfg.capacity_kwh * cfg.soc_initial_frac
             floor = cfg.soe_floor_kwh
@@ -754,6 +804,8 @@ class DWCoordinator:
                                  np.full(n, b.capacity_kwh)])
             lbb = np.zeros(nv)
             lbb[2 * n :] = b.soe_floor_kwh
+            if key in self.soe_targets:
+                lbb[3 * n - 1] = ub[3 * n - 1] = self.soe_targets[key]
             _, fun, _ = self._lp(cc, A, rhs, lbb, ub)
             total += fun + float(b.terminal_price) * s0
         if self.lp_tank is not None:
@@ -772,8 +824,30 @@ class DWCoordinator:
         net = self.d.copy()
         for p in powers.values():
             net = net + p
-        net, _ = apply_curtailment(net, self.fc.solar, self.fc.sell, self.cfg.grid)
+        net, curtail = apply_curtailment(net, self.fc.solar, self.fc.sell, self.cfg.grid)
+        if self.export_ceiling is not None:
+            # A hard cap: what is exported past it must be curtailed PV, as the
+            # master would; a plan that cannot is not runnable.
+            over = np.maximum(-net - self.export_ceiling, 0.0)
+            if np.any(over > 1e-6):
+                if not (self.cfg.grid.allow_curtailment and np.all(over <= self.fc.solar - curtail + 1e-6)):
+                    return np.inf
+                net = net + over
         return extended_objective(self.cfg, self.fc, net, trajs)
+
+    def participants_cost(self, plan: dict[str, Column]) -> float:
+        """The sum of the participants' private costs (currency) in `plan`
+        (device key -> chosen column), as their own models priced them. The
+        site's own devices are not included: `evaluate` prices those."""
+        return float(sum(plan[d.key].cost for d in self.devices if d.kind == "participant" and d.key in plan))
+
+    def score(self, plan: dict[str, Column]) -> float:
+        """The objective (currency) of `plan` (device key -> chosen column):
+        the bill and the site's own devices' costs (`evaluate`), plus the
+        participants' private costs. Infinite if the plan breaks the export
+        ceiling and cannot curtail its way under it."""
+        return (self.evaluate({k: c.power for k, c in plan.items()}, {k: c.trajectory for k, c in plan.items()})
+                + self.participants_cost(plan))
 
     def recover(self, integer: str, weights=None, bplans=None, time_limit: float = 30.0,
                 node_limit: int = 150) -> dict[str, Column]:
@@ -833,9 +907,10 @@ class DWCoordinator:
             edge += thermal_terminal(self.cfg.water_heater, "water_heater", trajs["water_heater"][-1], self.ref)
         if self.cfg.hvac is not None and "hvac" in trajs:
             edge += thermal_terminal(self.cfg.hvac, "hvac", trajs["hvac"][-1], self.ref)
+        part = self.participants_cost(plan)
         return {"bill": bill, "comfort": comfort, "breach": breach, "battery_terminal": batt,
-                "thermal_edge": edge, "battery_goal": goal,
-                "total": bill + comfort + breach + batt + edge + goal,
+                "thermal_edge": edge, "battery_goal": goal, "participants": part,
+                "total": bill + comfort + breach + batt + edge + goal + part,
                 "breach_kwh": float(np.sum(breach_energy(self.cfg, net))),
                 "peak_import": float(net.max()), "peak_export": float(-net.min())}
 
@@ -846,8 +921,7 @@ class DWCoordinator:
         is monotone - it cannot undo what the master found.
         """
         plan = dict(plan)
-        cur = self.evaluate({k: c.power for k, c in plan.items()},
-                            {k: c.trajectory for k, c in plan.items()})
+        cur = self.score(plan)
         for _ in range(sweeps):
             improved = False
             for dev in self.devices:
@@ -855,14 +929,59 @@ class DWCoordinator:
                 cand = self.load_aware_oracle(dev, others, self.fc.buy)
                 trial = dict(plan)
                 trial[dev.key] = cand
-                val = self.evaluate({k: c.power for k, c in trial.items()},
-                                    {k: c.trajectory for k, c in trial.items()})
+                val = self.score(trial)
                 if val < cur - 1e-9:
                     plan, cur, improved = trial, val, True
                     dev.add(cand)
             if not improved:
                 break
         return plan, cur
+
+    def _dive(self, iters: int, heuristic_columns: bool, history: list, t0: float) -> None:
+        """Fix every on/off device to the plan the integer master picks, then
+        price the others for up to `iters` more iterations, so their plans answer
+        the on/off plans that will run rather than a fractional mix of them. A
+        participant says whether it is on/off (`onoff`); a device of the site's
+        own is when it cannot run a blend. The bound is unaffected: it is
+        re-stated from every plan ever proposed (`_seen_min`).
+
+        `iters`: the most pricing rounds after fixing. `heuristic_columns`: also
+        ask each free device its best response to the rest (as `run` does).
+        `history`: `run`'s per-iteration log, appended to ("dive 1", ...). `t0`:
+        `run`'s start time (perf_counter), for the log's elapsed ms. Changes the
+        device pools in place; returns nothing. Does nothing if the integer
+        master fails, or if every device or none is on/off."""
+        try:
+            _, lam_int, _, _, _ = self.solve_master(integer=True)
+        except RuntimeError:
+            return
+        w_int = self.split_weights(lam_int)
+        onoff = lambda d: (bool(getattr(d.cfg, "onoff", not d.modulating))       # noqa: E731
+                           if d.kind == "participant" else not d.modulating)
+        fixed = {d.key for d in self.devices if onoff(d)}
+        if not fixed or len(fixed) == len(self.devices):
+            return
+        for d in self.devices:
+            if d.key in fixed:
+                runnable = np.array([wi if c.runnable else -1.0 for wi, c in zip(w_int[d.key], d.columns)])
+                d.columns = [d.columns[int(np.argmax(runnable))]]
+        dt = self.dt
+        for k in range(iters):
+            rmp, lam, pi, _, bplans = self.solve_master()
+            weights = self.split_weights(lam)
+            mix = self.mixed_power(weights)
+            total_mix = sum(mix.values()) + sum(c.power for c in bplans.values())
+            added = 0
+            for d in self.devices:
+                if d.key not in fixed:
+                    added += d.add(self.price_oracle(d, pi / dt))
+                    if heuristic_columns:
+                        added += d.add(self.load_aware_oracle(d, total_mix - mix[d.key], pi / dt))
+            history.append({"iter": f"dive {k + 1}", "rmp": rmp, "lb": history[-1]["lb"] if history else -np.inf,
+                            "gap": np.nan, "columns": sum(len(d.columns) for d in self.devices), "added": added,
+                            "ms": (time.perf_counter() - t0) * 1000})
+            if added == 0:
+                break
 
     def extra_price_points(self, pi: np.ndarray, center, it: int) -> list[np.ndarray]:
         """Further meter prices to ask every device at, this iteration.
@@ -889,6 +1008,13 @@ class DWCoordinator:
         seed_admm: bool = False,      # start the pool from every ADMM round's plans
         response: str = "proposals",  # proposals | both | sensitivity (see src/home_energy_optimizer/dw/sensitivity.py)
         sens_keep: int = 24,          # sensitivity variants kept per device, per direction
+        stall: int = 0,               # stop once the master's value has not fallen for this many
+                                      # iterations (0: never). For participants whose answers give a
+                                      # weak bound, where the gap test alone runs to max_iter.
+        dive: int = 0,                # then fix each on/off device to the plan the integer master
+                                      # picks and re-price the modulating ones this many more
+                                      # iterations (0: no dive). Their pools were built against a
+                                      # fractional mix of the on/off plans, which cannot run.
         progress=None,                # progress(it, max_iter) as each iteration starts, then
                                       # progress(it, max_iter, blend, bound, best runnable) as it ends
                                       # (None where not known yet); (-1, max_iter) when finishing
@@ -917,6 +1043,7 @@ class DWCoordinator:
         it = 0
         stop_reason = "iteration cap"
         best_plan_val = np.inf
+        best_rmp, flat = np.inf, 0
         incumbent = None            # best runnable plan seen at any iteration
         if admm_plan is not None:
             # ADMM's own plan is runnable, so DW can never return worse.
@@ -989,9 +1116,10 @@ class DWCoordinator:
             flex = {}
             for pk, p in enumerate(points):
                 best = {}
+                exact = True
                 for dev in self.devices:
                     col, sol = self.price_solve(dev, p / dt)
-                    if pk == 0 and response in ("both", "sensitivity"):
+                    if pk == 0 and response in ("both", "sensitivity") and sol is not None:
                         added += self._add_variants(dev, sol, col, p / dt, sens_keep, flex if record else None)
                     # The DP is an exact pricing oracle only up to its grid:
                     # a pool column can undercut it (measured: HVAC, 0.0026 at
@@ -1002,8 +1130,13 @@ class DWCoordinator:
                     shortfall = (col.cost + p @ col.power) - (pool_best.cost + p @ pool_best.power)
                     self.pricing_error = max(getattr(self, "pricing_error", 0.0), float(shortfall))
                     best[dev.key] = col if shortfall <= 0 else pool_best
+                    exact = exact and col.exact
 
                     added += dev.add(col)
+                if not exact:
+                    # a participant's solve failed here: its stand-in is a plan,
+                    # not its optimum, so this price proves no bound
+                    continue
                 lb = self.lagrangian_lp(p, best) if (self.lp_batts or self.lp_tank is not None) else self.lagrangian(p, best)
                 priced.append(p.copy())
                 self._priced.append(p.copy())
@@ -1034,10 +1167,19 @@ class DWCoordinator:
             if gap <= gap_tol * max(1.0, abs(rmp)):
                 stop_reason = "converged"
                 break
+            if rmp < best_rmp - 1e-6 * max(1.0, abs(rmp)):
+                best_rmp, flat = rmp, 0
+            else:
+                flat += 1
+            if stall and flat >= stall:
+                stop_reason = "stalled"
+                break
             if added == 0:
                 stop_reason = "no new proposals"
                 break
 
+        if dive:
+            self._dive(dive, heuristic_columns, history, t0)
         if progress is not None:
             progress(-1, max_iter)
         relaxed, lam, pi, _, bplans = self.solve_master()
@@ -1067,8 +1209,7 @@ class DWCoordinator:
         for dev in self.devices:
             dev.stamp = -1          # anything added from here on is polish's
         plan = self.recover(integer, weights, bplans)
-        upper = self.evaluate({k: c.power for k, c in plan.items()},
-                              {k: c.trajectory for k, c in plan.items()})
+        upper = self.score(plan)
         if polish:
             plan, upper = self.polish(plan)
         # Keep the incumbent. Recovery from the final pool is a heuristic
