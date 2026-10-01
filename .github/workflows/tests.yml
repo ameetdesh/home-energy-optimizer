@@ -1,0 +1,25 @@
+# Runs the test suite on every supported Python for each PR and push to main.
+# scipy and osqp are the reference solvers some tests compare against (they skip
+# without them); jsonschema validates the interface schemas. The browser test
+# skips without puppeteer, and the network tests skip unless HEMS_NETWORK_TESTS=1.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[test]" scipy osqp jsonschema
+      - run: pytest -q
