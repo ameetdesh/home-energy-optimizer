@@ -6,7 +6,8 @@ device - is answered by EMHASS's own model with only that participant's
 devices enabled (`EmhassParticipant`): the price-response query is EMHASS's own
 problem with no PV and no load, priced at the coordinator's price. Devices
 assigned to "home_energy_optimizer" are planned by this package's solvers. The
-plan comes back as EMHASS's own `opt_res` columns, plus `fed_*` columns.
+plan comes back as EMHASS's own `opt_res` columns, plus `fed_*` columns,
+including each player's share of the saving (`fed_share_*`).
 
 `optimize` returns None, after logging why, whenever the configuration uses
 something it cannot split per device yet; EMHASS then runs its default solver.
@@ -31,6 +32,7 @@ from dataclasses import fields, replace
 import numpy as np
 
 from home_energy_optimizer.coordinate import apply_curtailment
+from home_energy_optimizer.dw.attribution import ledger
 from home_energy_optimizer.dw.coordinator import DWCoordinator
 from home_energy_optimizer.interface import Answer, Query
 from home_energy_optimizer.types import (
@@ -349,7 +351,9 @@ def optimize(opt, data_opt, p_pv, p_load, unit_load_cost, unit_prod_price, soc_i
     other keyword arguments.
 
     Returns a DataFrame with the columns perform_optimization returns (the same
-    names and units) plus `fed_meter_price`, `fed_lower_bound` and `fed_gap`.
+    names and units) plus `fed_meter_price`, `fed_lower_bound`, `fed_gap` and
+    one `fed_share_<player>` per player (solar, each device or participant):
+    its share of the saving over the horizon, in currency, the same in every row.
     Returns None, after logging why, when it cannot plan this configuration or
     the coordinator fails; EMHASS then runs its default solver.
     """
@@ -434,21 +438,43 @@ def optimize(opt, data_opt, p_pv, p_load, unit_load_cost, unit_prod_price, soc_i
                       hvac=site_kw.get("hvac"), grid=grid)
     ceiling = np.maximum(pv_w - load_w, 0.0) / 1000.0 if oc.get("set_nodischarge_to_grid") else None
     wh = site.water_heater
-    co = DWCoordinator(site, fc, tank_in_master=bool(wh is not None and wh.n_duty_levels > 2),
+    tank_in_master = bool(wh is not None and wh.n_duty_levels > 2)
+    run_kw = RUN_DEFAULTS if participants else {}      # with no EMHASS participant, the package's own defaults
+    co = DWCoordinator(site, fc, tank_in_master=tank_in_master,
                        participants=participants, export_ceiling=ceiling, soe_targets=targets)
     try:
-        # with no EMHASS participant, exactly the package's own planner (its defaults)
-        r = co.run(**(RUN_DEFAULTS if participants else {}))
+        r = co.run(**run_kw)
     except Exception as exc:                            # a plan is always published
         log.warning(f"optimization_backend: the coordinator failed ({exc}); using the default solver")
         return None
 
     res = _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site)
+    try:
+        # The saving split needs one more plan, the same devices with no PV
+        # (the export ceiling, PV surplus, is then zero).
+        dark = replace(fc, solar=np.zeros(n))
+        co_dark = DWCoordinator(site, dark, tank_in_master=tank_in_master, participants=participants,
+                                export_ceiling=None if ceiling is None else np.zeros(n), soe_targets=targets)
+        for player, share in shares(co, r.plan, co_dark, co_dark.run(**run_kw).plan).items():
+            res[f"fed_share_{player}"] = share
+    except Exception as exc:                            # the plan stands without its split
+        log.warning(f"optimization_backend: could not split the saving ({exc})")
     opt.optim_status = "Optimal"
     solves = sum(p.solves for p in participants)
     log.info(f"optimization_backend=dantzig_wolfe: {r.iterations} iterations, gap {r.upper - r.lower:.4f}, "
              f"{solves} participant solves, {time.perf_counter() - t0:.2f} s")
     return res
+
+
+def shares(co: DWCoordinator, plan: dict, co_dark: DWCoordinator, plan_dark: dict) -> dict[str, float]:
+    """Each player's share of the saving over the horizon (currency): solar and
+    every device or participant (dw.attribution: reimbursed its private-cost
+    change, then an Owen value between solar and the devices, Aumann-Shapley
+    among the devices). `plan` / `plan_dark`: the coordinator's plans with and
+    without PV. The shares, with the reimbursements, add up to the saving over
+    the baseline with no PV and no coordination."""
+    rows = ledger(co, plan, co_dark, plan_dark)["rows"]
+    return {row["player"]: float(row["net_gain"]) for row in rows if row["player"] != "household load"}
 
 
 def _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site):

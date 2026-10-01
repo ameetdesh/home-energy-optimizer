@@ -5365,6 +5365,30 @@ def _path_prices(co, start: np.ndarray, end: np.ndarray, cost) -> np.ndarray:
     return np.where(moving, dm / np.where(moving, dz, 1.0), local)
 
 
+def _participant(co: DWCoordinator, key: str) -> Device | None:
+    """The coordinator's participant called `key`, or None for a site device."""
+    return next((d for d in co.devices if d.key == key and d.kind == "participant"), None)
+
+
+def _entry(e) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """A plan entry as (power kW, state trajectory, private cost or None).
+    Accepts a coordinator Column or a (power, trajectory[, cost]) tuple."""
+    if hasattr(e, "power"):
+        return e.power, e.trajectory, float(e.cost)
+    cost = e[2] if len(e) > 2 else None
+    return e[0], e[1], None if cost is None else float(cost)
+
+
+def _private_cost(co: DWCoordinator, key: str, traj: np.ndarray, cost: float | None) -> float:
+    """A plan's private cost (currency): the cost a participant reported for
+    it, or the coordinator's own pricing of a site device's trajectory."""
+    if _participant(co, key) is not None:
+        if cost is None:
+            raise ValueError(f"participant {key!r}: its plan entry must carry its private cost")
+        return cost
+    return co.private_cost(_device(co, key), traj)
+
+
 def _device(co: DWCoordinator, key: str) -> Device:
     for d in co.devices:
         if d.key == key:
@@ -5378,16 +5402,31 @@ def _device(co: DWCoordinator, key: str) -> Device:
 
 
 def baseline(co: DWCoordinator, key: str) -> tuple[np.ndarray, np.ndarray]:
-    """The uncoordinated plan: idle battery, thermostat tank and HVAC."""
+    """The uncoordinated plan of device `key` as (power kW, trajectory): idle
+    battery, thermostat tank and HVAC, or a participant's own `baseline()`."""
+    power, traj, _ = _baseline(co, key)
+    return power, traj
+
+
+def _baseline(co: DWCoordinator, key: str) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """`baseline`, plus the private cost a participant reported for it (None
+    for a site device). A participant is asked once per coordinator."""
+    p = _participant(co, key)
+    if p is not None:
+        memo = co.__dict__.setdefault("_baseline_answers", {})
+        if key not in memo:
+            memo[key] = p.cfg.baseline()
+        a = memo[key]
+        return np.asarray(a.plan_kw, dtype=float), np.asarray(a.trajectory, dtype=float), float(a.private_cost)
     cfg, fc, h = co.cfg, co.fc, co.cfg.horizon
     if key.startswith("battery"):
         b = _device(co, key).cfg
-        return np.zeros(h.steps), np.full(h.steps + 1, b.capacity_kwh * b.soc_initial_frac)
+        return np.zeros(h.steps), np.full(h.steps + 1, b.capacity_kwh * b.soc_initial_frac), None
     if key == "water_heater":
         t, p = baseline_water_heater(cfg.water_heater, h, fc.hot_water_demand)
-        return p, t
+        return p, t, None
     t, p = baseline_hvac(cfg.hvac, h, fc.outdoor_temp)
-    return p, t
+    return p, t, None
 
 
 def _device_shares(co: DWCoordinator, plan: dict, keys: list[str]) -> tuple[dict, dict]:
@@ -5395,27 +5434,41 @@ def _device_shares(co: DWCoordinator, plan: dict, keys: list[str]) -> tuple[dict
     the PV (whatever co.fc holds) fixed: each device's net gain, and its
     private-cost change."""
     fc = co.fc
-    base = {k: baseline(co, k) for k in keys}
+    base = {k: _baseline(co, k) for k in keys}
+    plan = {k: _entry(plan[k]) for k in keys}
     z0 = fc.load - fc.solar + sum(base[k][0] for k in keys)
     z1 = fc.load - fc.solar + sum(plan[k][0] for k in keys)
     q = _path_prices(co, z0, z1, _meter_cost)
-    df = {k: co.private_cost(_device(co, k), plan[k][1]) - co.private_cost(_device(co, k), base[k][1])
+    df = {k: _private_cost(co, k, plan[k][1], plan[k][2]) - _private_cost(co, k, base[k][1], base[k][2])
           for k in keys}
     return {k: -float(q @ (plan[k][0] - base[k][0])) - df[k] for k in keys}, df
+
+
+def device_keys(co: DWCoordinator) -> list[str]:
+    """Every device that takes a share: the site's batteries, tank and HVAC,
+    then the participants, in the coordinator's order."""
+    keys = [SiteConfig.battery_key(i) for i, b in enumerate(co.cfg.battery_list) if b.capacity_kwh > 0]
+    keys += [k for k in ("water_heater", "hvac") if getattr(co.cfg, k) is not None]
+    return keys + [d.key for d in co.devices if d.kind == "participant"]
 
 
 def ledger(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]],
            co_dark: DWCoordinator, plan_dark: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict:
     """Each player's bill before and after, the private-cost change and the gain.
 
-    `plan` maps device key -> (power kW, state trajectory), for every device on
-    the site; `co_dark` / `plan_dark` are the same site and method with the PV
-    set to zero. Returns rows (household load, solar, then devices) and totals.
+    `plan` maps device key -> its plan, for every device on the site and every
+    participant: a coordinator Column, or (power kW, state trajectory), plus
+    the private cost as a third item for a participant. `co_dark` /
+    `plan_dark` are the same site and method with the PV set to zero.
+
+    Returns {"rows": [...], "totals": {...}}: one row per player (household
+    load, solar, then each device) with its bill before and after, its
+    private-cost change and its net gain (currency), and the house totals.
     """
     fc = co.fc
-    keys = [SiteConfig.battery_key(i) for i, b in enumerate(co.cfg.battery_list) if b.capacity_kwh > 0]
-    keys += [k for k in ("water_heater", "hvac") if getattr(co.cfg, k) is not None]
-    base = {k: baseline(co, k) for k in keys}
+    keys = device_keys(co)
+    base = {k: _baseline(co, k) for k in keys}
+    plan = {k: _entry(plan[k]) for k in keys}
 
     # meter flows: baseline with no PV, thermostats with PV, the plan
     z_dark = fc.load + sum(base[k][0] for k in keys)
