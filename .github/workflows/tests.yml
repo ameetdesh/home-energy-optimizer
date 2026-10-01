@@ -1,3 +1,7 @@
+# Runs the test suite on every supported Python for each PR and push to main.
+# scipy, osqp and matplotlib are the benchmark and figure dependencies some tests
+# compare against; jsonschema validates the interface schemas. The browser test
+# skips without puppeteer, and the network tests skip unless HEMS_NETWORK_TESTS=1.
 name: tests
 
 on:
