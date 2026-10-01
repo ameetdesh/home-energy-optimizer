@@ -140,6 +140,8 @@ def test_a_participant_gets_the_same_share_as_the_same_device_built_in(day):
     dark = replace(fc, solar=np.zeros_like(fc.solar))
 
     def split(as_participant):
+        """Plan the day with and without PV (the tank built in, or as a
+        participant) and return the ledger's rows by player name."""
         out = []
         for f in (fc, dark):
             site = SiteConfig(horizon=h, battery=batt, water_heater=None if as_participant else wh, hvac=None,

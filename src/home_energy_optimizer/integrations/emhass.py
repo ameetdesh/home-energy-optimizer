@@ -145,6 +145,10 @@ class EmhassParticipant:
 
     def __init__(self, opt, key: str, battery: bool, loads: list[int], data_opt, soc_init, soc_final, runtime: dict,
                  buy: np.ndarray, reach_w: float = 1e5):
+        """Build the participant's own EMHASS model: a copy of `opt`'s
+        configuration with only this participant's devices enabled (the
+        parameters are described on the class). Solves nothing yet; sets
+        `max_power_kw`, `modulating` and `onoff` for the coordinator."""
         from emhass.optimization import Optimization
 
         oc, pc = copy.deepcopy(opt.optim_conf), copy.deepcopy(opt.plant_conf)
