@@ -114,6 +114,16 @@ def unsupported(optim_conf: dict, plant_conf: dict, costfun: str, runtime: dict)
     return None
 
 
+def _hold_q_input(k: int, params: dict, hc: dict) -> None:
+    """Stand-in for Optimization._persist_q_input in a participant's model: keep
+    the heat input a thermal battery starts from (its configured
+    `q_input_initial`, else the value it was built with) on every re-solve.
+    `k`: the load's index; `params`: its thermal parameters; `hc`: its
+    thermal_battery config."""
+    if "q_input_initial" in hc:
+        params["q_input_start"].value = float(hc.get("q_input_initial", 0.0) or 0.0)
+
+
 # ------------------------------------------------------------------ participants
 class EmhassParticipant:
     """One participant answered by EMHASS's own model, restricted to its devices.
@@ -157,6 +167,11 @@ class EmhassParticipant:
         self.key, self.battery, self.loads = key, bool(battery), list(loads)
         self.opt = Optimization(opt.retrieve_hass_conf, oc, pc, opt.var_load_cost, opt.var_prod_price,
                                 "profit", opt.emhass_conf, opt.logger, num_timesteps=len(data_opt))
+        # Every query starts from the same state. On a re-solve EMHASS carries a
+        # heat pump's heat input (thermal inertia) over from the last solve, as
+        # MPC needs when the horizon moves on; here every solve is the same
+        # horizon at other prices, so only a configured q_input_initial applies.
+        self.opt._persist_q_input = _hold_q_input
         self.data = data_opt
         self.n, self.dt = len(data_opt), float(opt.time_step)
         self.soc_init, self.soc_final = soc_init, soc_final
