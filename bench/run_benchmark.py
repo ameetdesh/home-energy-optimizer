@@ -39,6 +39,7 @@ from home_energy_optimizer import (
 from home_energy_optimizer.coordinate import baseline_solution, net_cost, total_objective
 from home_energy_optimizer.dp_thermal import baseline_water_heater
 from home_energy_optimizer.dp_battery import solve_battery, terminal_price
+from home_energy_optimizer.dw.coordinator import extended_objective
 
 TARIFFS = ("flat", "day_night", "dynamic")
 
@@ -172,14 +173,19 @@ def bench_milp(hours: float = 24.0) -> list[dict]:
         dec_ms = (time.perf_counter() - t0) * 1000
         m = milp_battery_water_heater(batt, wh, h, fc.buy, fc.sell, fc.hot_water_demand,
                                       fc.net_fixed_demand)
+        # One scoring function for every plan, including the tank's end-of-day
+        # shortfall that all of them optimise (see make_theory_figs.fig_coordination).
+        ref = extended_objective(site, fc, m["p_batt"] + m["p_wh"] + fc.net_fixed_demand,
+                                 {"battery": m["soe"], "water_heater": m["temp"]})
         base_net, _ = baseline_solution(site, fc)
         wh_temp, _ = baseline_water_heater(wh, h, fc.hot_water_demand)
         idle = np.full(h.steps + 1, batt.capacity_kwh * batt.soc_initial_frac)
-        base_obj = total_objective(site, base_net, fc, wh_temp, None, idle)
-        rows.append({"tariff": tariff, "baseline": base_obj, "dp_obj": res.total_objective,
-                     "ref_obj": m["objective"], "gap": res.total_objective - m["objective"],
-                     "capture": capture(base_obj, res.total_objective, m["objective"]),
-                     "available": base_obj - m["objective"],
+        base_obj = extended_objective(site, fc, base_net, {"battery": idle, "water_heater": wh_temp})
+        obj = extended_objective(site, fc, res.net_grid, {k: d.trajectory for k, d in res.devices.items()})
+        rows.append({"tariff": tariff, "baseline": base_obj, "dp_obj": obj,
+                     "ref_obj": ref, "gap": obj - ref,
+                     "capture": capture(base_obj, obj, ref),
+                     "available": base_obj - ref,
                      "dp_ms": dec_ms, "ref_ms": m["solve_ms"], "mip_gap": m["mip_gap"]})
     return rows
 

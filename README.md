@@ -407,9 +407,9 @@ All measured; each number and the script behind it is in
 [docs/theory.pdf](https://github.com/ameetdesh/home-energy-optimizer/blob/main/docs/theory.pdf), Appendix C.
 
 **Cooperation pays.** For a battery and an on/off water heater over a day,
-against a mixed-integer solver over the same model (exact, 15–39 s),
-Dantzig–Wolfe captures 99.5–99.7% of the available savings in 0.6–0.7 s and
-ADMM 98.1–99.7% in 4–8 s. On the Home Assistant demo site (battery, water
+against an exact MILP of the same model (our own formulation, solved with
+HiGHS), Dantzig–Wolfe captures 98.7–99.4% of the available savings in 0.6–0.7 s
+and ADMM 97.3–99.1% in 4–8 s. On the Home Assistant demo site (battery, water
 heater, HVAC) Dantzig–Wolfe captures 98–99% and ADMM 97–98%, and every
 Dantzig–Wolfe plan carries its certified gap.
 
