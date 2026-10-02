@@ -375,6 +375,18 @@ the plans agree on the meter, and reports what each device is worth.
 > (`tests/test_emhass_adapter.py`); it imports EMHASS only when it plans, so it
 > costs nothing if you never use it.
 
+**To run it** next to your own Home Assistant, `tools/emhass-coordination/`
+builds EMHASS from that branch with this package, starts it in Docker, plans,
+and publishes to Home Assistant: a battery planned here, two deferrable loads
+planned by EMHASS, and each one's share of the saving as a sensor.
+
+```bash
+HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up
+HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --every 30
+```
+
+Its README walks through each step, and where EMHASS's configuration is changed.
+
 ### A four-DER house
 
 Solar, a battery, two deferrable loads, a hot water tank and a heat pump — split
