@@ -185,7 +185,10 @@ Clicking prices a forced action against the optimum.
 
 ### 3. Home Assistant
 
-Publishes the plan and the price signals as HA sensors. Walkthrough below.
+Publishes the plan and the price signals as HA sensors. Walkthrough below. To
+plan a real house's devices instead of publishing a simulated one, the
+EMHASS adapter — **EMHASS: a whole house, two solvers at once**,
+below — coordinates EMHASS's own solver and this package's, device by device.
 
 ### Which coordinator plans
 
@@ -336,6 +339,138 @@ series:
 
 ---
 
+## EMHASS: a whole house, two solvers at once
+
+The Home Assistant walkthrough above streams a *simulated* day into HA. This is
+the other direction: [EMHASS](https://emhass.readthedocs.io) is a Home Assistant
+add-on that already pulls live PV, load, prices and battery SoC out of HA, so the
+adapter in `src/home_energy_optimizer/integrations/emhass.py` plans those real
+inputs. It replaces EMHASS's single whole-house MILP with **one subproblem per
+device**, coordinated by Dantzig–Wolfe at the meter.
+
+The point is that each device keeps its own model and its own solver. A
+deferrable load stays with EMHASS's MILP, which is good at it. A hot water tank
+or a heat pump goes to this package's dynamic programme, which prices comfort and
+returns a value function rather than one trajectory. The coordinator only makes
+the plans agree on the meter, and reports what each device is worth.
+
+> **Status.** The EMHASS side is a draft PR —
+> [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158)
+> — which adds the `optimization_backend` dispatch and the `participants` option.
+> Released EMHASS has no `optimization_backend` key, so on stock EMHASS this
+> config does nothing. The adapter in this package is complete and tested
+> (`tests/test_emhass_adapter.py`); it imports EMHASS only when it plans, so it
+> costs nothing if you never use it.
+
+### A four-DER house
+
+Solar, a battery, two deferrable loads, a hot water tank and a heat pump — split
+across both solvers. Add to EMHASS's configuration:
+
+```json
+{
+  "optimization_backend": "dantzig_wolfe",
+  "costfun": "profit",
+
+  "set_use_battery": true,
+  "number_of_deferrable_loads": 2,
+  "nominal_power_of_deferrable_loads": [2500, 1000],
+
+  "participants": [
+    {"devices": ["battery"], "solver": "emhass"},
+
+    {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"},
+
+    {"devices": ["water_heater"], "solver": "home_energy_optimizer",
+     "config": {"power_kw": 3.0, "liters": 180.0, "t_comfort": 55.0,
+                "n_duty_levels": 2, "comfort_weight": 10.0}},
+
+    {"devices": ["hvac"], "solver": "home_energy_optimizer",
+     "config": {"power_kw": 1.5, "cop": 3.5, "c_room_kwh_per_k": 2.5,
+                "r_wall_k_per_kw": 5.0,
+                "t_comfort_low": 21.0, "t_comfort_high": 25.0}}
+  ]
+}
+```
+
+Keep whatever other EMHASS options those deferrable loads already use; they are
+passed through to EMHASS's own model untouched. The battery is read from
+EMHASS's `plant_conf` as it stands — capacity, the SoC window, both
+efficiencies, both power limits and `battery_target_state_of_charge`.
+
+| device | `solver` | planned by | in the coordination |
+|---|---|---|---|
+| solar | — | EMHASS's PV forecast | not a device; a player in the saving split |
+| `battery` | `emhass` | EMHASS's linear battery model, held **exactly** in the master LP | continuous, no integers |
+| `deferrable0`, `deferrable1` | `emhass` | EMHASS's own MILP, one solve per price query | bids plans |
+| `water_heater` | `home_energy_optimizer` | this package's tank DP | bids on/off plans |
+| `hvac` | `home_energy_optimizer` | this package's room DP | bids on/off plans |
+
+The battery is held in the master LP only while EMHASS's battery is exactly its
+linear constraints. `set_battery_dynamic`, a non-zero `weight_battery_charge` or
+`weight_battery_discharge`, `battery_stress_cost`, `battery_soc_deficit_cost`,
+`battery_soc_surplus_cost` or `battery_charge_power_derating` each take it out of
+the master and make it a black-box participant instead — answered by EMHASS's own
+model on every price query. That still plans; it is just slower. Move the battery
+to `"solver": "home_energy_optimizer"` to have it planned by this package's DP
+from the same `plant_conf` numbers, which gives a value function — λ at whatever
+state the battery is in — rather than a plan with λ only along it.
+
+Three details that are easy to get wrong:
+
+- **One `config` per group.** A group's `config` is applied to every device in
+  it, and the two thermal configs share field names (`power_kw`, `t_min`,
+  `n_duty_levels`, …). Grouping `water_heater` and `hvac` together would give the
+  heat pump the tank's `power_kw`. Give each its own participant, as above.
+- **`water_heater` and `hvac` are not EMHASS loads.** They do not come from
+  `number_of_deferrable_loads` and have no EMHASS entry; they exist only through
+  a `home_energy_optimizer` participant, configured entirely by its `config`
+  block. Devices this package knows: `battery`, `water_heater`, `hvac`.
+- **Thermal devices need thermal forecasts.** The adapter reads
+  `outdoor_temperature_forecast` (°C) and `hot_water_demand_kw` (kW) from
+  EMHASS's input DataFrame, falling back to a flat 20 °C and no draw. Without
+  them the tank and the heat pump plan against constants.
+
+Any EMHASS device you leave out of `participants` becomes its own EMHASS group,
+so a partial list is fine.
+
+### What comes back
+
+EMHASS's usual `opt_res` columns — `P_PV`, `P_Load`, `P_grid`, `P_deferrable0`,
+`P_batt`, `SOC_opt`, `unit_load_cost`, `cost_fun_profit` — in EMHASS's own units,
+so existing automations and charts keep working. Plus:
+
+| column | meaning |
+|---|---|
+| `P_water_heater`, `temp_water_heater` | the tank's power (W) and temperature (°C) |
+| `P_hvac`, `temp_hvac` | the heat pump's power (W) and room temperature (°C) |
+| `fed_meter_price` | the cost of one more kWh at the meter, per slot — the master's dual |
+| `fed_lower_bound`, `fed_gap` | how far this plan can be, at most, from the best possible one |
+| `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
+
+The shares are the part no single MILP can give you: `fed_share_solar`,
+`fed_share_battery`, `fed_share_water_heater`, `fed_share_hvac` and
+`fed_share_deferrable0+deferrable1` (a group is one player, named by its
+devices). Each device is first reimbursed what coordination cost it privately,
+then the surplus is split — an Owen value between solar and the devices,
+Aumann–Shapley among the devices — so the shares and reimbursements add up to the
+saving exactly. `src/home_energy_optimizer/dw/attribution.py` has the derivation.
+
+### When it declines
+
+A home automation loop must always get a plan, so the adapter returns `None` and
+lets EMHASS run its default solver — logging the option responsible — rather
+than raising. `unsupported()` lists the cases: a `costfun` other than `profit` or
+`cost`, `set_total_pv_sell`, `set_nocharge_from_grid` with a battery,
+`set_battery_first_priority`, a hybrid inverter, more than one battery,
+`heat_topology`, shared thermal tanks, deferrable load groups,
+`cost_forecast_per_deferrable_load`, `set_deferrable_startup_penalty`,
+`deferrable_load_max_cost`, capacity charges, and the `soc_target` family of
+runtime arguments. An export price above the import price in some slot, or a
+coordinator failure, falls back the same way.
+
+---
+
 ## Prices from a battery's dynamic programme
 
 A convenience of one device solver, not the heart of the method. When the
@@ -390,6 +525,7 @@ src/home_energy_optimizer/     the package (import home_energy_optimizer)
   policy.py        value function -> actions, prices, counterfactuals
   feeds.py         real forecast inputs
   ha.py            Home Assistant publishing
+  integrations/    emhass.py: EMHASS's devices as coordinated participants
   evcc.py          evcc optimizer wire contract
   profiles.py      synthetic forecasts for tests and demos
   dw/              Dantzig-Wolfe: coordinator, LP solver, integrate (to HA and evcc),
