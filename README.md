@@ -183,6 +183,19 @@ Hovering the battery chart replays the optimal policy from whatever state the
 cursor is over, with **no re-solve** — the value function used directly.
 Clicking prices a forced action against the optimum.
 
+**One battery, slow and fast.** `battery/` is a third, smaller page: a single
+battery's DP, with its policy drawn as a flow field over hour and state of
+charge. The slow tier (the full solve) and the fast tier (one decision from any
+state, read from the stored value function) are timed side by side. Hover to
+replay the policy from the pointer.
+
+```bash
+.venv/bin/python battery/gui/server.py    # http://127.0.0.1:8768
+battery/wasm/build.sh                     # or as one self-contained page
+```
+
+`battery/README.md` has the build steps and what each part of the page shows.
+
 ### 3. Home Assistant
 
 Publishes the plan and the price signals as HA sensors. Walkthrough below. To
@@ -526,6 +539,7 @@ src/home_energy_optimizer/     the package (import home_energy_optimizer)
   feeds.py         real forecast inputs
   ha.py            Home Assistant publishing
   integrations/    emhass.py: EMHASS's devices as coordinated participants
+  battery/         webapi.py: the single-battery page's backend
   evcc.py          evcc optimizer wire contract
   profiles.py      synthetic forecasts for tests and demos
   dw/              Dantzig-Wolfe: coordinator, LP solver, integrate (to HA and evcc),
@@ -533,6 +547,7 @@ src/home_energy_optimizer/     the package (import home_energy_optimizer)
   admm/            ADMM: coordinator, battery_qp (exact LP battery step),
                    webapi (the ADMM app's backend and the policy API)
 dw/                the DW app: gui/ (server + page), wasm/ (single-file page), design notes
+battery/           the single-battery page: one DP, its slow and fast tiers, the policy as a flow field
 admm/              the ADMM app: gui/ (server + page; also the evcc endpoint), wasm/
 wasm/              shared browser-build tooling: the compiled-kernel wheel, keep_names.py
 bench/             exact references (continuous LP, joint DP, MILP, duals) and studies

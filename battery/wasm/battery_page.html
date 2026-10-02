@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Battery Optimizer (DP + Quiver)</title>
+<link rel="icon" href="data:,">
+<style>
+  /* One deliberate dark look, carried over from the proof of concept. */
+  :root{
+    --bg:#0b1020; --fg:#e7e9ee; --muted:#9aa4b2; --line:rgba(255,255,255,.09);
+    --card:rgba(255,255,255,.055); --well:rgba(0,0,0,.22);
+    --blue:#93c5fd; --red:#fca5a5; --green:#34d399; --mint:#a7f3d0; --lilac:#c084fc; --gate:#ff9a6c; --accent:#7aa2ff;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  body{padding:24px 16px 48px}
+  .card{max-width:1200px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+  h1{margin:0 0 4px;font-size:22px}
+  .sub{margin:0;color:var(--muted);max-width:70ch}
+  .saving{text-align:right}
+  .saving b{display:block;font-size:24px;color:var(--green);font-variant-numeric:tabular-nums}
+  .saving span{font-size:12px;color:var(--muted)}
+
+  /* the lesson of the page: two tiers, side by side */
+  .tiers{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px;margin:18px 0}
+  .tier{border:1px solid var(--line);border-radius:14px;padding:14px 16px;background:var(--well)}
+  .tier .k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .tier .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;margin:2px 0}
+  .tier .d{color:var(--muted);font-size:13px}
+  .tier code{font-size:12px;color:var(--fg)}
+  .tier.slow .v{color:var(--blue)} .tier.fast .v{color:var(--green)} .tier.lam .v{color:var(--lilac)}
+
+  .rows{display:grid;gap:8px}
+  .row{display:grid;grid-template-columns:200px minmax(0,1fr) 90px;gap:12px;align-items:center}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  input[type=number],select,textarea{background:rgba(255,255,255,.07);color:var(--fg);border:1px solid rgba(255,255,255,.2);border-radius:10px;padding:6px 8px;font:inherit}
+  .tag{background:rgba(255,255,255,.06);border:1px solid var(--line);padding:3px 8px;border-radius:10px;text-align:center;font-variant-numeric:tabular-nums}
+  button{font:inherit;color:var(--fg);background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.2);border-radius:10px;padding:5px 12px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button:disabled{opacity:.5;cursor:default}
+  #solve{background:rgba(122,162,255,.18);border-color:var(--accent)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  details{margin-top:12px} summary{cursor:pointer;color:var(--muted)}
+  .csv{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap} .csv textarea{flex:1 1 260px;min-height:64px}
+  .csv .btns{display:flex;flex-direction:column;gap:4px}
+
+  .plots{display:grid;gap:14px;margin-top:18px}
+  .plot{background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:16px;padding:10px 12px}
+  .ptitle{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:2px 0 8px;color:var(--muted);font-weight:600;font-size:13px}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;font-weight:400;font-size:12px;color:#cbd5e1}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  .stack{position:relative}
+  canvas{display:block;width:100%;height:260px;border-radius:12px;background:var(--well);touch-action:none}
+  canvas.overlay{position:absolute;inset:0;background:transparent;pointer-events:none}
+  .err{display:none;margin-top:12px;padding:8px 12px;border:1px solid var(--blue);border-radius:10px;font-size:13px}
+  .note{margin-top:10px;color:var(--muted);font-size:12px}
+  @media (max-width:640px){.row{grid-template-columns:1fr 70px}.row label{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<div class="card">
+  <header>
+    <div>
+      <h1>Battery Optimizer</h1>
+      <p class="sub">One battery's dynamic programme, solved slowly once and then read fast from anywhere.
+        Hover the state-of-charge chart: the path is the policy replayed from that point, with no re-solve.</p>
+    </div>
+    <div class="saving"><b id="saving">—</b><span>saved per day vs no battery</span></div>
+  </header>
+
+  <div class="tiers" aria-live="polite">
+    <div class="tier slow"><div class="k">Slow tier · solve the DP</div><div class="v" id="slowV">—</div>
+      <div class="d" id="slowD">every slot × every state × every action → a value function V[t, s]</div>
+      <div class="d"><code>dp_battery.solve_battery</code></div></div>
+    <div class="tier fast"><div class="k">Fast tier · read the policy</div><div class="v" id="fastV">—</div>
+      <div class="d" id="fastD">one decision: a look-ahead against the stored V</div>
+      <div class="d"><code>policy.action</code> · <code>policy.rollout</code></div></div>
+    <div class="tier lam"><div class="k">Value of a stored kWh</div><div class="v" id="lamV">—</div>
+      <div class="d" id="lamD">λ = dV/ds where the pointer is</div>
+      <div class="d"><code>policy.marginal_value</code></div></div>
+  </div>
+
+  <div class="rows">
+    <div class="row"><label for="capacity">Battery capacity</label><input id="capacity" type="range" min="1" max="200" step="1" value="40"><span class="tag" id="capacityL">40 kWh</span></div>
+    <div class="row"><label for="pCharge">Max charge power</label><input id="pCharge" type="range" min="0" max="50" step="1" value="5"><span class="tag" id="pChargeL">5 kW</span></div>
+    <div class="row"><label for="pDischarge">Max discharge power</label><input id="pDischarge" type="range" min="0" max="50" step="1" value="5"><span class="tag" id="pDischargeL">5 kW</span></div>
+    <div class="row"><label for="link">Charge and discharge</label><div><button id="link" aria-pressed="true">Linked</button></div><span></span></div>
+    <div class="row"><label for="reserve">Reserve (% of capacity)</label><input id="reserve" type="number" min="0" max="99" step="1" value="10"><span></span></div>
+    <div class="row"><label for="grid">DP grid (states × actions)</label>
+      <select id="grid"><option value="coarse">50 × 21 — coarse, like the original page</option><option value="medium">100 × 41</option><option value="fine" selected>200 × 81 — the package default</option></select>
+      <button id="solve">Solve</button></div>
+  </div>
+
+  <details>
+    <summary>Import prices (CSV or pasted numbers)</summary>
+    <div class="csv">
+      <textarea id="csvText" placeholder="24 h of prices: plain numbers, or a CSV with a Price column (and optionally Date, Time). The 24 h pattern repeats over the horizon."></textarea>
+      <div class="btns">
+        <button id="asBuy">Load as buy</button><button id="asSell">Load as sell</button>
+        <label class="tag" style="cursor:pointer">Upload CSV <input id="csvFile" type="file" accept=".csv,.txt" hidden></label>
+      </div>
+    </div>
+  </details>
+
+  <div class="plots">
+    <div class="plot">
+      <div class="ptitle"><span>Inputs: price (left axis) and load (kW, right). Drag the points.</span>
+        <span class="legend"><span><i class="sw" style="background:var(--blue)"></i>buy</span><span><i class="sw" style="background:var(--red)"></i>sell</span><span><i class="sw" style="background:var(--mint)"></i>load</span></span></div>
+      <canvas id="cPrices" aria-label="Price and load inputs; drag a point to change it"></canvas>
+    </div>
+    <div class="plot">
+      <div class="ptitle"><span>State of charge, with the policy as a flow field <label style="font-weight:400;margin-left:8px;cursor:pointer"><input id="animate" type="checkbox" checked> animate</label></span>
+        <span class="legend"><span style="color:var(--gate)">shift+click</span> add a minimum · <span style="color:var(--gate)">drag</span> move · <span style="color:var(--gate)">double-click</span> remove
+          <span><i class="sw" style="background:var(--blue)"></i>charge</span><span><i class="sw" style="background:var(--red)"></i>discharge</span></span></div>
+      <div class="stack"><canvas id="cSoc" aria-label="State of charge over time; hover to replay the policy from that point"></canvas><canvas id="cFlow" class="overlay" aria-hidden="true"></canvas></div>
+    </div>
+    <div class="plot">
+      <div class="ptitle"><span id="powerTitle">Power (kW)</span>
+        <span class="legend"><span><i class="sw" style="background:var(--lilac)"></i>battery (+ charging)</span><span><i class="sw" style="background:var(--green)"></i>grid import (battery + load)</span></span></div>
+      <canvas id="cPower" aria-label="Battery and grid power along the shown path"></canvas>
+    </div>
+  </div>
+  <div class="err" id="err"></div>
+  <p class="note">Running in your browser, no server. Same solver as the tests run: <code>src/home_energy_optimizer/battery/webapi.py</code> over <code>dp_battery</code> and <code>policy</code>.</p>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const DPR = () => window.devicePixelRatio || 1;
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* Every backend call goes through here: HTTP when served by battery/gui/server.py,
+   window.__HEMS_API__ (Pyodide in a worker) in the standalone page. */
+async function api(route, payload){
+  if(window.__HEMS_API__) return window.__HEMS_API__(route, payload || {});
+  const r = await fetch('/api/' + route, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                          body: JSON.stringify(payload || {})});
+  return r.json();
+}
+
+// ---------------------------------------------------------------- inputs
+const HOURS = 48;
+const IN = {
+  buy:  Array.from({length: HOURS + 1}, (_, h) => (h % 24 >= 18 && h % 24 < 21) ? 0.25 : 0.15),
+  sell: Array.from({length: HOURS + 1}, () => 0.05),
+  load: Array.from({length: HOURS + 1}, () => 3.0),
+};
+let PRICE = [0, 0.3];
+const LOAD = [-2, 12];
+const gates = [];            // [{hour, soc_frac}]
+let linked = true;
+
+let S = null;                // the last solve
+let R = null;                // the path on show: a hover rollout, or null for the plan
+
+function settings(){
+  return {
+    hours: HOURS,
+    capacity_kwh: +$('#capacity').value,
+    p_charge_kw: +$('#pCharge').value,
+    p_discharge_kw: +$('#pDischarge').value,
+    reserve_pct: Math.min(99, Math.max(0, +$('#reserve').value || 0)),
+    grid: $('#grid').value,
+    buy_h: IN.buy, sell_h: IN.sell, load_h: IN.load,
+    gates: gates.map(g => ({hour: g.hour, soc_frac: g.soc_frac})),
+  };
+}
+
+// ---------------------------------------------------------------- the slow tier
+/* Latest request wins: a slider drag fires an event per stop, so rather than
+   queue solves that are stale before they land, note that another is wanted
+   and run exactly one more when this one returns. */
+let SOLVING = false, RESOLVE_WANTED = false;
+async function solve(){
+  if(SOLVING){ RESOLVE_WANTED = true; return; }
+  SOLVING = true;
+  const btn = $('#solve'); btn.disabled = true; btn.textContent = 'Solving…';
+  try{
+    const out = await api('solve', settings());
+    if(out.error) throw new Error(out.error);
+    S = out; R = null;
+    showSolve(); drawAll(); startFlow();
+  }catch(e){ status('Solve failed: ' + e.message, true); }
+  finally{
+    SOLVING = false; btn.disabled = false; btn.textContent = 'Solve';
+    if(RESOLVE_WANTED){ RESOLVE_WANTED = false; solve(); }
+  }
+}
+const later = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
+const solveSoon = later(solve, 150);
+
+function showSolve(){
+  $('#slowV').textContent = fmtMs(S.slow_ms);
+  $('#slowD').textContent = `${S.steps} slots × ${S.n_states} states × ${S.n_actions} actions → V[t, s]`;
+  const v = S.savings_per_day;
+  $('#saving').textContent = (v >= 0 ? '+' : '') + v.toFixed(2);
+  $('#saving').style.color = v >= 0 ? 'var(--green)' : 'var(--red)';
+  if(!R){ $('#fastV').textContent = '—'; $('#fastD').textContent = 'hover the state-of-charge chart to read the policy'; $('#lamV').textContent = '—'; }
+  status('');
+}
+const fmtMs = (ms) => ms < 1 ? `${(ms * 1000).toFixed(0)} µs` : `${ms.toFixed(ms < 10 ? 1 : 0)} ms`;
+
+// ---------------------------------------------------------------- the fast tier
+let ROLLING = false, ROLL_NEXT = null;
+async function readPolicy(hour, soe){
+  if(ROLLING){ ROLL_NEXT = [hour, soe]; return; }
+  ROLLING = true;
+  try{
+    const out = await api('rollout', {hour, soe});
+    if(!out.error && S){
+      R = out;
+      $('#fastV').textContent = `${out.decision_us.toFixed(0)} µs`;
+      $('#fastD').textContent = `per decision · the whole path from here: ${fmtMs(out.replay_ms)} for ${out.replay_steps} slots`;
+      $('#lamV').textContent = out.lambda.toFixed(3);
+      // A minimum the battery cannot reach from here is a soft penalty, and then
+      // dV/ds prices the penalty, not energy: say so rather than show a puzzle.
+      const priceCap = 10 * Math.max(...IN.buy);
+      $('#lamD').textContent = out.lambda > priceCap
+        ? `at ${hhmm(out.start_hour)}: a minimum can't be met from here, so this is the shortfall penalty's price, not energy's`
+        : `per kWh, at ${hhmm(out.start_hour)} with ${(100 * soe / S.capacity_kwh).toFixed(0)}% stored`;
+      drawSoc(); drawPower();
+    }
+  }finally{
+    ROLLING = false;
+    if(ROLL_NEXT){ const [h, s] = ROLL_NEXT; ROLL_NEXT = null; readPolicy(h, s); }
+  }
+}
+const hhmm = (h) => `${Math.floor(h % 24)}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}${h >= 24 ? ' (day 2)' : ''}`;
+
+// ---------------------------------------------------------------- drawing
+const PAD = {l: 46, r: 46, t: 10, b: 26};
+function fit(c){
+  const d = DPR(), w = Math.round(c.clientWidth * d), h = Math.round(c.clientHeight * d);
+  if(c.width !== w || c.height !== h){ c.width = w; c.height = h; }
+  const ctx = c.getContext('2d'); ctx.setTransform(d, 0, 0, d, 0, 0);
+  return {ctx, W: c.clientWidth, H: c.clientHeight};
+}
+const X = (W, hour) => PAD.l + (hour / HOURS) * (W - PAD.l - PAD.r);
+const Y = (H, v, lo, hi) => PAD.t + (1 - (v - lo) / (hi - lo)) * (H - PAD.t - PAD.b);
+const unX = (W, px) => Math.max(0, Math.min(HOURS, (px - PAD.l) / (W - PAD.l - PAD.r) * HOURS));
+const unY = (H, py, lo, hi) => Math.max(lo, Math.min(hi, lo + (1 - (py - PAD.t) / (H - PAD.t - PAD.b)) * (hi - lo)));
+
+function axes(ctx, W, H, lo, hi, fmt, side = 'left'){
+  ctx.save();
+  ctx.font = '11px ui-sans-serif, system-ui'; ctx.fillStyle = '#9aa4b2'; ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 1;
+  for(let i = 0; i <= 4; i++){
+    const v = lo + (hi - lo) * i / 4, y = Y(H, v, lo, hi);
+    if(side === 'left'){ ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke(); }
+    ctx.textAlign = side === 'left' ? 'right' : 'left';
+    ctx.fillText(fmt(v), side === 'left' ? PAD.l - 6 : W - PAD.r + 6, y + 4);
+  }
+  if(side === 'left'){
+    ctx.textAlign = 'center';
+    for(let h = 0; h <= HOURS; h += 6) ctx.fillText(`${h % 24}h`, X(W, h), H - 8);
+  }
+  ctx.restore();
+}
+function line(ctx, pts, color, width = 2, dots = false){
+  ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width; ctx.beginPath();
+  pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.stroke();
+  if(dots) pts.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3.2, 0, 2 * Math.PI); ctx.fill(); });
+  ctx.restore();
+}
+
+function drawPrices(){
+  const {ctx, W, H} = fit($('#cPrices'));
+  ctx.clearRect(0, 0, W, H);
+  axes(ctx, W, H, PRICE[0], PRICE[1], v => v.toFixed(2));
+  axes(ctx, W, H, LOAD[0], LOAD[1], v => v.toFixed(0), 'right');
+  const pts = (ys, lo, hi) => ys.map((v, h) => [X(W, h), Y(H, v, lo, hi)]);
+  line(ctx, pts(IN.buy, ...PRICE), css('--blue'), 2, true);
+  line(ctx, pts(IN.sell, ...PRICE), css('--red'), 2, true);
+  line(ctx, pts(IN.load, ...LOAD), css('--mint'), 2, true);
+}
+
+/* The policy at any (hour, state of charge), interpolated from the table the
+   solve returns: what the flow field's particles follow. */
+function policyAt(hour, soe){
+  const F = S.field, t = Math.min(S.steps - 1, Math.max(0, Math.floor(hour / S.dt))), st = F.states;
+  if(soe <= st[0]) return F.policy[t][0];
+  if(soe >= st[st.length - 1]) return F.policy[t][st.length - 1];
+  let k = 0; while(st[k + 1] < soe) k++;
+  const f = (soe - st[k]) / (st[k + 1] - st[k]);
+  return F.policy[t][k] * (1 - f) + F.policy[t][k + 1] * f;
+}
+// kWh into (or out of) the store per kWh at the meter, with the solve's efficiencies
+const stored = (a) => a > 0 ? a * S.eta_charge : a / S.eta_discharge;
+
+function drawSoc(){
+  const {ctx, W, H} = fit($('#cSoc'));
+  ctx.clearRect(0, 0, W, H);
+  axes(ctx, W, H, 0, 1, v => `${Math.round(v * 100)}%`);
+  if(!S) return;
+  const cap = S.capacity_kwh, Yf = (soe) => Y(H, soe / cap, 0, 1);
+  // reserve band
+  ctx.fillStyle = 'rgba(252,165,165,.07)';
+  ctx.fillRect(PAD.l, Yf(S.soe_floor_kwh), W - PAD.l - PAD.r, Yf(0) - Yf(S.soe_floor_kwh));
+  // the path: a hover rollout, else the plan from the starting state
+  const path = R ? R.soe.map((s, i) => [X(W, (R.start_step + i) * S.dt), Yf(s)])
+                 : S.plan.soe.map((s, i) => [X(W, i * S.dt), Yf(s)]);
+  line(ctx, path, css('--lilac'), 2.4);
+  ctx.save(); ctx.fillStyle = css('--lilac'); ctx.beginPath(); ctx.arc(path[0][0], path[0][1], 4.5, 0, 2 * Math.PI); ctx.fill(); ctx.restore();
+  // minimums (SoC gates)
+  ctx.save(); ctx.font = '11px ui-sans-serif, system-ui';
+  for(const g of gates){
+    const x = X(W, g.hour), y = Y(H, g.soc_frac, 0, 1);
+    ctx.fillStyle = css('--gate'); ctx.beginPath(); ctx.arc(x, y, 6, 0, 2 * Math.PI); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fillText(`≥${Math.round(g.soc_frac * 100)}% by ${hhmm(g.hour)}`, x + 9, y - 6);
+  }
+  ctx.restore();
+}
+function drawPower(){
+  const {ctx, W, H} = fit($('#cPower'));
+  ctx.clearRect(0, 0, W, H);
+  if(!S){ axes(ctx, W, H, -5, 5, v => v.toFixed(0)); return; }
+  const src = R || {start_step: 0, power: S.plan.power, import: S.plan.import};
+  const all = src.power.concat(src.import);
+  let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.1 || 1; lo -= pad; hi += pad;
+  axes(ctx, W, H, lo, hi, v => v.toFixed(1));
+  const pts = (ys) => ys.map((v, i) => [X(W, (src.start_step + i) * S.dt), Y(H, v, lo, hi)]);
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.setLineDash([3, 4]);
+  ctx.beginPath(); ctx.moveTo(PAD.l, Y(H, 0, lo, hi)); ctx.lineTo(W - PAD.r, Y(H, 0, lo, hi)); ctx.stroke(); ctx.restore();
+  line(ctx, pts(src.power), css('--lilac'));
+  line(ctx, pts(src.import), css('--green'));
+  $('#powerTitle').textContent = R ? `Power (kW) from ${hhmm(R.start_hour)} on, as the policy would run it` : 'Power (kW): the plan from the starting state';
+}
+function drawAll(){ drawPrices(); drawSoc(); drawPower(); }
+
+// ---------------------------------------------------------------- the flow field, animated
+/* Particles drift through (hour, state of charge) along the policy, leaving
+   fading trails: the policy table, in motion. */
+const NPART = 360;
+let parts = null, anim = null;
+const spawn = () => ({h: Math.random() * HOURS, s: null, age: Math.floor(Math.random() * 60), max: 50 + Math.floor(Math.random() * 50)});
+function startFlow(){
+  const c = $('#cFlow');
+  if(!$('#animate').checked || !S){ if(anim) cancelAnimationFrame(anim); anim = null; c.getContext('2d').clearRect(0, 0, c.width, c.height); return; }
+  if(!parts) parts = Array.from({length: NPART}, spawn);
+  if(!anim) frame();
+}
+function frame(){
+  const {ctx, W, H} = fit($('#cFlow')), cap = S.capacity_kwh, lo = S.soe_floor_kwh;
+  ctx.globalCompositeOperation = 'destination-in'; ctx.fillStyle = 'rgba(0,0,0,.92)'; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.lineWidth = 1.4;
+  const dh = 0.12;
+  for(const p of parts){
+    if(p.s === null) p.s = lo + Math.random() * (cap - lo);
+    const a = policyAt(p.h, p.s), h0 = p.h, s0 = p.s;
+    p.h += dh; p.s = Math.max(lo, Math.min(cap, p.s + stored(a) * dh)); p.age++;
+    const fade = Math.max(0, 1 - p.age / p.max);
+    ctx.strokeStyle = a > 0.05 ? `rgba(147,197,253,${(fade * .9).toFixed(2)})` : a < -0.05 ? `rgba(252,165,165,${(fade * .9).toFixed(2)})` : `rgba(220,220,220,${(fade * .15).toFixed(2)})`;
+    ctx.beginPath(); ctx.moveTo(X(W, h0), Y(H, s0 / cap, 0, 1)); ctx.lineTo(X(W, p.h), Y(H, p.s / cap, 0, 1)); ctx.stroke();
+    if(p.h > HOURS || p.age > p.max) Object.assign(p, spawn(), {s: null});
+  }
+  anim = requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- interaction
+function local(ev, c){ const r = c.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top, r.width, r.height]; }
+
+// inputs: drag a point (load first: it is drawn on top)
+let drag = null;
+$('#cPrices').addEventListener('pointerdown', ev => {
+  const c = ev.currentTarget, [x, y, W, H] = local(ev, c);
+  for(const [which, lo, hi] of [['load', ...LOAD], ['sell', ...PRICE], ['buy', ...PRICE]]){
+    const i = IN[which].findIndex((v, h) => (X(W, h) - x) ** 2 + (Y(H, v, lo, hi) - y) ** 2 < 100);
+    if(i >= 0){ drag = {which, i, lo, hi}; c.setPointerCapture(ev.pointerId); return; }
+  }
+});
+$('#cPrices').addEventListener('pointermove', ev => {
+  if(!drag) return;
+  const [, y, , H] = local(ev, ev.currentTarget);
+  IN[drag.which][drag.i] = unY(H, y, drag.lo, drag.hi);
+  drawPrices();
+});
+$('#cPrices').addEventListener('pointerup', () => { if(drag){ drag = null; solveSoon(); } });
+
+// state of charge: hover reads the policy; shift+click adds a minimum, drag moves it, double-click removes it
+let gateDrag = null;
+const gateAt = (x, y, W, H) => gates.findIndex(g => (X(W, g.hour) - x) ** 2 + (Y(H, g.soc_frac, 0, 1) - y) ** 2 < 144);
+$('#cSoc').addEventListener('pointerdown', ev => {
+  const c = ev.currentTarget, [x, y, W, H] = local(ev, c);
+  if(ev.shiftKey){ gates.push({hour: unX(W, x), soc_frac: unY(H, y, 0, 1)}); gateDrag = gates.length - 1; }
+  else gateDrag = gateAt(x, y, W, H) >= 0 ? gateAt(x, y, W, H) : null;
+  if(gateDrag !== null){ c.setPointerCapture(ev.pointerId); drawSoc(); }
+});
+$('#cSoc').addEventListener('pointermove', ev => {
+  const [x, y, W, H] = local(ev, ev.currentTarget);
+  if(gateDrag !== null){ Object.assign(gates[gateDrag], {hour: unX(W, x), soc_frac: unY(H, y, 0, 1)}); drawSoc(); return; }
+  if(S) readPolicy(unX(W, x), unY(H, y, 0, 1) * S.capacity_kwh);
+});
+$('#cSoc').addEventListener('pointerup', () => { if(gateDrag !== null){ gateDrag = null; solveSoon(); } });
+$('#cSoc').addEventListener('dblclick', ev => {
+  const [x, y, W, H] = local(ev, ev.currentTarget), i = gateAt(x, y, W, H);
+  if(i >= 0){ gates.splice(i, 1); drawSoc(); solveSoon(); }
+});
+$('#cSoc').addEventListener('pointerleave', () => { if(gateDrag === null && R){ R = null; drawSoc(); drawPower(); } });
+
+// controls
+function tag(id, unit){ $('#' + id + 'L').textContent = $('#' + id).value + ' ' + unit; }
+$('#capacity').addEventListener('input', () => { tag('capacity', 'kWh'); solveSoon(); });
+for(const [me, other] of [['pCharge', 'pDischarge'], ['pDischarge', 'pCharge']]){
+  $('#' + me).addEventListener('input', () => {
+    if(linked){ $('#' + other).value = $('#' + me).value; tag(other, 'kW'); }
+    tag(me, 'kW'); solveSoon();
+  });
+}
+$('#link').addEventListener('click', ev => { linked = !linked; ev.currentTarget.textContent = linked ? 'Linked' : 'Independent'; ev.currentTarget.setAttribute('aria-pressed', linked); });
+$('#reserve').addEventListener('input', solveSoon);
+$('#grid').addEventListener('change', solve);
+$('#solve').addEventListener('click', solve);
+$('#animate').addEventListener('change', startFlow);
+window.addEventListener('resize', later(() => { drawAll(); }, 100));
+
+// CSV: plain numbers, or a table with a Price column (averaged per 15-minute slot over its days)
+function parseCsv(text){
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
+  const nums = () => text.split(/[\s,;]+/).map(s => s.trim()).filter(s => s && !isNaN(s)).map(Number);
+  if(lines.length < 2 || !/price/i.test(lines[0])) return {values: nums()};
+  const cells = (l) => { const f = []; let cur = '', q = false; for(const ch of l){ if(ch === '"') q = !q; else if(ch === ',' && !q){ f.push(cur.trim()); cur = ''; } else cur += ch; } f.push(cur.trim()); return f; };
+  const head = cells(lines[0]), pi = head.findIndex(h => /price/i.test(h)), ti = head.findIndex(h => /time/i.test(h));
+  const perMWh = /mwh/i.test(head[pi]);
+  const sum = new Float64Array(96), n = new Uint32Array(96);
+  for(let i = 1; i < lines.length; i++){
+    const f = cells(lines[i]), v = parseFloat(f[pi]); if(isNaN(v)) continue;
+    let slot = (i - 1) % 96; const m = ti >= 0 && f[ti] && f[ti].match(/(\d{1,2}):(\d{2})/);
+    if(m) slot = (+m[1]) * 4 + Math.floor((+m[2]) / 15);
+    if(slot >= 0 && slot < 96){ sum[slot] += perMWh ? v / 1000 : v; n[slot]++; }
+  }
+  const out = []; for(let s = 0; s < 96; s++) out.push(n[s] ? sum[s] / n[s] : NaN);
+  for(let s = 0; s < 96; s++) if(isNaN(out[s])){ let a = s, b = s; while(a >= 0 && isNaN(out[a])) a--; while(b < 96 && isNaN(out[b])) b++; out[s] = a < 0 ? out[b] : b >= 96 ? out[a] : out[a] + (out[b] - out[a]) * (s - a) / (b - a); }
+  return {values: out, perMWh};
+}
+function loadPrices(target){
+  const {values, perMWh} = parseCsv($('#csvText').value);
+  if(!values.length){ status('No numbers found in the pasted text.', true); return; }
+  // one day of values, repeated over the horizon, sampled at each hour
+  const n = values.length, xs = values.map((_, i) => n > 25 ? i * 24 / n : i * 24 / (n - 1));
+  IN[target] = Array.from({length: HOURS + 1}, (_, h) => {
+    const t = h % 24; let k = xs.findIndex(x => x > t); if(k <= 0) return values[k === 0 ? 0 : n - 1];
+    const f = (t - xs[k - 1]) / (xs[k] - xs[k - 1]); return values[k - 1] + (values[k] - values[k - 1]) * f;
+  });
+  const all = IN.buy.concat(IN.sell), lo = Math.min(...all), hi = Math.max(...all), m = (hi - lo) * 0.15 || Math.max(Math.abs(hi) * 0.15, 0.01);
+  PRICE = [Math.max(0, lo - m), hi + m];
+  status(`Loaded ${n} values as ${target} prices` + (perMWh ? ' (converted per MWh to per kWh)' : '') + '.');
+  drawPrices(); solveSoon();
+}
+$('#asBuy').addEventListener('click', () => loadPrices('buy'));
+$('#asSell').addEventListener('click', () => loadPrices('sell'));
+$('#csvFile').addEventListener('change', ev => { const f = ev.target.files[0]; if(f) f.text().then(t => { $('#csvText').value = t; }); });
+
+function status(msg, bad){
+  const e = $('#err');
+  if(!msg){ e.style.display = 'none'; return; }
+  e.style.borderColor = e.style.color = bad ? 'var(--red)' : 'var(--blue)';
+  e.textContent = msg; e.style.display = 'block';
+}
+
+drawAll();
+async function boot(){ await solve(); }
+
+/* HEMS-BOOT-START -- generated by battery/wasm/make_page.py (from admm/wasm/make_page.py). Replaces the direct
+   boot() call with a Pyodide bootstrap and installs window.__HEMS_API__, so
+   api() stops going over HTTP. Nothing above this line differs from the
+   served page.
+
+   Pyodide runs in a WEB WORKER, not on this thread. A solve is seconds of
+   straight-line numpy, and on the main thread that is seconds of frozen tab -
+   moving a slider produced "page not responding". In a worker the UI keeps
+   painting and the controls keep working while the solve runs. */
+
+const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/";
+
+/* The worker, as source. Built as an array rather than a template literal so
+   that neither backticks nor ${} collide with the outer page. It uses the
+   classic (importScripts) Pyodide build so this is a plain worker rather than
+   a module worker. */
+const WORKER_SRC = [
+  "self.importScripts('" + PYODIDE + "pyodide.js');",
+  "let py = null, api = null;",
+  "self.onmessage = async (e) => {",
+  "  const m = e.data;",
+  "  try {",
+  "    if (m.cmd === 'boot') {",
+  "      self.postMessage({id: m.id, stage: 'the Python runtime'});",
+  "      py = await self.loadPyodide({indexURL: '" + PYODIDE + "'});",
+  "      self.postMessage({id: m.id, stage: 'numpy'});",
+  "      await py.loadPackage('numpy');",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    if (m.cmd === 'loadPackage') {",
+  "      await py.loadPackage(m.pkg);",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    if (m.cmd === 'run') {",
+  "      await py.runPythonAsync(m.src);",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    if (m.cmd === 'ready') {",
+  "      api = py.globals.get('_api');",
+  "      self.postMessage({id: m.id, ready: true});",
+  "      return;",
+  "    }",
+  "    self.postMessage({id: m.id, result: api(m.route, m.payload)});",
+  "  } catch (err) {",
+  "    self.postMessage({id: m.id, error: String((err && err.message) || err)});",
+  "  }",
+  "};",
+].join("\n");
+
+function _status(msg, bad){
+  const e = $('#err');
+  if(!msg){ e.style.display = 'none'; return; }
+  e.style.background   = bad ? 'rgba(252,165,165,.12)' : 'rgba(96,165,250,.12)';
+  e.style.borderColor  = bad ? 'var(--red)'  : 'var(--blue)';
+  e.style.color        = bad ? 'var(--red)'  : 'var(--blue)';
+  e.textContent = msg;
+  e.style.display = 'block';
+}
+
+(async () => {
+  const btn = $('#solve');
+  btn.disabled = true; btn.textContent = 'Loading\u2026';
+  try{
+    const worker = new Worker(URL.createObjectURL(
+      new Blob([WORKER_SRC], {type: 'text/javascript'})));
+
+    let seq = 0;
+    const pending = new Map();
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if(m.stage){ _status('Loading ' + m.stage + '\u2026'); return; }
+      const p = pending.get(m.id);
+      if(!p) return;
+      pending.delete(m.id);
+      if(m.error) p({error: m.error});
+      else if(m.ready) p(true);
+      else p(JSON.parse(m.result));
+    };
+    worker.onerror = (e) => _status('Solver worker failed: ' + e.message, true);
+
+    const send = (msg) => new Promise(resolve => {
+      const id = ++seq;
+      pending.set(id, resolve);
+      worker.postMessage(Object.assign({id}, msg));
+    });
+
+    await send({cmd: 'boot'});
+
+    /* make_standalone.py splices its payload over the fetch line below, and
+       the wheel half of that payload is written against a main-thread
+       `pyodide` object. Pyodide is in the worker here, so this shim gives that
+       generated code the two methods it uses and forwards them. It also means
+       the tool needs no knowledge of the worker. */
+    const pyodide = {
+      loadPackage: (pkg) => send({cmd: 'loadPackage', pkg}),
+      runPythonAsync: (src) => send({cmd: 'run', src}),
+    };
+    void pyodide;
+
+    _status('Loading the solver…');
+    const code = await (await fetch(`battery_bundle.py?t=${Date.now()}`)).text();
+
+    await send({cmd: 'run', src: code});
+    await send({cmd: 'ready'});
+    window.__HEMS_API__ = (route, payload) =>
+      send({route, payload: JSON.stringify(payload || {})});
+
+    _status('');
+    await boot();
+  }catch(e){
+    _status('Could not start the in-browser solver: ' + e.message, true);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Solve';
+  }
+})();
+/* HEMS-BOOT-END */
+</script>
+</body>
+</html>
