@@ -11,6 +11,8 @@ thing we are only 91–96% as good at. λ is the thing neither EMHASS nor evcc h
 ## Run it
 
 ```bash
+pip install -e ".[ha]"   # websockets, for the HA websocket API
+
 docker run -d --name ha -p 8123:8123 -v /tmp/ha-config:/config \
     homeassistant/home-assistant:stable
 # complete onboarding, then Profile -> Security -> Long-lived access tokens

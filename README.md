@@ -211,6 +211,13 @@ comparison.
 
 ## Home Assistant, from scratch
 
+The two scripts below talk to Home Assistant over its websocket API, which
+needs one dependency beyond the core install:
+
+```bash
+.venv/bin/pip install -e ".[ha]"    # adds websockets
+```
+
 ### Step 1 — run Home Assistant
 
 ```bash
