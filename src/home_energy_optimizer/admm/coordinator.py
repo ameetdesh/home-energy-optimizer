@@ -40,9 +40,12 @@ steps (a small interior point method in numpy).
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from typing import TypeVar
 
 import numpy as np
+import numpy.typing as npt
 
 from home_energy_optimizer.coordinate import (
     _apply_baseline_fallback,
@@ -59,9 +62,20 @@ from home_energy_optimizer.coordinate import (
 from home_energy_optimizer.dp_battery import solve_battery, terminal_price
 from home_energy_optimizer.dp_thermal import hvac_discomfort, solve_hvac, solve_water_heater
 from home_energy_optimizer.meter import Limits
-from home_energy_optimizer.types import CoordinationResult, Forecasts, RoundRecord, SiteConfig
+from home_energy_optimizer.types import (
+    BatteryConfig,
+    CoordinationResult,
+    DeviceSolution,
+    Forecasts,
+    HvacConfig,
+    RoundRecord,
+    SiteConfig,
+    WaterHeaterConfig,
+)
 
-from .battery_qp import battery_prox, lp_step_applies
+from .battery_qp import BatteryStep, battery_prox, lp_step_applies
+
+_ThermalT = TypeVar("_ThermalT", WaterHeaterConfig, HvacConfig)
 
 
 class _Grid:
@@ -74,20 +88,23 @@ class _Grid:
     balanced meter unique. The prox is closed form: on each piece the
     stationary point, clipped to the piece; the cheapest of those."""
 
-    def __init__(self, buy, sell, dt, l_imp, l_exp, c_br, delta):
+    def __init__(self, buy: npt.ArrayLike, sell: npt.ArrayLike, dt: float,
+                 l_imp: float | None, l_exp: float | None, c_br: float,
+                 delta: float) -> None:
         self.buy, self.sell, self.dt = np.asarray(buy, float), np.asarray(sell, float), dt
         self.l_imp, self.l_exp, self.c_br = l_imp, l_exp, c_br
         lims = [x for x in (l_imp, l_exp) if x is not None]
         self.delta = min(delta, 0.5 * min(lims)) if lims and delta > 0 else max(delta, 0.0)
 
-    def cost(self, z):
+    def cost(self, z: np.ndarray) -> np.ndarray:
         return self._cost(z, self.buy, self.sell)
 
-    def cost_t(self, z, t: int):
+    def cost_t(self, z: npt.ArrayLike, t: int) -> np.ndarray:
         """The cost of slot t at every import in the array z."""
         return self._cost(np.asarray(z, float), self.buy[t], self.sell[t])
 
-    def _cost(self, z, buy, sell):
+    def _cost(self, z: np.ndarray, buy: np.ndarray | float,
+              sell: np.ndarray | float) -> np.ndarray:
         d = self.delta
         if d > 0:
             plus = np.where(z >= d, z, np.where(z <= -d, 0.0, (z + d) ** 2 / (4 * d)))
@@ -100,7 +117,7 @@ class _Grid:
             c = c + self.c_br * np.maximum(-z - self.l_exp, 0.0)
         return c * self.dt
 
-    def prox(self, v, rho):
+    def prox(self, v: np.ndarray, rho: float) -> np.ndarray:
         # in the import z = -p the target is -v: min cost(z) + (rho/2)(z + v)^2
         d, dt = self.delta, self.dt
         edges = sorted({-d, d} | ({-self.l_exp} if self.l_exp is not None else set())
@@ -127,7 +144,9 @@ class _Grid:
         return -best
 
 
-def _objective(cfg, fc, net, sols, batteries, ref) -> float:
+def _objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
+               sols: dict[str, DeviceSolution], batteries: Iterable[str],
+               ref: float) -> float:
     """A plan's cost as the testbed reports it: total_objective plus the
     thermal devices' horizon-edge terms their DPs optimise (as
     dw.coordinator.thermal_terminal and DWCoordinator.parts have it)."""
@@ -142,7 +161,7 @@ def _objective(cfg, fc, net, sols, batteries, ref) -> float:
     return float(obj)
 
 
-def _relaxed(cfg, levels: int, dt: float):
+def _relaxed(cfg: _ThermalT | None, levels: int, dt: float) -> _ThermalT | None:
     """A copy of an on/off device allowed `levels` duty steps, its grid
     refined to match - or the device itself if it is already that fine."""
     if cfg is None or levels <= cfg.n_duty_levels:
@@ -170,7 +189,7 @@ class WarmStart:
         if k <= 0:
             return self
 
-        def roll(a):
+        def roll(a: np.ndarray) -> np.ndarray:
             return np.concatenate([a[..., k:], np.repeat(a[..., -1:], k, axis=-1)], axis=-1)
 
         qp = {}
@@ -181,8 +200,9 @@ class WarmStart:
         return WarmStart(self.keys, roll(self.p), roll(self.u), self.rho, qp)
 
 
-def coordinate_exchange(cfg: SiteConfig, fc: Forecasts, progress=None, warm: WarmStart | None = None
-                        ) -> CoordinationResult:
+def coordinate_exchange(cfg: SiteConfig, fc: Forecasts,
+                        progress: Callable[..., None] | None = None,
+                        warm: WarmStart | None = None) -> CoordinationResult:
     """Plan the site by ADMM (see the module docstring)."""
     run = ExchangeRun(cfg, fc, progress, warm)
     run.step()
@@ -199,7 +219,9 @@ class ExchangeRun:
     resumes exactly where it stopped.
     """
 
-    def __init__(self, cfg: SiteConfig, fc: Forecasts, progress=None, warm: WarmStart | None = None):
+    def __init__(self, cfg: SiteConfig, fc: Forecasts,
+                 progress: Callable[..., None] | None = None,
+                 warm: WarmStart | None = None) -> None:
         cfg.validate()
         fc.validate(cfg.horizon)
         self.cfg, self.fc, self.progress = cfg, fc, progress
@@ -219,7 +241,9 @@ class ExchangeRun:
 
         # ---- the terminals --------------------------------------------------
         self.grid = _Grid(fc.buy, fc.sell, dt, g.max_import_kw, g.max_export_kw, c_br, cc.kink_smoothing)
-        keys, steps, real = [], [], {}
+        keys: list[str] = []
+        steps: list[Callable[[np.ndarray, float], BatteryStep | DeviceSolution]] = []
+        real: dict[str, BatteryConfig] = {}
         self._qp: dict = {}                                 # LP battery steps' solver states, for warm starts
         for i, b in enumerate(cfg.battery_list):
             if b.capacity_kwh > 0:
@@ -280,7 +304,7 @@ class ExchangeRun:
                 self._qp = {kk: tuple(a.copy() for a in st) for kk, st in warm.qp.items()}
             self.warm_used = True
 
-    def _battery_lp(self, key, b, v, rho):
+    def _battery_lp(self, key: str, b: BatteryConfig, v: np.ndarray, rho: float) -> BatteryStep:
         """A battery's exact LP step, started from its previous solution."""
         sol = battery_prox(b, self.dt, v, rho, float(b.terminal_price),
                            start=self._qp.get(key) if self.cc.exchange_warm_battery else None)
@@ -292,7 +316,7 @@ class ExchangeRun:
         solve from (`WarmStart.shift` for a horizon that has moved on)."""
         return self._best_warm
 
-    def _as_itself(self, key, others):
+    def _as_itself(self, key: str, others: np.ndarray) -> DeviceSolution:
         """The real (on/off, three-way) device's plan against the others."""
         cfg, h, fc = self.cfg, self.h, self.fc
         if key == "water_heater":

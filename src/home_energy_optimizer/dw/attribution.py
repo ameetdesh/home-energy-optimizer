@@ -42,9 +42,11 @@ without coordination), and their private cost is what their answers report.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
-from home_energy_optimizer.dw.coordinator import Device, DWCoordinator
+from home_energy_optimizer.dw.coordinator import Column, Device, DWCoordinator
 from home_energy_optimizer.coordinate import apply_curtailment, breach_price
 from home_energy_optimizer.dp_thermal import baseline_hvac, baseline_water_heater
 from home_energy_optimizer.types import SiteConfig
@@ -72,7 +74,8 @@ def _meter_cost(co: DWCoordinator, z: np.ndarray) -> np.ndarray:
     return _tariff_cost(co, zc)
 
 
-def _path_prices(co, start: np.ndarray, end: np.ndarray, cost) -> np.ndarray:
+def _path_prices(co: DWCoordinator, start: np.ndarray, end: np.ndarray,
+                 cost: Callable[[DWCoordinator, np.ndarray], np.ndarray]) -> np.ndarray:
     """Average slope of the grid cost `cost(co, z)` along the straight path start -> end,
     per slot (currency per kW-slot).
 
@@ -94,7 +97,7 @@ def _participant(co: DWCoordinator, key: str) -> Device | None:
     return next((d for d in co.devices if d.key == key and d.kind == "participant"), None)
 
 
-def _entry(e) -> tuple[np.ndarray, np.ndarray, float | None]:
+def _entry(e: Column | tuple) -> tuple[np.ndarray, np.ndarray, float | None]:
     """A plan entry as (power kW, state trajectory, private cost or None).
     Accepts a coordinator Column or a (power, trajectory[, cost]) tuple."""
     if hasattr(e, "power"):

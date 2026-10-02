@@ -21,6 +21,8 @@ tier answer "what now?" from a state the plan did not predict.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult
@@ -39,7 +41,7 @@ _EMPTY1 = np.empty(0)
 
 
 def dw_plan(cfg: SiteConfig, fc: Forecasts, tank_in_master: bool | str = "auto",
-            ev_duty_cycle: bool = False, **run_kw) -> CoordinationResult:
+            ev_duty_cycle: bool = False, **run_kw: Any) -> CoordinationResult:
     """Plan with the recommended DW configuration; return a CoordinationResult.
 
     `tank_in_master="auto"` puts the tank in the master LP when its element

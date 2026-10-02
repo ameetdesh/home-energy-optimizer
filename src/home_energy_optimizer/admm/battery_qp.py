@@ -34,6 +34,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from home_energy_optimizer.types import BatteryConfig
+
 
 @dataclass
 class BatteryStep:
@@ -48,7 +50,7 @@ class BatteryStep:
     state: tuple | None = None # (x, y, zl, zu): the solver's final point, to warm-start the next solve
 
 
-def lp_step_applies(b) -> bool:
+def lp_step_applies(b: BatteryConfig) -> bool:
     """Plain batteries only: a charger minimum is not convex, and goals and
     SoC gates are left to the DP, which prices them."""
     return (b.p_charge_max_kw > 0 and b.p_discharge_max_kw > 0 and b.capacity_kwh > b.soe_floor_kwh
@@ -72,7 +74,7 @@ def _thomas(diag: np.ndarray, off: np.ndarray, rhs: np.ndarray) -> np.ndarray:
     return x
 
 
-def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
+def battery_prox(b: BatteryConfig, dt: float, v: np.ndarray, rho: float, tau: float,
                  tol: float = 1e-9, max_iter: int = 100, start: tuple | None = None) -> BatteryStep:
     """argmin over the battery's LP plans of (rho/2)|p - v|^2 - tau * (energy at the end)."""
     t0 = time.perf_counter()
@@ -89,18 +91,18 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
     rhs_b = np.zeros(n)
     rhs_b[0] = s_init
 
-    def A(x):                                         # A x
+    def A(x: np.ndarray) -> np.ndarray:               # A x
         c, e, s = x[:n], x[n:2 * n], x[2 * n:]
         out = ac * c + ae * e + s
         out[1:] -= s[:-1]
         return out
 
-    def At(y):                                        # A' y
+    def At(y: np.ndarray) -> np.ndarray:              # A' y
         s = y.copy()
         s[:-1] -= y[1:]
         return np.concatenate([ac * y, ae * y, s])
 
-    def Qx(x):
+    def Qx(x: np.ndarray) -> np.ndarray:
         d = rho * (x[:n] - x[n:2 * n])
         return np.concatenate([d, -d, np.zeros(n)])
 
@@ -131,11 +133,12 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
         diag[1:] += hs[:-1]
         off = -hs[:-1]
 
-        def hinv(r):
+        def hinv(r: np.ndarray) -> np.ndarray:
             rc, re, rs = r[:n], r[n:2 * n], r[2 * n:]
             return np.concatenate([icc * rc + ice * re, ice * rc + iee * re, hs * rs])
 
-        def newton(tl, tu):
+        def newton(tl: np.ndarray, tu: np.ndarray) -> tuple[
+                np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             r1 = -grad + tl / wl - tu / wu
             dy = _thomas(diag, off, -rp - A(hinv(r1)))
             dx = hinv(r1 + At(dy))
@@ -143,7 +146,7 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
             dzu = (-wu * zu + tu + zu * dx) / wu
             return dx, dy, dzl, dzu
 
-        def step(dx, dzl, dzu):
+        def step(dx: np.ndarray, dzl: np.ndarray, dzu: np.ndarray) -> float:
             a = 1.0
             for w, d in ((wl, dx), (wu, -dx), (zl, dzl), (zu, dzu)):
                 neg = d < 0

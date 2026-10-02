@@ -9,16 +9,23 @@ Modules included: src/home_energy_optimizer/_kernels.py, src/home_energy_optimiz
 
 from __future__ import annotations
 
+from typing import Any
 import numpy as np
 from dataclasses import dataclass, field, replace
 import json
 from dataclasses import dataclass
 from importlib import resources
 from typing import Protocol, runtime_checkable
+import numpy.typing as npt
 from typing import NamedTuple
 import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from typing import TypeVar
 from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 
@@ -34,21 +41,21 @@ except ImportError:  # pragma: no cover
 HAVE_KERNELS = _k is not None
 
 
-def kernel_battery(*args) -> bool:
+def kernel_battery(*args: Any) -> bool:
     if _k is None:
         return False
     _k.battery_backward(*args)
     return True
 
 
-def kernel_water_heater(*args) -> bool:
+def kernel_water_heater(*args: Any) -> bool:
     if _k is None:
         return False
     _k.water_heater_backward(*args)
     return True
 
 
-def kernel_hvac(*args) -> bool:
+def kernel_hvac(*args: Any) -> bool:
     if _k is None:
         return False
     _k.hvac_backward(*args)
@@ -918,7 +925,7 @@ class Participant(Protocol):
 
 
 # --------------------------------------------------------------------- JSON
-def _series(x) -> list[float] | None:
+def _series(x: npt.ArrayLike | None) -> list[float] | None:
     """An array (or None) as a flat list of floats for JSON (or None)."""
     return None if x is None else [float(v) for v in np.asarray(x, dtype=float).ravel()]
 
@@ -1146,7 +1153,7 @@ def terminal_value(cfg: BatteryConfig, S: np.ndarray, buy: np.ndarray) -> np.nda
     return -cfg.terminal_weight * (S - target) ** 2 / cfg.capacity_kwh
 
 
-def _per_slot(values, n: int, name: str) -> np.ndarray | None:
+def _per_slot(values: npt.ArrayLike | None, n: int, name: str) -> np.ndarray | None:
     """Normalise an optional per-slot array, padding or trimming to n."""
     if values is None:
         return None
@@ -1426,11 +1433,16 @@ def rollout_battery(
 
 # Action grids. Index into these with the integer stored in POL. The tank's is
 # per config (WaterHeaterConfig.duty_actions); this is the on/off default.
+# A temperature or heat flow: an array over the state grid, or one point of
+# it. numpy hands back its own scalar type for 0-d input, so it belongs here.
+_Numeric = float | np.floating | np.ndarray
+
 WATER_HEATER_ACTIONS = np.array([0.0, 1.0])  # off, on
 HVAC_ACTIONS = np.array([0.0, -1.0, 1.0])  # off, cool, heat
 
 
-def wh_discomfort(cfg: WaterHeaterConfig, temp, ref_price: float, dt: float):
+def wh_discomfort(cfg: WaterHeaterConfig, temp: _Numeric, ref_price: float,
+                  dt: float) -> np.ndarray | np.floating:
     """Cost of the tank sitting below its setpoint, in currency.
 
     Linear mode prices a kelvin-hour of shortfall at the cost of restoring it
@@ -1443,7 +1455,9 @@ def wh_discomfort(cfg: WaterHeaterConfig, temp, ref_price: float, dt: float):
     return cfg.comfort_weight * short**2 * dt
 
 
-def hvac_discomfort(cfg: HvacConfig, temp, ref_price: float, dt: float, low=None, high=None):
+def hvac_discomfort(cfg: HvacConfig, temp: _Numeric, ref_price: float, dt: float,
+                    low: _Numeric | None = None,
+                    high: _Numeric | None = None) -> np.ndarray | np.floating:
     """Cost of the room sitting outside its comfort band, in currency.
     `low`/`high`: the band at `temp`'s points (default: the flat band)."""
     low = cfg.t_comfort_low if low is None else low
@@ -1474,7 +1488,7 @@ def _draw_factor(temp: np.ndarray | float, cfg: WaterHeaterConfig) -> np.ndarray
     return (np.asarray(temp, dtype=float) - cfg.t_inlet) / (cfg.t_comfort - cfg.t_inlet)
 
 
-def _relaxation(cfg: WaterHeaterConfig, demand_kw: float):
+def _relaxation(cfg: WaterHeaterConfig, demand_kw: float) -> tuple[float, float]:
     """Rate constant and equilibrium of the tank's passive dynamics.
 
     With the element off the energy balance is
@@ -1497,7 +1511,8 @@ def _relaxation(cfg: WaterHeaterConfig, demand_kw: float):
     return rate, t_inf
 
 
-def _usable_outflow(temp, cfg: WaterHeaterConfig, demand_kw: float, dt: float):
+def _usable_outflow(temp: _Numeric, cfg: WaterHeaterConfig, demand_kw: float,
+                    dt: float) -> np.ndarray | np.floating:
     """Heat the tank gives up this slot, in kW: standing loss AND draw.
 
     The demanded outflow is C * rate * (T - t_inf). An explicit Euler step at
@@ -1518,7 +1533,8 @@ def _usable_outflow(temp, cfg: WaterHeaterConfig, demand_kw: float, dt: float):
     )
 
 
-def _max_duty(temp, cfg: WaterHeaterConfig, q_out, dt: float):
+def _max_duty(temp: _Numeric, cfg: WaterHeaterConfig, q_out: _Numeric,
+              dt: float) -> np.ndarray | np.floating:
     """Largest duty fraction in [0, 1] that does not carry the tank past t_max.
 
     This is the thermostat cut-out, expressed where it belongs: in the ADMISSIBLE
@@ -1703,7 +1719,8 @@ def _hvac_heat_flow(a: float, cfg: HvacConfig) -> float:
 
 
 
-def _hvac_duty_cap(temp, cfg: HvacConfig, q_wall, a: float, dt: float):
+def _hvac_duty_cap(temp: _Numeric, cfg: HvacConfig, q_wall: _Numeric, a: float,
+                   dt: float) -> np.ndarray | np.floating:
     """Fraction of the HVAC action admissible from `temp` without leaving the grid.
 
     The wall coupling drives the room toward outdoor and is exogenous; the
@@ -1933,8 +1950,12 @@ def baseline_hvac(
 # src/home_energy_optimizer/coordinate.py
 # ========================================================================
 
+if TYPE_CHECKING:  # admm.coordinator imports this module, so only for checkers
+    pass
+
+
 def apply_curtailment(
-    net_raw: np.ndarray, solar: np.ndarray, sell: np.ndarray, grid
+    net_raw: np.ndarray, solar: np.ndarray, sell: np.ndarray, grid: GridLimits | None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Throw away the PV that cannot usefully leave the site.
 
@@ -1971,7 +1992,7 @@ def apply_curtailment(
     return net_raw + curtail, curtail
 
 
-def device_sell_price(sell: np.ndarray, grid) -> np.ndarray:
+def device_sell_price(sell: np.ndarray, grid: GridLimits | None) -> np.ndarray:
     """The export price a DEVICE should be optimising against.
 
     Curtailment is free and always available up to the PV on the roof, so a
@@ -2038,7 +2059,7 @@ def breach_energy(cfg: SiteConfig, net_grid: np.ndarray) -> np.ndarray:
     return over * cfg.horizon.dt
 
 
-def breach_price(grid, buy: np.ndarray, sell: np.ndarray | None = None) -> float:
+def breach_price(grid: GridLimits, buy: np.ndarray, sell: np.ndarray | None = None) -> float:
     """Currency per kWh beyond a grid limit: one constant for the horizon.
 
     `grid.breach_price` if set, else `breach_price_multiplier` times the
@@ -2162,7 +2183,8 @@ def baseline_solution(cfg: SiteConfig, fc: Forecasts) -> tuple[np.ndarray, float
     return net, net_cost(net, fc.buy, fc.sell, cfg.horizon.dt)
 
 
-def coordinate(cfg: SiteConfig, fc: Forecasts, progress=None, warm=None) -> CoordinationResult:
+def coordinate(cfg: SiteConfig, fc: Forecasts, progress: Callable[..., None] | None = None,
+               warm: WarmStart | None = None) -> CoordinationResult:
     """Plan a site by ADMM (admm.coordinator) and return its best plan.
 
     `progress`, if given, is called as progress(round, max_rounds) when an
@@ -2187,7 +2209,7 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
 
-    def objective(devices) -> tuple[float, np.ndarray, np.ndarray]:
+    def objective(devices: dict[str, DeviceSolution]) -> tuple[float, np.ndarray, np.ndarray]:
         net = fc.net_fixed_demand + sum(devices[k].power for k in dev_keys)
         net, curtail = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
         soe = {k: devices[k].trajectory for k in dev_keys if k in batt} or None
@@ -2382,7 +2404,7 @@ class BatteryStep:
     state: tuple | None = None # (x, y, zl, zu): the solver's final point, to warm-start the next solve
 
 
-def lp_step_applies(b) -> bool:
+def lp_step_applies(b: BatteryConfig) -> bool:
     """Plain batteries only: a charger minimum is not convex, and goals and
     SoC gates are left to the DP, which prices them."""
     return (b.p_charge_max_kw > 0 and b.p_discharge_max_kw > 0 and b.capacity_kwh > b.soe_floor_kwh
@@ -2406,7 +2428,7 @@ def _thomas(diag: np.ndarray, off: np.ndarray, rhs: np.ndarray) -> np.ndarray:
     return x
 
 
-def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
+def battery_prox(b: BatteryConfig, dt: float, v: np.ndarray, rho: float, tau: float,
                  tol: float = 1e-9, max_iter: int = 100, start: tuple | None = None) -> BatteryStep:
     """argmin over the battery's LP plans of (rho/2)|p - v|^2 - tau * (energy at the end)."""
     t0 = time.perf_counter()
@@ -2423,18 +2445,18 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
     rhs_b = np.zeros(n)
     rhs_b[0] = s_init
 
-    def A(x):                                         # A x
+    def A(x: np.ndarray) -> np.ndarray:               # A x
         c, e, s = x[:n], x[n:2 * n], x[2 * n:]
         out = ac * c + ae * e + s
         out[1:] -= s[:-1]
         return out
 
-    def At(y):                                        # A' y
+    def At(y: np.ndarray) -> np.ndarray:              # A' y
         s = y.copy()
         s[:-1] -= y[1:]
         return np.concatenate([ac * y, ae * y, s])
 
-    def Qx(x):
+    def Qx(x: np.ndarray) -> np.ndarray:
         d = rho * (x[:n] - x[n:2 * n])
         return np.concatenate([d, -d, np.zeros(n)])
 
@@ -2465,11 +2487,12 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
         diag[1:] += hs[:-1]
         off = -hs[:-1]
 
-        def hinv(r):
+        def hinv(r: np.ndarray) -> np.ndarray:
             rc, re, rs = r[:n], r[n:2 * n], r[2 * n:]
             return np.concatenate([icc * rc + ice * re, ice * rc + iee * re, hs * rs])
 
-        def newton(tl, tu):
+        def newton(tl: np.ndarray, tu: np.ndarray) -> tuple[
+                np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             r1 = -grad + tl / wl - tu / wu
             dy = _thomas(diag, off, -rp - A(hinv(r1)))
             dx = hinv(r1 + At(dy))
@@ -2477,7 +2500,7 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
             dzu = (-wu * zu + tu + zu * dx) / wu
             return dx, dy, dzl, dzu
 
-        def step(dx, dzl, dzu):
+        def step(dx: np.ndarray, dzl: np.ndarray, dzu: np.ndarray) -> float:
             a = 1.0
             for w, d in ((wl, dx), (wu, -dx), (zl, dzl), (zu, dzu)):
                 neg = d < 0
@@ -2505,6 +2528,9 @@ def battery_prox(b, dt: float, v: np.ndarray, rho: float, tau: float,
 # src/home_energy_optimizer/admm/coordinator.py
 # ========================================================================
 
+_ThermalT = TypeVar("_ThermalT", WaterHeaterConfig, HvacConfig)
+
+
 class _Grid:
     """The grid connection as a terminal. p = power delivered TO the grid
     (-import). Its cost, in the import z = -p, per slot:
@@ -2515,20 +2541,23 @@ class _Grid:
     balanced meter unique. The prox is closed form: on each piece the
     stationary point, clipped to the piece; the cheapest of those."""
 
-    def __init__(self, buy, sell, dt, l_imp, l_exp, c_br, delta):
+    def __init__(self, buy: npt.ArrayLike, sell: npt.ArrayLike, dt: float,
+                 l_imp: float | None, l_exp: float | None, c_br: float,
+                 delta: float) -> None:
         self.buy, self.sell, self.dt = np.asarray(buy, float), np.asarray(sell, float), dt
         self.l_imp, self.l_exp, self.c_br = l_imp, l_exp, c_br
         lims = [x for x in (l_imp, l_exp) if x is not None]
         self.delta = min(delta, 0.5 * min(lims)) if lims and delta > 0 else max(delta, 0.0)
 
-    def cost(self, z):
+    def cost(self, z: np.ndarray) -> np.ndarray:
         return self._cost(z, self.buy, self.sell)
 
-    def cost_t(self, z, t: int):
+    def cost_t(self, z: npt.ArrayLike, t: int) -> np.ndarray:
         """The cost of slot t at every import in the array z."""
         return self._cost(np.asarray(z, float), self.buy[t], self.sell[t])
 
-    def _cost(self, z, buy, sell):
+    def _cost(self, z: np.ndarray, buy: np.ndarray | float,
+              sell: np.ndarray | float) -> np.ndarray:
         d = self.delta
         if d > 0:
             plus = np.where(z >= d, z, np.where(z <= -d, 0.0, (z + d) ** 2 / (4 * d)))
@@ -2541,7 +2570,7 @@ class _Grid:
             c = c + self.c_br * np.maximum(-z - self.l_exp, 0.0)
         return c * self.dt
 
-    def prox(self, v, rho):
+    def prox(self, v: np.ndarray, rho: float) -> np.ndarray:
         # in the import z = -p the target is -v: min cost(z) + (rho/2)(z + v)^2
         d, dt = self.delta, self.dt
         edges = sorted({-d, d} | ({-self.l_exp} if self.l_exp is not None else set())
@@ -2568,7 +2597,9 @@ class _Grid:
         return -best
 
 
-def _objective(cfg, fc, net, sols, batteries, ref) -> float:
+def _objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
+               sols: dict[str, DeviceSolution], batteries: Iterable[str],
+               ref: float) -> float:
     """A plan's cost as the testbed reports it: total_objective plus the
     thermal devices' horizon-edge terms their DPs optimise (as
     dw.coordinator.thermal_terminal and DWCoordinator.parts have it)."""
@@ -2583,7 +2614,7 @@ def _objective(cfg, fc, net, sols, batteries, ref) -> float:
     return float(obj)
 
 
-def _relaxed(cfg, levels: int, dt: float):
+def _relaxed(cfg: _ThermalT | None, levels: int, dt: float) -> _ThermalT | None:
     """A copy of an on/off device allowed `levels` duty steps, its grid
     refined to match - or the device itself if it is already that fine."""
     if cfg is None or levels <= cfg.n_duty_levels:
@@ -2611,7 +2642,7 @@ class WarmStart:
         if k <= 0:
             return self
 
-        def roll(a):
+        def roll(a: np.ndarray) -> np.ndarray:
             return np.concatenate([a[..., k:], np.repeat(a[..., -1:], k, axis=-1)], axis=-1)
 
         qp = {}
@@ -2622,8 +2653,9 @@ class WarmStart:
         return WarmStart(self.keys, roll(self.p), roll(self.u), self.rho, qp)
 
 
-def coordinate_exchange(cfg: SiteConfig, fc: Forecasts, progress=None, warm: WarmStart | None = None
-                        ) -> CoordinationResult:
+def coordinate_exchange(cfg: SiteConfig, fc: Forecasts,
+                        progress: Callable[..., None] | None = None,
+                        warm: WarmStart | None = None) -> CoordinationResult:
     """Plan the site by ADMM (see the module docstring)."""
     run = ExchangeRun(cfg, fc, progress, warm)
     run.step()
@@ -2640,7 +2672,9 @@ class ExchangeRun:
     resumes exactly where it stopped.
     """
 
-    def __init__(self, cfg: SiteConfig, fc: Forecasts, progress=None, warm: WarmStart | None = None):
+    def __init__(self, cfg: SiteConfig, fc: Forecasts,
+                 progress: Callable[..., None] | None = None,
+                 warm: WarmStart | None = None) -> None:
         cfg.validate()
         fc.validate(cfg.horizon)
         self.cfg, self.fc, self.progress = cfg, fc, progress
@@ -2660,7 +2694,9 @@ class ExchangeRun:
 
         # ---- the terminals --------------------------------------------------
         self.grid = _Grid(fc.buy, fc.sell, dt, g.max_import_kw, g.max_export_kw, c_br, cc.kink_smoothing)
-        keys, steps, real = [], [], {}
+        keys: list[str] = []
+        steps: list[Callable[[np.ndarray, float], BatteryStep | DeviceSolution]] = []
+        real: dict[str, BatteryConfig] = {}
         self._qp: dict = {}                                 # LP battery steps' solver states, for warm starts
         for i, b in enumerate(cfg.battery_list):
             if b.capacity_kwh > 0:
@@ -2721,7 +2757,7 @@ class ExchangeRun:
                 self._qp = {kk: tuple(a.copy() for a in st) for kk, st in warm.qp.items()}
             self.warm_used = True
 
-    def _battery_lp(self, key, b, v, rho):
+    def _battery_lp(self, key: str, b: BatteryConfig, v: np.ndarray, rho: float) -> BatteryStep:
         """A battery's exact LP step, started from its previous solution."""
         sol = battery_prox(b, self.dt, v, rho, float(b.terminal_price),
                            start=self._qp.get(key) if self.cc.exchange_warm_battery else None)
@@ -2733,7 +2769,7 @@ class ExchangeRun:
         solve from (`WarmStart.shift` for a horizon that has moved on)."""
         return self._best_warm
 
-    def _as_itself(self, key, others):
+    def _as_itself(self, key: str, others: np.ndarray) -> DeviceSolution:
         """The real (on/off, three-way) device's plan against the others."""
         cfg, h, fc = self.cfg, self.h, self.fc
         if key == "water_heater":
@@ -3585,18 +3621,20 @@ class Triplets:
     assignment patterns the master builder uses - and records entries.
     """
 
-    def __init__(self, shape: tuple[int, int]):
+    def __init__(self, shape: tuple[int, int]) -> None:
         self.shape = shape
         self._r: list[np.ndarray] = []
         self._c: list[np.ndarray] = []
         self._v: list[np.ndarray] = []
 
-    def _idx(self, k, size):
+    def _idx(self, k: int | slice | npt.ArrayLike, size: int) -> np.ndarray:
         if isinstance(k, slice):
             return np.arange(size)[k]
         return np.atleast_1d(np.asarray(k, dtype=int))
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: tuple[int | slice | npt.ArrayLike,
+                                    int | slice | npt.ArrayLike],
+                    value: npt.ArrayLike) -> None:
         r, c = key
         r = self._idx(r, self.shape[0])
         c = self._idx(c, self.shape[1])
@@ -3609,7 +3647,7 @@ class Triplets:
         keep = v != 0.0
         self._r.append(r[keep]); self._c.append(c[keep]); self._v.append(v[keep])
 
-    def coo(self):
+    def coo(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self._r:
             return np.zeros(0, int), np.zeros(0, int), np.zeros(0)
         return np.concatenate(self._r), np.concatenate(self._c), np.concatenate(self._v)
@@ -3636,7 +3674,8 @@ class _NormalEquations:
     dense factorisation for a 6-battery, 48 h master.
     """
 
-    def __init__(self, m, n, rows, cols, vals, border: int = 0):
+    def __init__(self, m: int, n: int, rows: np.ndarray, cols: np.ndarray,
+                 vals: np.ndarray, border: int = 0) -> None:
         self.m, self.n = m, n
         nnz = np.bincount(cols, minlength=n)
         dense_cols = np.where(nnz > 3)[0]          # the plan columns
@@ -3674,11 +3713,12 @@ class _NormalEquations:
         self.blocks = self._blocks(m, border, rows, cols, is_dense) if border else None
 
     @staticmethod
-    def _blocks(m, border, rows, cols, is_dense):
+    def _blocks(m: int, border: int, rows: np.ndarray, cols: np.ndarray,
+                is_dense: np.ndarray) -> list[np.ndarray] | None:
         """Connected groups of non-border rows (rows sharing a column)."""
         parent = np.arange(m)
 
-        def find(i):
+        def find(i: int) -> int:
             while parent[i] != i:
                 parent[i] = parent[parent[i]]
                 i = parent[i]
@@ -3696,7 +3736,7 @@ class _NormalEquations:
         roots = np.array([find(i) for i in range(border, m)])
         return [np.arange(border, m)[roots == rt] for rt in np.unique(roots)] or None
 
-    def matrix(self, d):
+    def matrix(self, d: np.ndarray) -> np.ndarray:
         M = np.bincount(self.flat, weights=self.pv * d[self.pc],
                         minlength=self.m * self.m).astype(float).reshape(self.m, self.m)
         if self.dense_cols.size:
@@ -3704,10 +3744,10 @@ class _NormalEquations:
             M += (Ad * d[self.dense_cols]) @ Ad.T
         return M
 
-    def Ax(self, x):
+    def Ax(self, x: np.ndarray) -> np.ndarray:
         return np.bincount(self.rows, weights=self.vals * x[self.cols], minlength=self.m).astype(float)
 
-    def ATy(self, y):
+    def ATy(self, y: np.ndarray) -> np.ndarray:
         return np.bincount(self.cols, weights=self.vals * y[self.rows], minlength=self.n).astype(float)
 
 
@@ -3720,8 +3760,8 @@ class _NormalEquations:
 ACCEPT = 1e-4
 
 
-def linprog(c, A: Triplets, b, lb, ub, tol: float = 1e-8, max_iter: int = 100,
-            border: int = 0) -> LPResult:
+def linprog(c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray, ub: np.ndarray,
+            tol: float = 1e-8, max_iter: int = 100, border: int = 0) -> LPResult:
     """min c.x  s.t.  A x = b,  lb <= x <= ub.  lb must be finite; ub may be inf.
 
     Variables with ub == lb (curtailment at night, plans excluded from a
@@ -3747,7 +3787,7 @@ def linprog(c, A: Triplets, b, lb, ub, tol: float = 1e-8, max_iter: int = 100,
     return _solve(c, rows, cols, vals, m, n_all, b, lb, ub, tol, max_iter, border)
 
 
-def _factor(M, ne):
+def _factor(M: np.ndarray, ne: _NormalEquations) -> Callable[[np.ndarray], np.ndarray]:
     """A solve(r) for M r' = r: block-arrow elimination when the structure is
     there, a dense Cholesky otherwise."""
     M[np.diag_indices_from(M)] += 1e-12 * max(1.0, np.abs(np.diag(M)).max())
@@ -3766,7 +3806,7 @@ def _factor(M, ne):
         facts.append((P, Li, MPB, Y))
     SLi = np.linalg.inv(np.linalg.cholesky(S))
 
-    def solve(r):
+    def solve(r: np.ndarray) -> np.ndarray:
         rB = r[B].copy()
         ts = []
         for P, Li, MPB, _Y in facts:
@@ -3782,7 +3822,9 @@ def _factor(M, ne):
     return solve
 
 
-def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0) -> LPResult:
+def _solve(c: np.ndarray, rows: np.ndarray, cols: np.ndarray, vals: np.ndarray, m: int,
+           n: int, b: np.ndarray, lb: np.ndarray, ub: np.ndarray, tol: float,
+           max_iter: int, border: int = 0) -> LPResult:
     ne = _NormalEquations(m, n, rows, cols, vals, border)
 
     # shift to 0 <= x <= u
@@ -3799,7 +3841,7 @@ def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0)
     y = np.zeros(m)
     bn, cn = 1.0 + np.linalg.norm(b0), 1.0 + np.linalg.norm(c)
 
-    def full(vU):
+    def full(vU: np.ndarray) -> np.ndarray:
         out = np.zeros(n); out[U] = vU; return out
 
     status, it, msg = 1, 0, "iteration limit"
@@ -3844,7 +3886,8 @@ def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0)
             Mi = np.linalg.pinv(M)
             solve = lambda r: Mi @ r  # noqa: E731
 
-        def direction(rxz, rws):
+        def direction(rxz: np.ndarray, rws: np.ndarray) -> tuple[
+                np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             rhat = rc - rxz / x + full((rws - s * ru) / w)
             r_dy = rb + ne.Ax(D * rhat)
             dy = solve(r_dy)
@@ -3856,7 +3899,7 @@ def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0)
             ds = (rws - s * dw) / w
             return dx, dy, dz, dw, ds
 
-        def step(v, dv):
+        def step(v: np.ndarray, dv: np.ndarray) -> float:
             neg = dv < 0
             return min(1.0, float(np.min(-v[neg] / dv[neg]))) if neg.any() else 1.0
 
@@ -3891,7 +3934,8 @@ class ChoiceResult:
     optimal: bool
 
 
-def choose_one(c, A: Triplets, b, lb, ub, groups: list[np.ndarray],
+def choose_one(c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray, ub: np.ndarray,
+               groups: list[np.ndarray],
                time_limit: float = 30.0, node_limit: int = 500, border: int = 0) -> ChoiceResult:
     """min c.x  s.t. A x = b, bounds, and within each group exactly one
     variable at 1, the rest at 0 (the group's convexity row is in A).
@@ -3957,12 +4001,20 @@ def choose_one(c, A: Triplets, b, lb, ub, groups: list[np.ndarray],
 # src/home_energy_optimizer/dw/sensitivity.py
 # ========================================================================
 
-def _nearest(values, lo: float, hi: float, n: int) -> np.ndarray:
+if TYPE_CHECKING:  # dw.coordinator imports this module, so only for checkers
+    pass
+
+
+def _nearest(values: npt.ArrayLike, lo: float, hi: float, n: int) -> np.ndarray:
     idx = np.rint((np.asarray(values) - lo) / (hi - lo) * (n - 1)).astype(int)
     return np.clip(idx, 0, n - 1)
 
 
-def _replay(n, starts, forced, base_power, base_traj, policy_action, step):
+def _replay(n: int, starts: np.ndarray, forced: np.ndarray, base_power: np.ndarray,
+            base_traj: np.ndarray,
+            policy_action: Callable[[int, np.ndarray], np.ndarray],
+            step: Callable[[int, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
+            ) -> tuple[np.ndarray, np.ndarray]:
     """Run every variant forward at once.
 
     Variant k follows the base plan before starts[k], takes forced[k] at
@@ -3986,7 +4038,8 @@ def _replay(n, starts, forced, base_power, base_traj, policy_action, step):
     return power, traj
 
 
-def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]], np.ndarray]:
+def variants(co: DWCoordinator, dev: Device, sol: DeviceSolution
+             ) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]], np.ndarray]:
     """All one-step deviations of `sol`'s plan, each followed by the policy.
 
     Returns ([(t, direction, power, trajectory), ...], base_power), with
@@ -4008,10 +4061,10 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
                 if 0 <= j < len(levels):
                     starts.append(t); forced.append(levels[j]); dirs.append(d)
 
-        def policy_action(t, x):
+        def policy_action(t: int, x: np.ndarray) -> np.ndarray:
             return levels[sol.policy[t, _nearest(x, cfg.t_min, cfg.t_max, cfg.n_states)]]
 
-        def step(t, x, a):
+        def step(t: int, x: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             q_out = _usable_outflow(x, cfg, fc.hot_water_demand[t], dt)
             duty = np.minimum(a, _max_duty(x, cfg, q_out, dt))
             return P * duty, x + (P * duty - q_out) / C * dt
@@ -4029,10 +4082,10 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
                     d = +1 if (a != 0 and base_a[t] == 0) else (-1 if a == 0 else 0)
                     starts.append(t); forced.append(a); dirs.append(d)
 
-        def policy_action(t, x):
+        def policy_action(t: int, x: np.ndarray) -> np.ndarray:
             return cfg.duty_actions[sol.policy[t, _nearest(x, cfg.t_min, cfg.t_max, cfg.n_states)]]
 
-        def step(t, x, a):
+        def step(t: int, x: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             q_wall = (fc.outdoor_temp[t] - x) / cfg.r_wall_k_per_kw
             duty = np.ones_like(x)
             q_ac = np.zeros_like(x)
@@ -4056,10 +4109,10 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
                 if abs(a - base_p[t]) > 1e-6:
                     starts.append(t); forced.append(a); dirs.append(d)
 
-        def policy_action(t, x):
+        def policy_action(t: int, x: np.ndarray) -> np.ndarray:
             return sol.policy[t, _nearest(x, cfg.soe_floor_kwh, cap, cfg.n_states)]
 
-        def step(t, x, a):
+        def step(t: int, x: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             a = _feasible_actions(a, x, dt, cap, 0.0, cfg.charge_deadband_kw, ec, ed, cfg.soe_floor_kwh)
             eff = np.where(a > 0, a * ec, a / ed)
             return a, np.clip(x + eff * dt, cfg.soe_floor_kwh, cap)
@@ -4075,7 +4128,9 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
     return out, base_p
 
 
-def flexibility(co, dev, sol, price_kwh, base_cost: float, found) -> dict:
+def flexibility(co: DWCoordinator, dev: Device, sol: DeviceSolution, price_kwh: np.ndarray,
+                base_cost: float,
+                found: list[tuple[int, int, np.ndarray, np.ndarray]]) -> dict:
     """Per hour, the cheapest 'more' and 'less' deviation, as cost at `price_kwh`.
 
     Cost = change in (private cost + energy at the price) against the base
@@ -4100,7 +4155,8 @@ def flexibility(co, dev, sol, price_kwh, base_cost: float, found) -> dict:
 # src/home_energy_optimizer/dw/coordinator.py
 # ========================================================================
 
-def thermal_terminal(cfg, kind: str, t_end: float, ref: float) -> float:
+def thermal_terminal(cfg: WaterHeaterConfig | HvacConfig, kind: str, t_end: float,
+                     ref: float) -> float:
     """The horizon-edge term the thermal DPs put in V[n] (linear comfort mode).
 
     `total_objective` omits it, but every DP - and the joint-DP and MILP
@@ -4114,7 +4170,7 @@ def thermal_terminal(cfg, kind: str, t_end: float, ref: float) -> float:
     return float(hvac_discomfort(cfg, np.array([t_end]), ref, 1.0, *cfg.band_at(-1))[0])
 
 
-def is_plain_battery(b, gates=()) -> bool:
+def is_plain_battery(b: BatteryConfig, gates: tuple[SocGate, ...] = ()) -> bool:
     """Can this battery sit in the master as plain LP variables?
 
     Only if it is nothing more than capacity, power and efficiency. An evcc
@@ -4131,7 +4187,8 @@ def is_plain_battery(b, gates=()) -> bool:
     )
 
 
-def battery_extras(b, traj: np.ndarray, horizon, gates=()) -> float:
+def battery_extras(b: BatteryConfig, traj: np.ndarray, horizon: Horizon,
+                   gates: tuple[SocGate, ...] = ()) -> float:
     """The battery DP's state penalties, as a cost on a trajectory.
 
     `solve_battery` subtracts a SoC-goal shortfall and a SoC-gate shortfall
@@ -4160,15 +4217,17 @@ class _PriceVector(np.ndarray):
     keeps the library untouched for the prototype.
     """
 
-    def __new__(cls, values, ref: float):
+    _ref: float | None
+
+    def __new__(cls, values: npt.ArrayLike, ref: float) -> _PriceVector:
         obj = np.asarray(values, dtype=float).view(cls)
         obj._ref = ref
         return obj
 
-    def __array_finalize__(self, obj):
+    def __array_finalize__(self, obj: np.ndarray | None) -> None:
         self._ref = getattr(obj, "_ref", None)
 
-    def mean(self, *a, **k):  # noqa: D401 - numpy protocol
+    def mean(self, *a: Any, **k: Any) -> float | None:  # noqa: D401 - numpy protocol
         return self._ref
 
 
@@ -4256,8 +4315,9 @@ class DWResult:
 class DWCoordinator:
     def __init__(self, cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,
                  tank_in_master: bool = False, solver: str = "numpy", ev_duty_cycle: bool = False,
-                 participants=(), export_ceiling: np.ndarray | None = None,
-                 soe_targets: dict | None = None):
+                 participants: Sequence[Participant] = (),
+                 export_ceiling: np.ndarray | None = None,
+                 soe_targets: dict | None = None) -> None:
         """`participants`: devices answered through the interface (interface.
         Participant) rather than modelled here, priced in the master beside the
         site's own. `export_ceiling`: a hard per-slot cap on export, kW (for
@@ -4342,7 +4402,8 @@ class DWCoordinator:
                 + thermal_terminal(dev.cfg, "hvac", traj[-1], self.ref))
 
     # --------------------------------------------------------------- oracles
-    def _solve(self, dev: Device, buy, sell, dp_load=None):
+    def _solve(self, dev: Device, buy: np.ndarray, sell: np.ndarray,
+               dp_load: np.ndarray | None = None) -> DeviceSolution:
         h, fc = self.cfg.horizon, self.fc
         if dev.kind == "battery":
             gates = self.cfg.soc_gates if dev.key == "battery" else ()
@@ -4368,7 +4429,8 @@ class DWCoordinator:
         return Column(np.asarray(a.plan_kw, dtype=float).copy(), np.asarray(a.trajectory, dtype=float).copy(),
                       float(a.private_cost), source, detail=a.detail, exact=a.status == "ok")
 
-    def price_solve(self, dev: Device, price_kwh: np.ndarray):
+    def price_solve(self, dev: Device,
+                    price_kwh: np.ndarray) -> tuple[Column, DeviceSolution | None]:
         """The pricing DP, returning its solution too (value function and
         policy), which is what the sensitivity variants replay. A participant
         returns no solution, so it offers no sensitivity variants."""
@@ -4408,7 +4470,8 @@ class DWCoordinator:
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "load_aware")
 
-    def _add_variants(self, dev, sol, col, price_kwh, keep: int, flex_out) -> int:
+    def _add_variants(self, dev: Device, sol: DeviceSolution | None, col: Column,
+                      price_kwh: np.ndarray, keep: int, flex_out: dict) -> int:
         """Add the device's sensitivity variants around its pricing plan.
 
         Each is "force one step more (or less) at hour t, then re-plan with
@@ -4528,7 +4591,8 @@ class DWCoordinator:
         self.meter_blocks = blocks
 
     # ---------------------------------------------------------------- solvers
-    def _lp(self, c, A: Triplets, b, lb, ub, border: int = 0):
+    def _lp(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
+            ub: np.ndarray, border: int = 0) -> tuple[np.ndarray, float, np.ndarray]:
         """min c.x s.t. A x = b, lb <= x <= ub -> (x, fun, equality duals)."""
         if self.solver == "highs":
             from scipy import sparse
@@ -4544,8 +4608,9 @@ class DWCoordinator:
             raise RuntimeError(f"LP failed: {res.message}")
         return res.x, res.fun, res.y
 
-    def _choose(self, c, A: Triplets, b, lb, ub, groups, time_limit: float, node_limit: int = 150,
-                border: int = 0):
+    def _choose(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
+                ub: np.ndarray, groups: list[np.ndarray], time_limit: float,
+                node_limit: int = 150, border: int = 0) -> tuple[np.ndarray, float]:
         """The recovery MILP: one plan per group. -> (x, fun)."""
         if self.solver == "highs":
             from scipy import sparse
@@ -4566,7 +4631,9 @@ class DWCoordinator:
             raise RuntimeError("integer master: no plan found within the limits")
         return res.x, res.fun
 
-    def _tank_block(self, A, c, lb, ub, rhs, j0: int, row0: int, meter: bool = True):
+    def _tank_block(self, A: Triplets, c: np.ndarray, lb: np.ndarray, ub: np.ndarray,
+                    rhs: np.ndarray, j0: int, row0: int, meter: bool = True
+                    ) -> tuple[int, int, Callable[[np.ndarray], Column]]:
         """Write the tank's LP into (A, c, bounds, rhs) at column j0, row row0.
 
         Variables, each length n unless noted: duty D in [0, 1], temperature
@@ -4614,12 +4681,14 @@ class DWCoordinator:
         A[term, UT] = -1.0
         rhs[term] = cfg.t_comfort
 
-        def decode(x):
+        def decode(x: np.ndarray) -> Column:
             traj = np.concatenate([[cfg.t_comfort], x[T:T + n]])
             return Column(P * x[D:D + n], traj, self.private_cost(Device("water_heater", "water_heater", cfg), traj), "lp")
         return 4 * n + 2, 2 * n + 1, decode
 
-    def solve_master(self, integer: bool = False, time_limit: float = 30.0, node_limit: int = 150):
+    def solve_master(self, integer: bool = False, time_limit: float = 30.0,
+                     node_limit: int = 150) -> tuple[
+            float, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Column]]:
         """Returns (value, column weights, meter duals, convexity duals, battery plans)."""
         n, devs, dt = self.n, self.devices, self.dt
         n_meter = len(self.meter_blocks) * n
@@ -4686,7 +4755,7 @@ class DWCoordinator:
                     for _, b in self.lp_batts)
         lam_sl = slice(n_meter, n_meter + n_cols)
 
-        def batt_plans(x):
+        def batt_plans(x: np.ndarray) -> dict[str, Column]:
             out = {}
             for key, b, C0, E0, S0 in batt_cols:
                 s0 = b.capacity_kwh * b.soc_initial_frac
@@ -4724,7 +4793,8 @@ class DWCoordinator:
             j += len(dev.columns)
         return out
 
-    def snapshot(self, weights, pi, bplans) -> dict:
+    def snapshot(self, weights: dict[str, np.ndarray], pi: np.ndarray | None,
+                 bplans: dict[str, Column]) -> dict:
         """What one master solve looks like, for plotting: the convex mix of
         each DW device's plans (a mix of temperature trajectories is shown as
         the same mix - an approximation for a non-linear device), the battery
@@ -4884,7 +4954,8 @@ class DWCoordinator:
         return (self.evaluate({k: c.power for k, c in plan.items()}, {k: c.trajectory for k, c in plan.items()})
                 + self.participants_cost(plan))
 
-    def recover(self, integer: str, weights=None, bplans=None, time_limit: float = 30.0,
+    def recover(self, integer: str, weights: dict[str, np.ndarray] | None = None,
+                bplans: dict[str, Column] | None = None, time_limit: float = 30.0,
                 node_limit: int = 150) -> dict[str, Column]:
         """One implementable plan per device from the CURRENT pool.
 
@@ -4893,7 +4964,7 @@ class DWCoordinator:
         same solve. maxweight: each device's heaviest column in `weights`
         (the relaxed master's), batteries as the master left them.
         """
-        def pick(dev, w):
+        def pick(dev: Device, w: np.ndarray) -> Column:
             if dev.modulating and np.sum(w > 1e-6) > 1:
                 return self.blend_plan(dev, w)
             runnable = np.array([wi if c.runnable else -1.0 for wi, c in zip(w, dev.columns)])
@@ -5018,7 +5089,8 @@ class DWCoordinator:
             if added == 0:
                 break
 
-    def extra_price_points(self, pi: np.ndarray, center, it: int) -> list[np.ndarray]:
+    def extra_price_points(self, pi: np.ndarray, center: np.ndarray | None,
+                           it: int) -> list[np.ndarray]:
         """Further meter prices to ask every device at, this iteration.
 
         None by default. Any price is a valid question - the answer is a
@@ -5050,7 +5122,8 @@ class DWCoordinator:
                                       # picks and re-price the modulating ones this many more
                                       # iterations (0: no dive). Their pools were built against a
                                       # fractional mix of the on/off plans, which cannot run.
-        progress=None,                # progress(it, max_iter) as each iteration starts, then
+        progress: Callable[..., None] | None = None,
+                                      # progress(it, max_iter) as each iteration starts, then
                                       # progress(it, max_iter, blend, bound, best runnable) as it ends
                                       # (None where not known yet); (-1, max_iter) when finishing
     ) -> DWResult:
@@ -5314,7 +5387,7 @@ def baseline_objective(cfg: SiteConfig, fc: Forecasts) -> float:
 
 def dw_coordinate(cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,
                   tank_in_master: bool = False, solver: str = "numpy",
-                  ev_duty_cycle: bool = False, **kw) -> DWResult:
+                  ev_duty_cycle: bool = False, **kw: Any) -> DWResult:
     return DWCoordinator(cfg, fc, battery_in_master=battery_in_master,
                          tank_in_master=tank_in_master, solver=solver,
                          ev_duty_cycle=ev_duty_cycle).run(**kw)
@@ -5348,7 +5421,8 @@ def _meter_cost(co: DWCoordinator, z: np.ndarray) -> np.ndarray:
     return _tariff_cost(co, zc)
 
 
-def _path_prices(co, start: np.ndarray, end: np.ndarray, cost) -> np.ndarray:
+def _path_prices(co: DWCoordinator, start: np.ndarray, end: np.ndarray,
+                 cost: Callable[[DWCoordinator, np.ndarray], np.ndarray]) -> np.ndarray:
     """Average slope of the grid cost `cost(co, z)` along the straight path start -> end,
     per slot (currency per kW-slot).
 
@@ -5370,7 +5444,7 @@ def _participant(co: DWCoordinator, key: str) -> Device | None:
     return next((d for d in co.devices if d.key == key and d.kind == "participant"), None)
 
 
-def _entry(e) -> tuple[np.ndarray, np.ndarray, float | None]:
+def _entry(e: Column | tuple) -> tuple[np.ndarray, np.ndarray, float | None]:
     """A plan entry as (power kW, state trajectory, private cost or None).
     Accepts a coordinator Column or a (power, trajectory[, cost]) tuple."""
     if hasattr(e, "power"):
@@ -5513,7 +5587,7 @@ def ledger(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]],
 # src/home_energy_optimizer/dw/webapi.py
 # ========================================================================
 
-def _dark(fc):
+def _dark(fc: Forecasts) -> Forecasts:
     """The same forecasts with no PV: the devices' plan before solar arrives,
     which the ledger needs (src/home_energy_optimizer/dw/attribution.py)."""
     return replace(fc, solar=np.zeros_like(fc.solar))
@@ -5525,7 +5599,8 @@ def _dark(fc):
 _LEDGER: dict = {}
 
 
-def _defer_ledger(co, plan, dark) -> None:
+def _defer_ledger(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]],
+                  dark: Callable[[], tuple[DWCoordinator, dict[str, tuple[np.ndarray, np.ndarray]]]]) -> None:
     """Remember how to build the last solve's ledger. `dark()` returns the
     no-PV coordinator and its plan."""
     _LEDGER.clear()
@@ -5541,18 +5616,19 @@ def ledger_route(p: dict) -> dict:
     return {"ledger": _LEDGER["result"]}
 
 
-def _ledger_json(co, plan, co_dark, plan_dark) -> dict:
+def _ledger_json(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]], co_dark: DWCoordinator,
+                 plan_dark: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict:
     """Who saves what (src/home_energy_optimizer/dw/attribution.py), rounded for the page."""
     L = ledger(co, plan, co_dark, plan_dark)
     return {"rows": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()} for r in L["rows"]],
             "totals": {k: round(v, 4) for k, v in L["totals"].items()}}
 
 
-def _series(x) -> list[float]:
+def _series(x: npt.ArrayLike) -> list[float]:
     return [round(float(v), 5) for v in np.asarray(x).ravel()]
 
 
-def _view(co: DWCoordinator, fc, snap: dict, batt_keys: list[str]) -> dict:
+def _view(co: DWCoordinator, fc: Forecasts, snap: dict, batt_keys: list[str]) -> dict:
     """One plottable plan: a master snapshot, or the recovered plan."""
     net = co.d.copy()
     for p in snap["powers"].values():
@@ -5596,7 +5672,7 @@ def _view(co: DWCoordinator, fc, snap: dict, batt_keys: list[str]) -> dict:
     return view
 
 
-def apply_edits(fc, horizon, p: dict):
+def apply_edits(fc: Forecasts, horizon: Horizon, p: dict) -> Forecasts:
     """Replace the preset prices / load with the ones dragged in the UI.
 
     The UI edits one point per hour (`buy_h`, `sell_h`, `load_h`, `draw_h`, at hours
@@ -5605,7 +5681,7 @@ def apply_edits(fc, horizon, p: dict):
     only convex then - and load at or above zero.
     """
     xs = np.arange(horizon.steps) * horizon.dt
-    def expand(key):
+    def expand(key: str) -> np.ndarray | None:
         v = p.get(key)
         if not v:
             return None
@@ -5634,7 +5710,7 @@ def apply_band(site: SiteConfig, p: dict) -> SiteConfig:
     if hv is None or not (p.get("room_low_h") or p.get("room_high_h")):
         return site
     xs = np.arange(site.horizon.steps + 1) * site.horizon.dt
-    def expand(key, flat):
+    def expand(key: str, flat: float) -> np.ndarray:
         v = p.get(key)
         return np.full(xs.size, flat) if not v else np.interp(xs, np.arange(len(v)), np.asarray(v, dtype=float))
     low, high = expand("room_low_h", hv.t_comfort_low), expand("room_high_h", hv.t_comfort_high)
@@ -5666,7 +5742,7 @@ def progress(p: dict) -> dict:
     return {"progress": _PROGRESS.get(str(p.get("id", "")))}
 
 
-def _site_fc(p: dict):
+def _site_fc(p: dict) -> tuple[SiteConfig, Forecasts, bool]:
     """The site and forecasts both methods solve, from the UI's settings."""
     # The master values stored energy linearly; the quadratic POC terminal has
     # no place in an LP, so it is not offered here.
@@ -5692,7 +5768,7 @@ def _site_fc(p: dict):
     return value_stored_energy(site, fc), fc, tank_lp
 
 
-def value_stored_energy(site: SiteConfig, fc) -> SiteConfig:
+def value_stored_energy(site: SiteConfig, fc: Forecasts) -> SiteConfig:
     """Value a kWh left in a battery at the end at the horizon's AVERAGE import
     price, in the plan and in the ledger alike. The library default, the
     cheapest import price, is a floor on that energy's worth; on this page it
@@ -5704,12 +5780,12 @@ def value_stored_energy(site: SiteConfig, fc) -> SiteConfig:
                    batteries=tuple(replace(b, terminal_price=price) for b in site.batteries))
 
 
-def solve(p: dict, progress=None) -> dict:
+def solve(p: dict, progress: Callable[..., None] | None = None) -> dict:
     if p.get("method") == "admm":
         return solve_admm(p, progress)
     site, fc, tank_lp = _site_fc(p)
 
-    def coordinator(fc):
+    def coordinator(fc: Forecasts) -> DWCoordinator:
         return DWCoordinator(site, fc, battery_in_master=bool(p.get("battery_in_master", True)),
                              tank_in_master=tank_lp and site.water_heater is not None,
                              solver=p.get("solver", "numpy"))
@@ -5727,7 +5803,7 @@ def solve(p: dict, progress=None) -> dict:
     )
     r = co.run(**settings, record=True, anytime=True, progress=_reporter(p, progress))
 
-    def dark():
+    def dark() -> tuple[DWCoordinator, dict[str, tuple[np.ndarray, np.ndarray]]]:
         co_dark = coordinator(_dark(fc))
         r_dark = co_dark.run(**settings, anytime=True)
         return co_dark, {k: (c.power, c.trajectory) for k, c in r_dark.plan.items()}
@@ -5827,7 +5903,8 @@ def solve(p: dict, progress=None) -> dict:
     }
 
 
-def _reporter(p: dict, progress):
+def _reporter(p: dict, progress: Callable[..., None] | None
+              ) -> Callable[..., None] | None:
     """One callback for both transports: the caller's (the browser worker's)
     and the polled table (the server's), whichever are present."""
     pid = p.get("_progress_id")
@@ -5836,7 +5913,7 @@ def _reporter(p: dict, progress):
 
     last: list = []
 
-    def report(it: int, n: int, *metrics) -> None:
+    def report(it: int, n: int, *metrics: float | None) -> None:
         # metrics come when an iteration ends (blend, bound, best runnable);
         # the call as the next one starts carries none, and must not wipe the
         # last ones from what a poll between the two sees
@@ -5849,7 +5926,7 @@ def _reporter(p: dict, progress):
     return report
 
 
-def solve_admm(p: dict, progress=None) -> dict:
+def solve_admm(p: dict, progress: Callable[..., None] | None = None) -> dict:
     """The same view of the same site, planned by ADMM instead (proximal
     message passing, admm.coordinator).
 
@@ -5910,18 +5987,19 @@ def solve_admm(p: dict, progress=None) -> dict:
     solve_ms = run.seconds * 1000
     co = DWCoordinator(site, fc)           # for the shared plan view and scoring only
 
-    def dark():
+    def dark() -> tuple[DWCoordinator, dict[str, tuple[np.ndarray, np.ndarray]]]:
         res_dark = coordinate(site, _dark(fc))
         return (DWCoordinator(site, _dark(fc)),
                 {k: (d.power, d.trajectory) for k, d in res_dark.devices.items()})
     _defer_ledger(co, {k: (d.power, d.trajectory) for k, d in res.devices.items()}, dark)
     batt_keys = [SiteConfig.battery_key(i) for i in range(len(site.battery_list))]
 
-    def snap_of(powers, trajs, lam=None):
+    def snap_of(powers: dict[str, np.ndarray], trajs: dict[str, np.ndarray],
+                lam: dict | None = None) -> dict:
         return {"powers": powers, "trajectories": trajs, "price": None,
                 "lambda": lam or {}, "active": {}}
 
-    def parts(powers, trajs):
+    def parts(powers: dict[str, np.ndarray], trajs: dict[str, np.ndarray]) -> dict:
         return co.parts({k: Column(powers[k], trajs[k], 0.0, "admm") for k in powers})
 
     powers = {k: d.power for k, d in res.devices.items()}
@@ -5991,7 +6069,8 @@ def solve_admm(p: dict, progress=None) -> dict:
 ROUTES = {"solve": solve, "progress": progress, "ledger": ledger_route}
 
 
-def call(name: str, payload: dict, progress=None) -> dict:
+def call(name: str, payload: dict,
+         progress: Callable[..., None] | None = None) -> dict:
     fn = ROUTES.get(name)
     if fn is None:
         return {"error": f"unknown route {name!r}"}

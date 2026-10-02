@@ -11,19 +11,21 @@ Everything returned is JSON-safe (lists and floats, no numpy).
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import replace
 
 import numpy as np
+import numpy.typing as npt
 
 from home_energy_optimizer.dw.attribution import ledger
 from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, baseline_objective
 from home_energy_optimizer.coordinate import apply_curtailment, baseline_solution, net_cost
 from home_energy_optimizer.profiles import demo_forecasts
-from home_energy_optimizer.types import SiteConfig
+from home_energy_optimizer.types import Forecasts, Horizon, SiteConfig
 from home_energy_optimizer.admm.webapi import build_site
 
 
-def _dark(fc):
+def _dark(fc: Forecasts) -> Forecasts:
     """The same forecasts with no PV: the devices' plan before solar arrives,
     which the ledger needs (src/home_energy_optimizer/dw/attribution.py)."""
     return replace(fc, solar=np.zeros_like(fc.solar))
@@ -35,7 +37,8 @@ def _dark(fc):
 _LEDGER: dict = {}
 
 
-def _defer_ledger(co, plan, dark) -> None:
+def _defer_ledger(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]],
+                  dark: Callable[[], tuple[DWCoordinator, dict[str, tuple[np.ndarray, np.ndarray]]]]) -> None:
     """Remember how to build the last solve's ledger. `dark()` returns the
     no-PV coordinator and its plan."""
     _LEDGER.clear()
@@ -51,18 +54,19 @@ def ledger_route(p: dict) -> dict:
     return {"ledger": _LEDGER["result"]}
 
 
-def _ledger_json(co, plan, co_dark, plan_dark) -> dict:
+def _ledger_json(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]], co_dark: DWCoordinator,
+                 plan_dark: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict:
     """Who saves what (src/home_energy_optimizer/dw/attribution.py), rounded for the page."""
     L = ledger(co, plan, co_dark, plan_dark)
     return {"rows": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()} for r in L["rows"]],
             "totals": {k: round(v, 4) for k, v in L["totals"].items()}}
 
 
-def _series(x) -> list[float]:
+def _series(x: npt.ArrayLike) -> list[float]:
     return [round(float(v), 5) for v in np.asarray(x).ravel()]
 
 
-def _view(co: DWCoordinator, fc, snap: dict, batt_keys: list[str]) -> dict:
+def _view(co: DWCoordinator, fc: Forecasts, snap: dict, batt_keys: list[str]) -> dict:
     """One plottable plan: a master snapshot, or the recovered plan."""
     net = co.d.copy()
     for p in snap["powers"].values():
@@ -106,7 +110,7 @@ def _view(co: DWCoordinator, fc, snap: dict, batt_keys: list[str]) -> dict:
     return view
 
 
-def apply_edits(fc, horizon, p: dict):
+def apply_edits(fc: Forecasts, horizon: Horizon, p: dict) -> Forecasts:
     """Replace the preset prices / load with the ones dragged in the UI.
 
     The UI edits one point per hour (`buy_h`, `sell_h`, `load_h`, `draw_h`, at hours
@@ -115,7 +119,7 @@ def apply_edits(fc, horizon, p: dict):
     only convex then - and load at or above zero.
     """
     xs = np.arange(horizon.steps) * horizon.dt
-    def expand(key):
+    def expand(key: str) -> np.ndarray | None:
         v = p.get(key)
         if not v:
             return None
@@ -144,7 +148,7 @@ def apply_band(site: SiteConfig, p: dict) -> SiteConfig:
     if hv is None or not (p.get("room_low_h") or p.get("room_high_h")):
         return site
     xs = np.arange(site.horizon.steps + 1) * site.horizon.dt
-    def expand(key, flat):
+    def expand(key: str, flat: float) -> np.ndarray:
         v = p.get(key)
         return np.full(xs.size, flat) if not v else np.interp(xs, np.arange(len(v)), np.asarray(v, dtype=float))
     low, high = expand("room_low_h", hv.t_comfort_low), expand("room_high_h", hv.t_comfort_high)
@@ -176,7 +180,7 @@ def progress(p: dict) -> dict:
     return {"progress": _PROGRESS.get(str(p.get("id", "")))}
 
 
-def _site_fc(p: dict):
+def _site_fc(p: dict) -> tuple[SiteConfig, Forecasts, bool]:
     """The site and forecasts both methods solve, from the UI's settings."""
     # The master values stored energy linearly; the quadratic POC terminal has
     # no place in an LP, so it is not offered here.
@@ -202,7 +206,7 @@ def _site_fc(p: dict):
     return value_stored_energy(site, fc), fc, tank_lp
 
 
-def value_stored_energy(site: SiteConfig, fc) -> SiteConfig:
+def value_stored_energy(site: SiteConfig, fc: Forecasts) -> SiteConfig:
     """Value a kWh left in a battery at the end at the horizon's AVERAGE import
     price, in the plan and in the ledger alike. The library default, the
     cheapest import price, is a floor on that energy's worth; on this page it
@@ -214,12 +218,12 @@ def value_stored_energy(site: SiteConfig, fc) -> SiteConfig:
                    batteries=tuple(replace(b, terminal_price=price) for b in site.batteries))
 
 
-def solve(p: dict, progress=None) -> dict:
+def solve(p: dict, progress: Callable[..., None] | None = None) -> dict:
     if p.get("method") == "admm":
         return solve_admm(p, progress)
     site, fc, tank_lp = _site_fc(p)
 
-    def coordinator(fc):
+    def coordinator(fc: Forecasts) -> DWCoordinator:
         return DWCoordinator(site, fc, battery_in_master=bool(p.get("battery_in_master", True)),
                              tank_in_master=tank_lp and site.water_heater is not None,
                              solver=p.get("solver", "numpy"))
@@ -237,7 +241,7 @@ def solve(p: dict, progress=None) -> dict:
     )
     r = co.run(**settings, record=True, anytime=True, progress=_reporter(p, progress))
 
-    def dark():
+    def dark() -> tuple[DWCoordinator, dict[str, tuple[np.ndarray, np.ndarray]]]:
         co_dark = coordinator(_dark(fc))
         r_dark = co_dark.run(**settings, anytime=True)
         return co_dark, {k: (c.power, c.trajectory) for k, c in r_dark.plan.items()}
@@ -337,7 +341,8 @@ def solve(p: dict, progress=None) -> dict:
     }
 
 
-def _reporter(p: dict, progress):
+def _reporter(p: dict, progress: Callable[..., None] | None
+              ) -> Callable[..., None] | None:
     """One callback for both transports: the caller's (the browser worker's)
     and the polled table (the server's), whichever are present."""
     pid = p.get("_progress_id")
@@ -346,7 +351,7 @@ def _reporter(p: dict, progress):
 
     last: list = []
 
-    def report(it: int, n: int, *metrics) -> None:
+    def report(it: int, n: int, *metrics: float | None) -> None:
         # metrics come when an iteration ends (blend, bound, best runnable);
         # the call as the next one starts carries none, and must not wipe the
         # last ones from what a poll between the two sees
@@ -359,7 +364,7 @@ def _reporter(p: dict, progress):
     return report
 
 
-def solve_admm(p: dict, progress=None) -> dict:
+def solve_admm(p: dict, progress: Callable[..., None] | None = None) -> dict:
     """The same view of the same site, planned by ADMM instead (proximal
     message passing, admm.coordinator).
 
@@ -420,18 +425,19 @@ def solve_admm(p: dict, progress=None) -> dict:
     solve_ms = run.seconds * 1000
     co = DWCoordinator(site, fc)           # for the shared plan view and scoring only
 
-    def dark():
+    def dark() -> tuple[DWCoordinator, dict[str, tuple[np.ndarray, np.ndarray]]]:
         res_dark = coordinate(site, _dark(fc))
         return (DWCoordinator(site, _dark(fc)),
                 {k: (d.power, d.trajectory) for k, d in res_dark.devices.items()})
     _defer_ledger(co, {k: (d.power, d.trajectory) for k, d in res.devices.items()}, dark)
     batt_keys = [SiteConfig.battery_key(i) for i in range(len(site.battery_list))]
 
-    def snap_of(powers, trajs, lam=None):
+    def snap_of(powers: dict[str, np.ndarray], trajs: dict[str, np.ndarray],
+                lam: dict | None = None) -> dict:
         return {"powers": powers, "trajectories": trajs, "price": None,
                 "lambda": lam or {}, "active": {}}
 
-    def parts(powers, trajs):
+    def parts(powers: dict[str, np.ndarray], trajs: dict[str, np.ndarray]) -> dict:
         return co.parts({k: Column(powers[k], trajs[k], 0.0, "admm") for k in powers})
 
     powers = {k: d.power for k, d in res.devices.items()}
@@ -501,7 +507,8 @@ def solve_admm(p: dict, progress=None) -> dict:
 ROUTES = {"solve": solve, "progress": progress, "ledger": ledger_route}
 
 
-def call(name: str, payload: dict, progress=None) -> dict:
+def call(name: str, payload: dict,
+         progress: Callable[..., None] | None = None) -> dict:
     fn = ROUTES.get(name)
     if fn is None:
         return {"error": f"unknown route {name!r}"}

@@ -45,12 +45,15 @@ from __future__ import annotations
 import os
 from collections import Counter
 from dataclasses import replace
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from .planner import METHODS, plan
 from .types import (
     BatteryConfig,
+    CoordinationResult,
     Forecasts,
     GridLimits,
     Horizon,
@@ -70,7 +73,7 @@ class ContractError(ValueError):
 # --------------------------------------------------------------------------
 
 
-def _require(d: dict, key: str):
+def _require(d: dict, key: str) -> Any:
     if key not in d:
         raise ContractError(f"missing required field {key!r}")
     return d[key]
@@ -105,7 +108,7 @@ def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
     horizon, dt_h, uniform = horizon_from_dt(dt_seconds)
     n = horizon.steps
 
-    def energy_wh_to_kw(values, name: str) -> np.ndarray:
+    def energy_wh_to_kw(values: npt.ArrayLike, name: str) -> np.ndarray:
         arr = np.asarray(values, dtype=float).ravel()
         if arr.size != n:
             raise ContractError(f"time_series.{name} has {arr.size} entries, expected {n}")
@@ -114,7 +117,7 @@ def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
         secs = np.array(dt_seconds, dtype=float)
         return arr / W_PER_KW / (secs / SECONDS_PER_HOUR)
 
-    def price_per_wh_to_kwh(values, name: str) -> np.ndarray:
+    def price_per_wh_to_kwh(values: npt.ArrayLike, name: str) -> np.ndarray:
         arr = np.asarray(values, dtype=float).ravel()
         if arr.size != n:
             raise ContractError(f"time_series.{name} has {arr.size} entries, expected {n}")
@@ -259,13 +262,14 @@ def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
 # --------------------------------------------------------------------------
 
 
-def result_to_response(site: SiteConfig, fc: Forecasts, res, meta: dict) -> dict:
+def result_to_response(site: SiteConfig, fc: Forecasts, res: CoordinationResult,
+                       meta: dict) -> dict:
     """Translate a CoordinationResult into evcc's `OptimizationResult`."""
     dt_seconds = np.array(meta["dt_seconds"], dtype=float)
     slot_h = dt_seconds / SECONDS_PER_HOUR
     n = site.horizon.steps
 
-    def series(a) -> list[float]:
+    def series(a: npt.ArrayLike) -> list[float]:
         return [round(float(v), 4) for v in np.asarray(a).ravel()]
 
     # One BatteryResult per requested battery, in the order they were sent -

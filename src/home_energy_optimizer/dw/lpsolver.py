@@ -23,9 +23,11 @@ only dense object is the (rows x rows) matrix that gets a Cholesky.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
 
 
 class Triplets:
@@ -35,18 +37,20 @@ class Triplets:
     assignment patterns the master builder uses - and records entries.
     """
 
-    def __init__(self, shape: tuple[int, int]):
+    def __init__(self, shape: tuple[int, int]) -> None:
         self.shape = shape
         self._r: list[np.ndarray] = []
         self._c: list[np.ndarray] = []
         self._v: list[np.ndarray] = []
 
-    def _idx(self, k, size):
+    def _idx(self, k: int | slice | npt.ArrayLike, size: int) -> np.ndarray:
         if isinstance(k, slice):
             return np.arange(size)[k]
         return np.atleast_1d(np.asarray(k, dtype=int))
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: tuple[int | slice | npt.ArrayLike,
+                                    int | slice | npt.ArrayLike],
+                    value: npt.ArrayLike) -> None:
         r, c = key
         r = self._idx(r, self.shape[0])
         c = self._idx(c, self.shape[1])
@@ -59,7 +63,7 @@ class Triplets:
         keep = v != 0.0
         self._r.append(r[keep]); self._c.append(c[keep]); self._v.append(v[keep])
 
-    def coo(self):
+    def coo(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self._r:
             return np.zeros(0, int), np.zeros(0, int), np.zeros(0)
         return np.concatenate(self._r), np.concatenate(self._c), np.concatenate(self._v)
@@ -86,7 +90,8 @@ class _NormalEquations:
     dense factorisation for a 6-battery, 48 h master.
     """
 
-    def __init__(self, m, n, rows, cols, vals, border: int = 0):
+    def __init__(self, m: int, n: int, rows: np.ndarray, cols: np.ndarray,
+                 vals: np.ndarray, border: int = 0) -> None:
         self.m, self.n = m, n
         nnz = np.bincount(cols, minlength=n)
         dense_cols = np.where(nnz > 3)[0]          # the plan columns
@@ -124,11 +129,12 @@ class _NormalEquations:
         self.blocks = self._blocks(m, border, rows, cols, is_dense) if border else None
 
     @staticmethod
-    def _blocks(m, border, rows, cols, is_dense):
+    def _blocks(m: int, border: int, rows: np.ndarray, cols: np.ndarray,
+                is_dense: np.ndarray) -> list[np.ndarray] | None:
         """Connected groups of non-border rows (rows sharing a column)."""
         parent = np.arange(m)
 
-        def find(i):
+        def find(i: int) -> int:
             while parent[i] != i:
                 parent[i] = parent[parent[i]]
                 i = parent[i]
@@ -146,7 +152,7 @@ class _NormalEquations:
         roots = np.array([find(i) for i in range(border, m)])
         return [np.arange(border, m)[roots == rt] for rt in np.unique(roots)] or None
 
-    def matrix(self, d):
+    def matrix(self, d: np.ndarray) -> np.ndarray:
         M = np.bincount(self.flat, weights=self.pv * d[self.pc],
                         minlength=self.m * self.m).astype(float).reshape(self.m, self.m)
         if self.dense_cols.size:
@@ -154,10 +160,10 @@ class _NormalEquations:
             M += (Ad * d[self.dense_cols]) @ Ad.T
         return M
 
-    def Ax(self, x):
+    def Ax(self, x: np.ndarray) -> np.ndarray:
         return np.bincount(self.rows, weights=self.vals * x[self.cols], minlength=self.m).astype(float)
 
-    def ATy(self, y):
+    def ATy(self, y: np.ndarray) -> np.ndarray:
         return np.bincount(self.cols, weights=self.vals * y[self.rows], minlength=self.n).astype(float)
 
 
@@ -170,8 +176,8 @@ class _NormalEquations:
 ACCEPT = 1e-4
 
 
-def linprog(c, A: Triplets, b, lb, ub, tol: float = 1e-8, max_iter: int = 100,
-            border: int = 0) -> LPResult:
+def linprog(c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray, ub: np.ndarray,
+            tol: float = 1e-8, max_iter: int = 100, border: int = 0) -> LPResult:
     """min c.x  s.t.  A x = b,  lb <= x <= ub.  lb must be finite; ub may be inf.
 
     Variables with ub == lb (curtailment at night, plans excluded from a
@@ -197,7 +203,7 @@ def linprog(c, A: Triplets, b, lb, ub, tol: float = 1e-8, max_iter: int = 100,
     return _solve(c, rows, cols, vals, m, n_all, b, lb, ub, tol, max_iter, border)
 
 
-def _factor(M, ne):
+def _factor(M: np.ndarray, ne: _NormalEquations) -> Callable[[np.ndarray], np.ndarray]:
     """A solve(r) for M r' = r: block-arrow elimination when the structure is
     there, a dense Cholesky otherwise."""
     M[np.diag_indices_from(M)] += 1e-12 * max(1.0, np.abs(np.diag(M)).max())
@@ -216,7 +222,7 @@ def _factor(M, ne):
         facts.append((P, Li, MPB, Y))
     SLi = np.linalg.inv(np.linalg.cholesky(S))
 
-    def solve(r):
+    def solve(r: np.ndarray) -> np.ndarray:
         rB = r[B].copy()
         ts = []
         for P, Li, MPB, _Y in facts:
@@ -232,7 +238,9 @@ def _factor(M, ne):
     return solve
 
 
-def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0) -> LPResult:
+def _solve(c: np.ndarray, rows: np.ndarray, cols: np.ndarray, vals: np.ndarray, m: int,
+           n: int, b: np.ndarray, lb: np.ndarray, ub: np.ndarray, tol: float,
+           max_iter: int, border: int = 0) -> LPResult:
     ne = _NormalEquations(m, n, rows, cols, vals, border)
 
     # shift to 0 <= x <= u
@@ -249,7 +257,7 @@ def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0)
     y = np.zeros(m)
     bn, cn = 1.0 + np.linalg.norm(b0), 1.0 + np.linalg.norm(c)
 
-    def full(vU):
+    def full(vU: np.ndarray) -> np.ndarray:
         out = np.zeros(n); out[U] = vU; return out
 
     status, it, msg = 1, 0, "iteration limit"
@@ -294,7 +302,8 @@ def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0)
             Mi = np.linalg.pinv(M)
             solve = lambda r: Mi @ r  # noqa: E731
 
-        def direction(rxz, rws):
+        def direction(rxz: np.ndarray, rws: np.ndarray) -> tuple[
+                np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             rhat = rc - rxz / x + full((rws - s * ru) / w)
             r_dy = rb + ne.Ax(D * rhat)
             dy = solve(r_dy)
@@ -306,7 +315,7 @@ def _solve(c, rows, cols, vals, m, n, b, lb, ub, tol, max_iter, border: int = 0)
             ds = (rws - s * dw) / w
             return dx, dy, dz, dw, ds
 
-        def step(v, dv):
+        def step(v: np.ndarray, dv: np.ndarray) -> float:
             neg = dv < 0
             return min(1.0, float(np.min(-v[neg] / dv[neg]))) if neg.any() else 1.0
 
@@ -341,7 +350,8 @@ class ChoiceResult:
     optimal: bool
 
 
-def choose_one(c, A: Triplets, b, lb, ub, groups: list[np.ndarray],
+def choose_one(c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray, ub: np.ndarray,
+               groups: list[np.ndarray],
                time_limit: float = 30.0, node_limit: int = 500, border: int = 0) -> ChoiceResult:
     """min c.x  s.t. A x = b, bounds, and within each group exactly one
     variable at 1, the rest at 0 (the group's convexity row is in A).

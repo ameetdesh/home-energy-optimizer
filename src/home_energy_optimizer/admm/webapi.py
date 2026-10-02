@@ -14,8 +14,10 @@ numpy arrays escape, because the browser side has to hand them to
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 
 import numpy as np
+import numpy.typing as npt
 
 from home_energy_optimizer.coordinate import (
     _pricing_resolve,
@@ -42,6 +44,7 @@ from home_energy_optimizer.types import (
     GridLimits,
     Horizon,
     HvacConfig,
+    RoundRecord,
     SiteConfig,
     WaterHeaterConfig,
 )
@@ -107,11 +110,12 @@ def build_site(p: dict) -> SiteConfig:
     )
 
 
-def _series(x) -> list[float]:
+def _series(x: npt.ArrayLike) -> list[float]:
     return [round(float(v), 5) for v in np.asarray(x).ravel()]
 
 
-def _price_curve(site: SiteConfig, fc: Forecasts, res, soe) -> dict:
+def _price_curve(site: SiteConfig, fc: Forecasts, res: CoordinationResult,
+                 soe: Sequence[float] | np.ndarray) -> dict:
     """lambda and the reservation band along a state-of-energy trajectory.
 
     Split out because a coordination round needs exactly the same thing,
@@ -129,7 +133,7 @@ def _price_curve(site: SiteConfig, fc: Forecasts, res, soe) -> dict:
     }
 
 
-def _round_result(res, rec):
+def _round_result(res: CoordinationResult, rec: RoundRecord) -> CoordinationResult:
     """A CoordinationResult standing in for one round, for pricing purposes.
 
     Only the fields PolicySnapshot.from_result reads are populated. The value
@@ -149,7 +153,8 @@ def _round_result(res, rec):
     )
 
 
-def _rounds_payload(res, dt: float, site, fc) -> list[dict]:
+def _rounds_payload(res: CoordinationResult, dt: float, site: SiteConfig,
+                    fc: Forecasts) -> list[dict]:
     """Every round's plan, in the same shape the top-level payload uses.
 
     The charts read these directly, so a round swap is a redraw rather than a
