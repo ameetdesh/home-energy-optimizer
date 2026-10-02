@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import numpy.typing as npt
 
 from ._kernels import kernel_battery
 from .interp import interp_grid
@@ -65,7 +66,7 @@ def terminal_value(cfg: BatteryConfig, S: np.ndarray, buy: np.ndarray) -> np.nda
     return -cfg.terminal_weight * (S - target) ** 2 / cfg.capacity_kwh
 
 
-def _per_slot(values, n: int, name: str) -> np.ndarray | None:
+def _per_slot(values: npt.ArrayLike | None, n: int, name: str) -> np.ndarray | None:
     """Normalise an optional per-slot array, padding or trimming to n."""
     if values is None:
         return None

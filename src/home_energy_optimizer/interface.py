@@ -19,6 +19,7 @@ from importlib import resources
 from typing import Protocol, runtime_checkable
 
 import numpy as np
+import numpy.typing as npt
 
 SCHEMA_VERSION = 1
 KINDS = ("price_response", "best_response", "proximal")
@@ -89,7 +90,7 @@ class Participant(Protocol):
 
 
 # --------------------------------------------------------------------- JSON
-def _series(x) -> list[float] | None:
+def _series(x: npt.ArrayLike | None) -> list[float] | None:
     """An array (or None) as a flat list of floats for JSON (or None)."""
     return None if x is None else [float(v) for v in np.asarray(x, dtype=float).ravel()]
 

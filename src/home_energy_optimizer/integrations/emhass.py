@@ -27,13 +27,16 @@ from __future__ import annotations
 
 import copy
 import time
+from collections.abc import Sequence
 from dataclasses import fields, replace
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 
 from home_energy_optimizer.coordinate import apply_curtailment
 from home_energy_optimizer.dw.attribution import ledger
-from home_energy_optimizer.dw.coordinator import DWCoordinator
+from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult
 from home_energy_optimizer.interface import Answer, Query
 from home_energy_optimizer.types import (
     BatteryConfig,
@@ -44,6 +47,11 @@ from home_energy_optimizer.types import (
     SiteConfig,
     WaterHeaterConfig,
 )
+
+if TYPE_CHECKING:  # pandas arrives with EMHASS; this package does not require it
+    import pandas as pd
+
+_CfgT = TypeVar("_CfgT")
 
 PACKAGE = "home_energy_optimizer"
 # DWCoordinator.run settings. A participant answered by a black-box model gives
@@ -64,7 +72,7 @@ RUNTIME_UNSUPPORTED = ("soc_target", "soc_target_timestep", "current_period_peak
 RUNTIME_IGNORED = ("debug", "stage_times")
 
 
-def _per_load_keys():
+def _per_load_keys() -> set[str]:
     """The optim_conf keys that hold one entry per deferrable load, so are cut
     to a participant's loads (EMHASS's own list, plus a few it handles apart)."""
     from emhass.utils import DEF_LOAD_ARRAY_PARAMS
@@ -143,8 +151,9 @@ class EmhassParticipant:
     flow the house can make.
     """
 
-    def __init__(self, opt, key: str, battery: bool, loads: list[int], data_opt, soc_init, soc_final, runtime: dict,
-                 buy: np.ndarray, reach_w: float = 1e5):
+    def __init__(self, opt: Any, key: str, battery: bool, loads: list[int],
+                 data_opt: pd.DataFrame, soc_init: float | None, soc_final: float | None,
+                 runtime: dict, buy: np.ndarray, reach_w: float = 1e5) -> None:
         """Build the participant's own EMHASS model: a copy of `opt`'s
         configuration with only this participant's devices enabled (the
         parameters are described on the class). Solves nothing yet; sets
@@ -211,7 +220,8 @@ class EmhassParticipant:
         self.solves, self.solve_s = 0, 0.0
         self._last: tuple | None = None   # (query key, answer): a repeated query is not re-solved
 
-    def _run(self, pv_w, load_w, buy, sell) -> Answer:
+    def _run(self, pv_w: np.ndarray, load_w: np.ndarray, buy: np.ndarray,
+             sell: np.ndarray) -> Answer:
         """Solve EMHASS's model of this participant once and read off its answer.
 
         `pv_w`, `load_w`: the PV and load (W per slot) it is metered with - zero
@@ -275,7 +285,8 @@ class EmhassParticipant:
             return self._run(np.maximum(-r, 0.0) * 1000.0, np.maximum(r, 0.0) * 1000.0, q.price_draw, q.price_supply)
         raise NotImplementedError("a proximal step needs a quadratic term EMHASS's model does not have yet")
 
-    def blend(self, weights, details):
+    def blend(self, weights: Sequence[float] | np.ndarray,
+              details: list[pd.DataFrame]) -> pd.DataFrame:
         """EMHASS's result for a mix of this participant's plans: every number
         mixed with the same weights, the rest taken from the heaviest plan."""
         out = details[int(np.argmax(weights))].copy()
@@ -309,7 +320,7 @@ def _groups(optim_conf: dict, devices: list[str]) -> list[dict]:
     return out
 
 
-def _config(cls, overrides: dict):
+def _config(cls: type[_CfgT], overrides: dict) -> _CfgT:
     """An instance of the config dataclass `cls` (e.g. WaterHeaterConfig) from
     `overrides`, ignoring keys it has no field for; the rest keep defaults."""
     names = {f.name for f in fields(cls)}
@@ -356,8 +367,10 @@ def _linear_battery(oc: dict, pc: dict) -> bool:
             and not pc.get("battery_charge_power_derating"))
 
 
-def optimize(opt, data_opt, p_pv, p_load, unit_load_cost, unit_prod_price, soc_init=None, soc_final=None,
-             **runtime):
+def optimize(opt: Any, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.ArrayLike,
+             unit_load_cost: npt.ArrayLike, unit_prod_price: npt.ArrayLike,
+             soc_init: float | None = None, soc_final: float | None = None,
+             **runtime: Any) -> pd.DataFrame | None:
     """Plan with the coordinator `opt.optim_conf["optimization_backend"]` names.
 
     Called by EMHASS's Optimization.perform_optimization with its own
@@ -496,7 +509,10 @@ def shares(co: DWCoordinator, plan: dict, co_dark: DWCoordinator, plan_dark: dic
     return {row["player"]: float(row["net_gain"]) for row in rows if row["player"] != "household load"}
 
 
-def _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site):
+def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
+             pv_w: np.ndarray, load_w: np.ndarray, buy: np.ndarray, sell_in: np.ndarray,
+             soc_init: float, devices: list[str], participants: list[EmhassParticipant],
+             site: SiteConfig) -> pd.DataFrame:
     """The coordinator's result `r` as EMHASS's opt_res: the same columns and
     units as perform_optimization returns, plus fed_* columns.
 

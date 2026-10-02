@@ -29,6 +29,7 @@ import urllib.request
 from datetime import datetime
 
 import numpy as np
+import numpy.typing as npt
 
 from .types import Horizon
 
@@ -69,7 +70,8 @@ def resample_to_horizon(
 
 
 def from_series(
-    values, horizon: Horizon, source_dt_hours: float | None = None, fill: str = "hold"
+    values: npt.ArrayLike, horizon: Horizon, source_dt_hours: float | None = None,
+    fill: str = "hold"
 ) -> np.ndarray:
     """Accept a caller-supplied forecast of any length.
 

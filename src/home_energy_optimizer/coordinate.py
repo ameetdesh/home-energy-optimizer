@@ -13,6 +13,9 @@ certifies its plans (docs/theory.tex).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from .dp_battery import solve_battery, terminal_price
@@ -29,12 +32,16 @@ from .types import (
     CoordinationResult,
     DeviceSolution,
     Forecasts,
+    GridLimits,
     SiteConfig,
 )
 
+if TYPE_CHECKING:  # admm.coordinator imports this module, so only for checkers
+    from .admm.coordinator import WarmStart
+
 
 def apply_curtailment(
-    net_raw: np.ndarray, solar: np.ndarray, sell: np.ndarray, grid
+    net_raw: np.ndarray, solar: np.ndarray, sell: np.ndarray, grid: GridLimits | None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Throw away the PV that cannot usefully leave the site.
 
@@ -71,7 +78,7 @@ def apply_curtailment(
     return net_raw + curtail, curtail
 
 
-def device_sell_price(sell: np.ndarray, grid) -> np.ndarray:
+def device_sell_price(sell: np.ndarray, grid: GridLimits | None) -> np.ndarray:
     """The export price a DEVICE should be optimising against.
 
     Curtailment is free and always available up to the PV on the roof, so a
@@ -138,7 +145,7 @@ def breach_energy(cfg: SiteConfig, net_grid: np.ndarray) -> np.ndarray:
     return over * cfg.horizon.dt
 
 
-def breach_price(grid, buy: np.ndarray, sell: np.ndarray | None = None) -> float:
+def breach_price(grid: GridLimits, buy: np.ndarray, sell: np.ndarray | None = None) -> float:
     """Currency per kWh beyond a grid limit: one constant for the horizon.
 
     `grid.breach_price` if set, else `breach_price_multiplier` times the
@@ -262,7 +269,8 @@ def baseline_solution(cfg: SiteConfig, fc: Forecasts) -> tuple[np.ndarray, float
     return net, net_cost(net, fc.buy, fc.sell, cfg.horizon.dt)
 
 
-def coordinate(cfg: SiteConfig, fc: Forecasts, progress=None, warm=None) -> CoordinationResult:
+def coordinate(cfg: SiteConfig, fc: Forecasts, progress: Callable[..., None] | None = None,
+               warm: WarmStart | None = None) -> CoordinationResult:
     """Plan a site by ADMM (admm.coordinator) and return its best plan.
 
     `progress`, if given, is called as progress(round, max_rounds) when an
@@ -287,7 +295,7 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
 
-    def objective(devices) -> tuple[float, np.ndarray, np.ndarray]:
+    def objective(devices: dict[str, DeviceSolution]) -> tuple[float, np.ndarray, np.ndarray]:
         net = fc.net_fixed_demand + sum(devices[k].power for k in dev_keys)
         net, curtail = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
         soe = {k: devices[k].trajectory for k in dev_keys if k in batt} or None

@@ -28,9 +28,12 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from .policy import (
     HardLimits,
@@ -41,6 +44,7 @@ from .policy import (
     price_signal,
     reservation_prices,
 )
+from .types import CoordinationResult, Forecasts, SiteConfig
 
 # Worst-case disagreement with both ground truths, in currency/kWh.
 # See docs/NOTES.md section 3.
@@ -82,11 +86,11 @@ class HomeAssistant:
     def set_state(
         self,
         entity_id: str,
-        state,
+        state: Any,
         unit: str | None = None,
         device_class: str | None = None,
         friendly_name: str | None = None,
-        **attributes,
+        **attributes: Any,
     ) -> dict:
         attrs = {k: v for k, v in attributes.items() if v is not None}
         if unit:
@@ -102,7 +106,7 @@ class HomeAssistant:
         )
 
 
-def _jsonable(value):
+def _jsonable(value: Any) -> Any:
     """numpy -> plain Python, recursively. HA's API rejects numpy scalars."""
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
@@ -275,7 +279,8 @@ def publish_policy(
     }
 
 
-def _slot_forecast(times, values, key: str, n: int) -> list[dict]:
+def _slot_forecast(times: Sequence[float] | np.ndarray,
+                   values: Sequence[float] | np.ndarray, key: str, n: int) -> list[dict]:
     return [
         {"hours_ahead": round(float(times[i]), 3), key: round(float(values[i]), 4)}
         for i in range(min(n, len(values)))
@@ -284,9 +289,9 @@ def _slot_forecast(times, values, key: str, n: int) -> list[dict]:
 
 def publish_site(
     ha: HomeAssistant,
-    site,
-    fc,
-    res,
+    site: SiteConfig,
+    fc: Forecasts,
+    res: CoordinationResult,
     t: int,
     prefix: str = "hems",
     forecast_slots: int = 96,
@@ -312,7 +317,9 @@ def publish_site(
     ahead = min(forecast_slots, site.horizon.steps - t)
     out: dict[str, float] = {}
 
-    def pub(name, value, unit, device_class, friendly, series=None, key="value", **attrs):
+    def pub(name: str, value: float, unit: str | None, device_class: str | None,
+            friendly: str | None, series: npt.ArrayLike | None = None,
+            key: str = "value", **attrs: Any) -> None:
         ha.set_state(
             f"sensor.{prefix}_{name}",
             round(float(value), 4),

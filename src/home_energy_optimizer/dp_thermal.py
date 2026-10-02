@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import numpy.typing as npt
 
 from ._kernels import kernel_hvac, kernel_water_heater
 from .interp import interp_uniform
@@ -23,11 +24,16 @@ from .types import DeviceSolution, Horizon, HvacConfig, WaterHeaterConfig
 
 # Action grids. Index into these with the integer stored in POL. The tank's is
 # per config (WaterHeaterConfig.duty_actions); this is the on/off default.
+# A temperature or heat flow: an array over the state grid, or one point of
+# it. numpy hands back its own scalar type for 0-d input, so it belongs here.
+_Numeric = float | np.floating | np.ndarray
+
 WATER_HEATER_ACTIONS = np.array([0.0, 1.0])  # off, on
 HVAC_ACTIONS = np.array([0.0, -1.0, 1.0])  # off, cool, heat
 
 
-def wh_discomfort(cfg: WaterHeaterConfig, temp, ref_price: float, dt: float):
+def wh_discomfort(cfg: WaterHeaterConfig, temp: _Numeric, ref_price: float,
+                  dt: float) -> np.ndarray | np.floating:
     """Cost of the tank sitting below its setpoint, in currency.
 
     Linear mode prices a kelvin-hour of shortfall at the cost of restoring it
@@ -40,7 +46,9 @@ def wh_discomfort(cfg: WaterHeaterConfig, temp, ref_price: float, dt: float):
     return cfg.comfort_weight * short**2 * dt
 
 
-def hvac_discomfort(cfg: HvacConfig, temp, ref_price: float, dt: float, low=None, high=None):
+def hvac_discomfort(cfg: HvacConfig, temp: _Numeric, ref_price: float, dt: float,
+                    low: _Numeric | None = None,
+                    high: _Numeric | None = None) -> np.ndarray | np.floating:
     """Cost of the room sitting outside its comfort band, in currency.
     `low`/`high`: the band at `temp`'s points (default: the flat band)."""
     low = cfg.t_comfort_low if low is None else low
@@ -71,7 +79,7 @@ def _draw_factor(temp: np.ndarray | float, cfg: WaterHeaterConfig) -> np.ndarray
     return (np.asarray(temp, dtype=float) - cfg.t_inlet) / (cfg.t_comfort - cfg.t_inlet)
 
 
-def _relaxation(cfg: WaterHeaterConfig, demand_kw: float):
+def _relaxation(cfg: WaterHeaterConfig, demand_kw: float) -> tuple[float, float]:
     """Rate constant and equilibrium of the tank's passive dynamics.
 
     With the element off the energy balance is
@@ -94,7 +102,8 @@ def _relaxation(cfg: WaterHeaterConfig, demand_kw: float):
     return rate, t_inf
 
 
-def _usable_outflow(temp, cfg: WaterHeaterConfig, demand_kw: float, dt: float):
+def _usable_outflow(temp: _Numeric, cfg: WaterHeaterConfig, demand_kw: float,
+                    dt: float) -> np.ndarray | np.floating:
     """Heat the tank gives up this slot, in kW: standing loss AND draw.
 
     The demanded outflow is C * rate * (T - t_inf). An explicit Euler step at
@@ -115,7 +124,8 @@ def _usable_outflow(temp, cfg: WaterHeaterConfig, demand_kw: float, dt: float):
     )
 
 
-def _max_duty(temp, cfg: WaterHeaterConfig, q_out, dt: float):
+def _max_duty(temp: _Numeric, cfg: WaterHeaterConfig, q_out: _Numeric,
+              dt: float) -> np.ndarray | np.floating:
     """Largest duty fraction in [0, 1] that does not carry the tank past t_max.
 
     This is the thermostat cut-out, expressed where it belongs: in the ADMISSIBLE
@@ -300,7 +310,8 @@ def _hvac_heat_flow(a: float, cfg: HvacConfig) -> float:
 
 
 
-def _hvac_duty_cap(temp, cfg: HvacConfig, q_wall, a: float, dt: float):
+def _hvac_duty_cap(temp: _Numeric, cfg: HvacConfig, q_wall: _Numeric, a: float,
+                   dt: float) -> np.ndarray | np.floating:
     """Fraction of the HVAC action admissible from `temp` without leaving the grid.
 
     The wall coupling drives the room toward outdoor and is exogenous; the

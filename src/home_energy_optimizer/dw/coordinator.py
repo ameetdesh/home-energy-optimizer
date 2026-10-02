@@ -33,9 +33,12 @@ solver="highs" to use scipy's HiGHS instead, e.g. to cross-check.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from home_energy_optimizer.dw.lpsolver import Triplets, choose_one
 from home_energy_optimizer.dw.lpsolver import linprog as np_linprog
@@ -61,11 +64,21 @@ from home_energy_optimizer.dp_thermal import (
     solve_water_heater,
     wh_discomfort,
 )
-from home_energy_optimizer.interface import Query
-from home_energy_optimizer.types import Forecasts, SiteConfig
+from home_energy_optimizer.interface import Participant, Query
+from home_energy_optimizer.types import (
+    BatteryConfig,
+    DeviceSolution,
+    Forecasts,
+    Horizon,
+    HvacConfig,
+    SiteConfig,
+    SocGate,
+    WaterHeaterConfig,
+)
 
 
-def thermal_terminal(cfg, kind: str, t_end: float, ref: float) -> float:
+def thermal_terminal(cfg: WaterHeaterConfig | HvacConfig, kind: str, t_end: float,
+                     ref: float) -> float:
     """The horizon-edge term the thermal DPs put in V[n] (linear comfort mode).
 
     `total_objective` omits it, but every DP - and the joint-DP and MILP
@@ -79,7 +92,7 @@ def thermal_terminal(cfg, kind: str, t_end: float, ref: float) -> float:
     return float(hvac_discomfort(cfg, np.array([t_end]), ref, 1.0, *cfg.band_at(-1))[0])
 
 
-def is_plain_battery(b, gates=()) -> bool:
+def is_plain_battery(b: BatteryConfig, gates: tuple[SocGate, ...] = ()) -> bool:
     """Can this battery sit in the master as plain LP variables?
 
     Only if it is nothing more than capacity, power and efficiency. An evcc
@@ -96,7 +109,8 @@ def is_plain_battery(b, gates=()) -> bool:
     )
 
 
-def battery_extras(b, traj: np.ndarray, horizon, gates=()) -> float:
+def battery_extras(b: BatteryConfig, traj: np.ndarray, horizon: Horizon,
+                   gates: tuple[SocGate, ...] = ()) -> float:
     """The battery DP's state penalties, as a cost on a trajectory.
 
     `solve_battery` subtracts a SoC-goal shortfall and a SoC-gate shortfall
@@ -125,15 +139,17 @@ class _PriceVector(np.ndarray):
     keeps the library untouched for the prototype.
     """
 
-    def __new__(cls, values, ref: float):
+    _ref: float | None
+
+    def __new__(cls, values: npt.ArrayLike, ref: float) -> _PriceVector:
         obj = np.asarray(values, dtype=float).view(cls)
         obj._ref = ref
         return obj
 
-    def __array_finalize__(self, obj):
+    def __array_finalize__(self, obj: np.ndarray | None) -> None:
         self._ref = getattr(obj, "_ref", None)
 
-    def mean(self, *a, **k):  # noqa: D401 - numpy protocol
+    def mean(self, *a: Any, **k: Any) -> float | None:  # noqa: D401 - numpy protocol
         return self._ref
 
 
@@ -221,8 +237,9 @@ class DWResult:
 class DWCoordinator:
     def __init__(self, cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,
                  tank_in_master: bool = False, solver: str = "numpy", ev_duty_cycle: bool = False,
-                 participants=(), export_ceiling: np.ndarray | None = None,
-                 soe_targets: dict | None = None):
+                 participants: Sequence[Participant] = (),
+                 export_ceiling: np.ndarray | None = None,
+                 soe_targets: dict | None = None) -> None:
         """`participants`: devices answered through the interface (interface.
         Participant) rather than modelled here, priced in the master beside the
         site's own. `export_ceiling`: a hard per-slot cap on export, kW (for
@@ -307,7 +324,8 @@ class DWCoordinator:
                 + thermal_terminal(dev.cfg, "hvac", traj[-1], self.ref))
 
     # --------------------------------------------------------------- oracles
-    def _solve(self, dev: Device, buy, sell, dp_load=None):
+    def _solve(self, dev: Device, buy: np.ndarray, sell: np.ndarray,
+               dp_load: np.ndarray | None = None) -> DeviceSolution:
         h, fc = self.cfg.horizon, self.fc
         if dev.kind == "battery":
             gates = self.cfg.soc_gates if dev.key == "battery" else ()
@@ -333,7 +351,8 @@ class DWCoordinator:
         return Column(np.asarray(a.plan_kw, dtype=float).copy(), np.asarray(a.trajectory, dtype=float).copy(),
                       float(a.private_cost), source, detail=a.detail, exact=a.status == "ok")
 
-    def price_solve(self, dev: Device, price_kwh: np.ndarray):
+    def price_solve(self, dev: Device,
+                    price_kwh: np.ndarray) -> tuple[Column, DeviceSolution | None]:
         """The pricing DP, returning its solution too (value function and
         policy), which is what the sensitivity variants replay. A participant
         returns no solution, so it offers no sensitivity variants."""
@@ -373,7 +392,8 @@ class DWCoordinator:
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "load_aware")
 
-    def _add_variants(self, dev, sol, col, price_kwh, keep: int, flex_out) -> int:
+    def _add_variants(self, dev: Device, sol: DeviceSolution | None, col: Column,
+                      price_kwh: np.ndarray, keep: int, flex_out: dict) -> int:
         """Add the device's sensitivity variants around its pricing plan.
 
         Each is "force one step more (or less) at hour t, then re-plan with
@@ -493,7 +513,8 @@ class DWCoordinator:
         self.meter_blocks = blocks
 
     # ---------------------------------------------------------------- solvers
-    def _lp(self, c, A: Triplets, b, lb, ub, border: int = 0):
+    def _lp(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
+            ub: np.ndarray, border: int = 0) -> tuple[np.ndarray, float, np.ndarray]:
         """min c.x s.t. A x = b, lb <= x <= ub -> (x, fun, equality duals)."""
         if self.solver == "highs":
             from scipy import sparse
@@ -509,8 +530,9 @@ class DWCoordinator:
             raise RuntimeError(f"LP failed: {res.message}")
         return res.x, res.fun, res.y
 
-    def _choose(self, c, A: Triplets, b, lb, ub, groups, time_limit: float, node_limit: int = 150,
-                border: int = 0):
+    def _choose(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
+                ub: np.ndarray, groups: list[np.ndarray], time_limit: float,
+                node_limit: int = 150, border: int = 0) -> tuple[np.ndarray, float]:
         """The recovery MILP: one plan per group. -> (x, fun)."""
         if self.solver == "highs":
             from scipy import sparse
@@ -531,7 +553,9 @@ class DWCoordinator:
             raise RuntimeError("integer master: no plan found within the limits")
         return res.x, res.fun
 
-    def _tank_block(self, A, c, lb, ub, rhs, j0: int, row0: int, meter: bool = True):
+    def _tank_block(self, A: Triplets, c: np.ndarray, lb: np.ndarray, ub: np.ndarray,
+                    rhs: np.ndarray, j0: int, row0: int, meter: bool = True
+                    ) -> tuple[int, int, Callable[[np.ndarray], Column]]:
         """Write the tank's LP into (A, c, bounds, rhs) at column j0, row row0.
 
         Variables, each length n unless noted: duty D in [0, 1], temperature
@@ -579,12 +603,14 @@ class DWCoordinator:
         A[term, UT] = -1.0
         rhs[term] = cfg.t_comfort
 
-        def decode(x):
+        def decode(x: np.ndarray) -> Column:
             traj = np.concatenate([[cfg.t_comfort], x[T:T + n]])
             return Column(P * x[D:D + n], traj, self.private_cost(Device("water_heater", "water_heater", cfg), traj), "lp")
         return 4 * n + 2, 2 * n + 1, decode
 
-    def solve_master(self, integer: bool = False, time_limit: float = 30.0, node_limit: int = 150):
+    def solve_master(self, integer: bool = False, time_limit: float = 30.0,
+                     node_limit: int = 150) -> tuple[
+            float, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Column]]:
         """Returns (value, column weights, meter duals, convexity duals, battery plans)."""
         n, devs, dt = self.n, self.devices, self.dt
         n_meter = len(self.meter_blocks) * n
@@ -651,7 +677,7 @@ class DWCoordinator:
                     for _, b in self.lp_batts)
         lam_sl = slice(n_meter, n_meter + n_cols)
 
-        def batt_plans(x):
+        def batt_plans(x: np.ndarray) -> dict[str, Column]:
             out = {}
             for key, b, C0, E0, S0 in batt_cols:
                 s0 = b.capacity_kwh * b.soc_initial_frac
@@ -689,7 +715,8 @@ class DWCoordinator:
             j += len(dev.columns)
         return out
 
-    def snapshot(self, weights, pi, bplans) -> dict:
+    def snapshot(self, weights: dict[str, np.ndarray], pi: np.ndarray | None,
+                 bplans: dict[str, Column]) -> dict:
         """What one master solve looks like, for plotting: the convex mix of
         each DW device's plans (a mix of temperature trajectories is shown as
         the same mix - an approximation for a non-linear device), the battery
@@ -849,7 +876,8 @@ class DWCoordinator:
         return (self.evaluate({k: c.power for k, c in plan.items()}, {k: c.trajectory for k, c in plan.items()})
                 + self.participants_cost(plan))
 
-    def recover(self, integer: str, weights=None, bplans=None, time_limit: float = 30.0,
+    def recover(self, integer: str, weights: dict[str, np.ndarray] | None = None,
+                bplans: dict[str, Column] | None = None, time_limit: float = 30.0,
                 node_limit: int = 150) -> dict[str, Column]:
         """One implementable plan per device from the CURRENT pool.
 
@@ -858,7 +886,7 @@ class DWCoordinator:
         same solve. maxweight: each device's heaviest column in `weights`
         (the relaxed master's), batteries as the master left them.
         """
-        def pick(dev, w):
+        def pick(dev: Device, w: np.ndarray) -> Column:
             if dev.modulating and np.sum(w > 1e-6) > 1:
                 return self.blend_plan(dev, w)
             runnable = np.array([wi if c.runnable else -1.0 for wi, c in zip(w, dev.columns)])
@@ -983,7 +1011,8 @@ class DWCoordinator:
             if added == 0:
                 break
 
-    def extra_price_points(self, pi: np.ndarray, center, it: int) -> list[np.ndarray]:
+    def extra_price_points(self, pi: np.ndarray, center: np.ndarray | None,
+                           it: int) -> list[np.ndarray]:
         """Further meter prices to ask every device at, this iteration.
 
         None by default. Any price is a valid question - the answer is a
@@ -1015,7 +1044,8 @@ class DWCoordinator:
                                       # picks and re-price the modulating ones this many more
                                       # iterations (0: no dive). Their pools were built against a
                                       # fractional mix of the on/off plans, which cannot run.
-        progress=None,                # progress(it, max_iter) as each iteration starts, then
+        progress: Callable[..., None] | None = None,
+                                      # progress(it, max_iter) as each iteration starts, then
                                       # progress(it, max_iter, blend, bound, best runnable) as it ends
                                       # (None where not known yet); (-1, max_iter) when finishing
     ) -> DWResult:
@@ -1279,7 +1309,7 @@ def baseline_objective(cfg: SiteConfig, fc: Forecasts) -> float:
 
 def dw_coordinate(cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,
                   tank_in_master: bool = False, solver: str = "numpy",
-                  ev_duty_cycle: bool = False, **kw) -> DWResult:
+                  ev_duty_cycle: bool = False, **kw: Any) -> DWResult:
     return DWCoordinator(cfg, fc, battery_in_master=battery_in_master,
                          tank_in_master=tank_in_master, solver=solver,
                          ev_duty_cycle=ev_duty_cycle).run(**kw)

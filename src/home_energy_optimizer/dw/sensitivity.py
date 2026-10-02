@@ -15,7 +15,11 @@ pricing DP just computed, batched so that all 2n of them run in one pass.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 import numpy as np
+import numpy.typing as npt
 
 from home_energy_optimizer.dp_battery import _feasible_actions
 from home_energy_optimizer.dp_thermal import (
@@ -25,14 +29,22 @@ from home_energy_optimizer.dp_thermal import (
     _max_duty,
     _usable_outflow,
 )
+from home_energy_optimizer.types import DeviceSolution
+
+if TYPE_CHECKING:  # dw.coordinator imports this module, so only for checkers
+    from home_energy_optimizer.dw.coordinator import Device, DWCoordinator
 
 
-def _nearest(values, lo: float, hi: float, n: int) -> np.ndarray:
+def _nearest(values: npt.ArrayLike, lo: float, hi: float, n: int) -> np.ndarray:
     idx = np.rint((np.asarray(values) - lo) / (hi - lo) * (n - 1)).astype(int)
     return np.clip(idx, 0, n - 1)
 
 
-def _replay(n, starts, forced, base_power, base_traj, policy_action, step):
+def _replay(n: int, starts: np.ndarray, forced: np.ndarray, base_power: np.ndarray,
+            base_traj: np.ndarray,
+            policy_action: Callable[[int, np.ndarray], np.ndarray],
+            step: Callable[[int, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
+            ) -> tuple[np.ndarray, np.ndarray]:
     """Run every variant forward at once.
 
     Variant k follows the base plan before starts[k], takes forced[k] at
@@ -56,7 +68,8 @@ def _replay(n, starts, forced, base_power, base_traj, policy_action, step):
     return power, traj
 
 
-def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]], np.ndarray]:
+def variants(co: DWCoordinator, dev: Device, sol: DeviceSolution
+             ) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]], np.ndarray]:
     """All one-step deviations of `sol`'s plan, each followed by the policy.
 
     Returns ([(t, direction, power, trajectory), ...], base_power), with
@@ -78,10 +91,10 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
                 if 0 <= j < len(levels):
                     starts.append(t); forced.append(levels[j]); dirs.append(d)
 
-        def policy_action(t, x):
+        def policy_action(t: int, x: np.ndarray) -> np.ndarray:
             return levels[sol.policy[t, _nearest(x, cfg.t_min, cfg.t_max, cfg.n_states)]]
 
-        def step(t, x, a):
+        def step(t: int, x: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             q_out = _usable_outflow(x, cfg, fc.hot_water_demand[t], dt)
             duty = np.minimum(a, _max_duty(x, cfg, q_out, dt))
             return P * duty, x + (P * duty - q_out) / C * dt
@@ -99,10 +112,10 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
                     d = +1 if (a != 0 and base_a[t] == 0) else (-1 if a == 0 else 0)
                     starts.append(t); forced.append(a); dirs.append(d)
 
-        def policy_action(t, x):
+        def policy_action(t: int, x: np.ndarray) -> np.ndarray:
             return cfg.duty_actions[sol.policy[t, _nearest(x, cfg.t_min, cfg.t_max, cfg.n_states)]]
 
-        def step(t, x, a):
+        def step(t: int, x: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             q_wall = (fc.outdoor_temp[t] - x) / cfg.r_wall_k_per_kw
             duty = np.ones_like(x)
             q_ac = np.zeros_like(x)
@@ -126,10 +139,10 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
                 if abs(a - base_p[t]) > 1e-6:
                     starts.append(t); forced.append(a); dirs.append(d)
 
-        def policy_action(t, x):
+        def policy_action(t: int, x: np.ndarray) -> np.ndarray:
             return sol.policy[t, _nearest(x, cfg.soe_floor_kwh, cap, cfg.n_states)]
 
-        def step(t, x, a):
+        def step(t: int, x: np.ndarray, a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             a = _feasible_actions(a, x, dt, cap, 0.0, cfg.charge_deadband_kw, ec, ed, cfg.soe_floor_kwh)
             eff = np.where(a > 0, a * ec, a / ed)
             return a, np.clip(x + eff * dt, cfg.soe_floor_kwh, cap)
@@ -145,7 +158,9 @@ def variants(co, dev, sol) -> tuple[list[tuple[int, int, np.ndarray, np.ndarray]
     return out, base_p
 
 
-def flexibility(co, dev, sol, price_kwh, base_cost: float, found) -> dict:
+def flexibility(co: DWCoordinator, dev: Device, sol: DeviceSolution, price_kwh: np.ndarray,
+                base_cost: float,
+                found: list[tuple[int, int, np.ndarray, np.ndarray]]) -> dict:
     """Per hour, the cheapest 'more' and 'less' deviation, as cost at `price_kwh`.
 
     Cost = change in (private cost + energy at the price) against the base

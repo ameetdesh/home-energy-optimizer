@@ -18,6 +18,8 @@ in C where it would have to be kept in step by hand.
 
 from __future__ import annotations
 
+from typing import Any
+
 try:  # pragma: no cover - presence depends on the build
     import dp_kernels as _k
 except ImportError:  # pragma: no cover
@@ -26,21 +28,21 @@ except ImportError:  # pragma: no cover
 HAVE_KERNELS = _k is not None
 
 
-def kernel_battery(*args) -> bool:
+def kernel_battery(*args: Any) -> bool:
     if _k is None:
         return False
     _k.battery_backward(*args)
     return True
 
 
-def kernel_water_heater(*args) -> bool:
+def kernel_water_heater(*args: Any) -> bool:
     if _k is None:
         return False
     _k.water_heater_backward(*args)
     return True
 
 
-def kernel_hvac(*args) -> bool:
+def kernel_hvac(*args: Any) -> bool:
     if _k is None:
         return False
     _k.hvac_backward(*args)
