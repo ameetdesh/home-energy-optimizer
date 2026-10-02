@@ -13,9 +13,10 @@ whole package is built on:
   `policy.rollout`. No re-solve.
 
 Hover the state-of-charge chart and the path redraws from wherever the pointer
-is. That path, and the timing beside it, is the fast tier. The arrows, and the
-animated flow over them, are the policy table itself: at each hour and state of
-charge, which way the battery is pushed.
+is. That path, and the timing beside it, is the fast tier. The animated flow
+behind it is the policy table itself: particles drift through hour and state of
+charge the way the battery is pushed, blue where it charges, red where it
+discharges. It runs by default; untick "animate" to stop it.
 
 What the timings look like, 48 h, measured natively. In the browser (Pyodide,
 compiled kernels embedded) the full solve measured about 3.5x slower - 248 ms

@@ -112,7 +112,7 @@
       <canvas id="cPrices" aria-label="Price and load inputs; drag a point to change it"></canvas>
     </div>
     <div class="plot">
-      <div class="ptitle"><span>State of charge, with the policy as a flow field <label style="font-weight:400;margin-left:8px;cursor:pointer"><input id="animate" type="checkbox"> animate</label></span>
+      <div class="ptitle"><span>State of charge, with the policy as a flow field <label style="font-weight:400;margin-left:8px;cursor:pointer"><input id="animate" type="checkbox" checked> animate</label></span>
         <span class="legend"><span style="color:var(--gate)">shift+click</span> add a minimum · <span style="color:var(--gate)">drag</span> move · <span style="color:var(--gate)">double-click</span> remove
           <span><i class="sw" style="background:var(--blue)"></i>charge</span><span><i class="sw" style="background:var(--red)"></i>discharge</span></span></div>
       <div class="stack"><canvas id="cSoc" aria-label="State of charge over time; hover to replay the policy from that point"></canvas><canvas id="cFlow" class="overlay" aria-hidden="true"></canvas></div>
@@ -276,8 +276,8 @@ function drawPrices(){
   line(ctx, pts(IN.load, ...LOAD), css('--mint'), 2, true);
 }
 
-/* The static quiver: an arrow per cell of a coarse (hour, state of charge)
-   grid, pointing where the policy pushes the battery over the next hour. */
+/* The policy at any (hour, state of charge), interpolated from the table the
+   solve returns: what the flow field's particles follow. */
 function policyAt(hour, soe){
   const F = S.field, t = Math.min(S.steps - 1, Math.max(0, Math.floor(hour / S.dt))), st = F.states;
   if(soe <= st[0]) return F.policy[t][0];
@@ -298,16 +298,6 @@ function drawSoc(){
   // reserve band
   ctx.fillStyle = 'rgba(252,165,165,.07)';
   ctx.fillRect(PAD.l, Yf(S.soe_floor_kwh), W - PAD.l - PAD.r, Yf(0) - Yf(S.soe_floor_kwh));
-  // quiver
-  const cols = 24, rows = 12;
-  for(let i = 0; i < cols; i++) for(let j = 0; j < rows; j++){
-    const hour = (i + 0.5) * HOURS / cols;
-    const soe = S.soe_floor_kwh + (j + 0.5) / rows * (cap - S.soe_floor_kwh);
-    const a = policyAt(hour, soe), dh = 1.2;
-    const x0 = X(W, hour), y0 = Yf(soe), x1 = X(W, hour + dh), y1 = Yf(Math.max(0, Math.min(cap, soe + stored(a) * dh)));
-    const col = a > 0.05 ? 'rgba(147,197,253,.55)' : a < -0.05 ? 'rgba(252,165,165,.55)' : 'rgba(255,255,255,.18)';
-    arrow(ctx, x0, y0, x1, y1, col);
-  }
   // the path: a hover rollout, else the plan from the starting state
   const path = R ? R.soe.map((s, i) => [X(W, (R.start_step + i) * S.dt), Yf(s)])
                  : S.plan.soe.map((s, i) => [X(W, i * S.dt), Yf(s)]);
@@ -323,15 +313,6 @@ function drawSoc(){
   }
   ctx.restore();
 }
-function arrow(ctx, x0, y0, x1, y1, color){
-  const ang = Math.atan2(y1 - y0, x1 - x0), L = 4;
-  ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 1.2;
-  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
-  ctx.lineTo(x1 - L * Math.cos(ang - 0.45), y1 - L * Math.sin(ang - 0.45));
-  ctx.moveTo(x1, y1); ctx.lineTo(x1 - L * Math.cos(ang + 0.45), y1 - L * Math.sin(ang + 0.45));
-  ctx.stroke(); ctx.restore();
-}
-
 function drawPower(){
   const {ctx, W, H} = fit($('#cPower'));
   ctx.clearRect(0, 0, W, H);
@@ -351,7 +332,7 @@ function drawAll(){ drawPrices(); drawSoc(); drawPower(); }
 
 // ---------------------------------------------------------------- the flow field, animated
 /* Particles drift through (hour, state of charge) along the policy, leaving
-   fading trails - the same field the quiver draws, in motion. */
+   fading trails: the policy table, in motion. */
 const NPART = 360;
 let parts = null, anim = null;
 const spawn = () => ({h: Math.random() * HOURS, s: null, age: Math.floor(Math.random() * 60), max: 50 + Math.floor(Math.random() * 50)});
@@ -479,7 +460,6 @@ function status(msg, bad){
   e.textContent = msg; e.style.display = 'block';
 }
 
-if(!matchMedia('(prefers-reduced-motion: reduce)').matches) $('#animate').checked = true;
 drawAll();
 async function boot(){ await solve(); }
 
