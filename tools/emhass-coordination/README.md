@@ -61,6 +61,38 @@ share of the saving over the horizon (currency):
 If it says **"EMHASS planned WITHOUT the coordinator"** instead, EMHASS fell
 back to its single MILP and the next line names why (see *When it falls back*).
 
+## What you should see in Home Assistant
+
+After a `run`, under *Developer tools → States*:
+
+| sensor | from | meaning |
+|---|---|---|
+| `sensor.p_batt_forecast` | EMHASS | the battery's power now (W; + discharging), planned by home-energy-optimizer |
+| `sensor.soc_batt_forecast` | EMHASS | its state of charge (%) |
+| `sensor.p_deferrable0`, `sensor.p_deferrable1` | EMHASS | the two loads (W), planned by EMHASS's own model |
+| `sensor.p_grid_forecast`, `sensor.optim_status` | EMHASS | the meter, and `Optimal` |
+| `sensor.coordination_share_solar`, `…_battery`, `…_deferrable0_deferrable1` | this script | each player's share of the saving over the horizon |
+| `sensor.coordination_meter_price` | this script | the coordinator's price at the meter now, with the whole horizon in its `forecasts` attribute |
+| `sensor.coordination_gap` | this script | how far the plan can be from the best possible one (0: proven optimal) |
+
+On a demo day the battery charges from the midday PV and covers the evening
+peak, each load runs exactly its configured hours, and the gap is 0.
+
+## What the script handles for you
+
+- **The EMHASS image.** EMHASS's Dockerfile installs no optional extras, so
+  `up` adds home-energy-optimizer on top. It survives the image's
+  `uv run --frozen` start (that sync adds, it does not remove).
+- **The first start.** EMHASS syncs its environment on the first start, a
+  minute or two; `up` waits up to five.
+- **Time zone and location.** EMHASS aligns forecasts to the time zone in its
+  secrets; `up` copies Home Assistant's own, with its latitude and longitude.
+- **Reaching Home Assistant from the container.** `127.0.0.1` becomes
+  `host.docker.internal`.
+- **Port 5000** is taken on macOS (AirPlay Receiver), so EMHASS is on 5050.
+- **A silent fallback.** If EMHASS planned without the coordinator, `run` says
+  so and names the option that caused it.
+
 ## Where the coordination is switched on
 
 In **EMHASS's configuration file**, `config.json`. Inside the container it is
