@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "home-energy-optimizer"
-version = "0.2.0"
+version = "0.3.0"
 description = "Makes a home's energy devices cooperate: each plans with its own optimiser, Dantzig-Wolfe or ADMM coordinates them, and the saving is shared fairly."
 readme = "README.md"
 license = "MIT"
@@ -37,6 +37,7 @@ Demo = "https://ameetdesh.github.io/multi_device_optimizer_standalone.html"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
+ha = ["websockets>=12"]          # tools/ha-lambda-demo talks to HA over the websocket API
 
 # One package: the core, and the two coordinators as home_energy_optimizer.dw and
 # home_energy_optimizer.admm. Their apps (GUI, browser page) live at the repo
