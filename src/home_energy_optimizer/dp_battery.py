@@ -176,6 +176,7 @@ def solve_battery(
     if dp_load is None:
         dp_load = np.zeros(n)
     use_admm = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when use_admm
     if admm_target is None:
         admm_target = np.zeros(n)
 
@@ -238,7 +239,7 @@ def solve_battery(
             - limit_cost(imp, sell[t], limits)
         ) * dt
         if use_admm:
-            reward = reward - (admm_rho / 2.0) * (Ac - admm_target[t]) ** 2 * dt
+            reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
 
         Q = reward + V_next
         best = np.argmax(Q, axis=1)
@@ -302,6 +303,7 @@ def rollout_battery(
     floor = cfg.soe_floor_kwh
     eta_c, eta_d = cfg.eta_c, cfg.eta_d
     use_admm = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when use_admm
 
     start_step = max(0, min(n, start_step))
     horizon_len = n - start_step
@@ -329,7 +331,7 @@ def rollout_battery(
             - limit_cost(imp, sell[t], limits)
         ) * dt
         if use_admm:
-            reward = reward - (admm_rho / 2.0) * (Ac - admm_target[t]) ** 2 * dt
+            reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
 
         a = float(Ac[np.argmax(reward + V_next)])
         power[i] = a

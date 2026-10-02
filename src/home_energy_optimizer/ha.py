@@ -296,7 +296,7 @@ def publish_site(
     prefix: str = "hems",
     forecast_slots: int = 96,
     currency: str = "EUR",
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Publish every signal the local GUI plots, not just the battery.
 
     The GUI shows prices + lambda, battery, power flows and thermal state; this
@@ -315,10 +315,10 @@ def publish_site(
     """
     times = site.horizon.times()
     ahead = min(forecast_slots, site.horizon.steps - t)
-    out: dict[str, float] = {}
+    out: dict[str, float | None] = {}
 
     def pub(name: str, value: float, unit: str | None, device_class: str | None,
-            friendly: str | None, series: npt.ArrayLike | None = None,
+            friendly: str | None, series: np.ndarray | None = None,
             key: str = "value", **attrs: Any) -> None:
         ha.set_state(
             f"sensor.{prefix}_{name}",
@@ -347,6 +347,7 @@ def publish_site(
 
     if "water_heater" in res.devices:
         sol = res.devices["water_heater"]
+        assert site.water_heater is not None        # it has a plan, so it is configured
         pub("water_heater_temp", sol.trajectory[t], "°C", "temperature",
             "Hot water tank", sol.trajectory, "temp",
             setpoint=site.water_heater.t_comfort)
@@ -355,6 +356,7 @@ def publish_site(
 
     if "hvac" in res.devices:
         sol = res.devices["hvac"]
+        assert site.hvac is not None
         pub("hvac_temp", sol.trajectory[t], "°C", "temperature",
             "Room temperature", sol.trajectory, "temp",
             comfort_low=site.hvac.t_comfort_low, comfort_high=site.hvac.t_comfort_high)

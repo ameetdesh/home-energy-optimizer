@@ -1,10 +1,12 @@
 """The EMHASS adapter's translation of EMHASS's battery (integrations/emhass.py).
 Needs no EMHASS install: the adapter imports EMHASS only when it plans."""
 
+import logging
+
 import numpy as np
 import pytest
 
-from home_energy_optimizer.integrations.emhass import _battery
+from home_energy_optimizer.integrations.emhass import _battery, optimize, unsupported
 
 PLANT = {"battery_nominal_energy_capacity": 10000, "battery_minimum_state_of_charge": 0.3,
          "battery_maximum_state_of_charge": 0.9, "battery_charge_power_max": 5000,
@@ -28,3 +30,23 @@ def test_the_soc_window_becomes_the_store():
     assert b.soe_floor_kwh == pytest.approx(3.0)
     assert b.capacity_kwh * b.soc_initial_frac == pytest.approx(5.0)
     assert b.terminal_price == pytest.approx(0.2)
+
+
+def test_a_battery_participant_without_an_emhass_battery_falls_back():
+    """A participant may name the battery while EMHASS's own is switched off.
+    There is then no state of charge to start from; the adapter must decline,
+    so EMHASS runs its own solver, rather than raise into EMHASS."""
+
+    class Opt:                    # what optimize() reads before it plans
+        optim_conf = {"optimization_backend": "dantzig_wolfe", "set_use_battery": False,
+                      "number_of_deferrable_loads": 0,
+                      "participants": [{"devices": ["battery"], "solver": "home_energy_optimizer"}]}
+        plant_conf: dict = {}
+        costfun = "profit"
+        time_step = 0.5
+        logger = logging.getLogger("emhass-test")
+
+    assert unsupported(Opt.optim_conf, Opt.plant_conf, Opt.costfun, {}) is not None
+    n = 4
+    assert optimize(Opt(), list(range(n)), np.zeros(n), np.full(n, 500.0),
+                    np.full(n, 0.3), np.full(n, 0.1)) is None

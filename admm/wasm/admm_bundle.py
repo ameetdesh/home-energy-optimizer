@@ -12,15 +12,17 @@ from __future__ import annotations
 from typing import Any
 import numpy as np
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any
 from typing import NamedTuple
 import time
 import numpy.typing as npt
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TypeVar
 import threading
 from collections.abc import Sequence
@@ -117,6 +119,9 @@ def interp_uniform(
 # ========================================================================
 # src/home_energy_optimizer/types.py
 # ========================================================================
+
+if TYPE_CHECKING:  # admm.battery_qp imports this module
+    pass
 
 # --------------------------------------------------------------------------
 # Horizon
@@ -444,9 +449,11 @@ class HvacConfig:
 
     def band_at(self, i: int) -> tuple[float, float]:
         """(low, high) at point i of the room trajectory; -1 is the horizon's end."""
-        if self.comfort_low_profile is None:
+        low, high = self.comfort_low_profile, self.comfort_high_profile
+        if low is None:
             return self.t_comfort_low, self.t_comfort_high
-        return float(self.comfort_low_profile[i]), float(self.comfort_high_profile[i])
+        assert high is not None, "validate() requires both profiles or neither"
+        return float(low[i]), float(high[i])
 
     def comfort_band(self, n: int) -> tuple[np.ndarray, np.ndarray]:
         """(low, high) at the n + 1 points of an n-slot room trajectory."""
@@ -645,7 +652,8 @@ class SiteConfig:
 
     def without(self, *names: str) -> SiteConfig:
         """Return a copy with the named devices disabled. Test convenience."""
-        return replace(self, **{n: None for n in names})
+        off: dict[str, Any] = {n: None for n in names}
+        return replace(self, **off)
 
 
 # --------------------------------------------------------------------------
@@ -775,7 +783,9 @@ class RoundRecord:
 class CoordinationResult:
     """Output of a full coordinated solve."""
 
-    devices: dict[str, DeviceSolution]
+    # A DP solution per device - or, for a battery ADMM ran as an exact LP
+    # step, that step's plan, which has no value function (battery_pricing has).
+    devices: dict[str, DeviceSolution | BatteryStep]
     net_grid: np.ndarray
     import_cost: float
     export_revenue: float
@@ -961,7 +971,7 @@ def limit_cost(flow: np.ndarray, sell_t: float, limits: Limits | None) -> np.nda
     """
     if limits is None:
         return 0.0
-    cost = 0.0
+    cost: np.ndarray | float = 0.0
     if limits.max_import_kw is not None:
         cost = cost + limits.breach_price * np.maximum(flow - limits.max_import_kw, 0.0)
     if limits.max_export_kw is not None:
@@ -1122,6 +1132,7 @@ def solve_battery(
     if dp_load is None:
         dp_load = np.zeros(n)
     use_admm = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when use_admm
     if admm_target is None:
         admm_target = np.zeros(n)
 
@@ -1184,7 +1195,7 @@ def solve_battery(
             - limit_cost(imp, sell[t], limits)
         ) * dt
         if use_admm:
-            reward = reward - (admm_rho / 2.0) * (Ac - admm_target[t]) ** 2 * dt
+            reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
 
         Q = reward + V_next
         best = np.argmax(Q, axis=1)
@@ -1248,6 +1259,7 @@ def rollout_battery(
     floor = cfg.soe_floor_kwh
     eta_c, eta_d = cfg.eta_c, cfg.eta_d
     use_admm = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when use_admm
 
     start_step = max(0, min(n, start_step))
     horizon_len = n - start_step
@@ -1275,7 +1287,7 @@ def rollout_battery(
             - limit_cost(imp, sell[t], limits)
         ) * dt
         if use_admm:
-            reward = reward - (admm_rho / 2.0) * (Ac - admm_target[t]) ** 2 * dt
+            reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
 
         a = float(Ac[np.argmax(reward + V_next)])
         power[i] = a
@@ -1458,6 +1470,7 @@ def solve_water_heater(
     POL_f = np.zeros(POL.shape)
     # The compiled kernel is the on/off element only.
     tether = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when tethered
     compiled = cfg.n_duty_levels == 2 and limits is None and not tether and kernel_water_heater(
         np.ascontiguousarray(buy, dtype=np.float64),
         np.ascontiguousarray(sell, dtype=np.float64),
@@ -1502,7 +1515,7 @@ def solve_water_heater(
             # (t_comfort - t_min) however cold the tank actually got.
             comfort = -wh_discomfort(cfg, T_next, ref_price, dt)
             if tether:
-                cost = cost - (admm_rho / 2.0) * (q_heat - admm_target[t]) ** 2 * dt
+                cost = cost - (admm_rho / 2.0) * (q_heat - target[t]) ** 2 * dt
 
             Q = cost + comfort + V_next
             improve = Q > best
@@ -1647,6 +1660,7 @@ def solve_hvac(
     # under one flat band. A band that changes goes through it one run of
     # equal-band slots at a time, the last run first; a flat band is one run.
     tether = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when tethered
     compiled = limits is None and cfg.n_duty_levels == 2 and not tether and cfg.comfort_mode == "linear"
     if compiled:
         series = [np.ascontiguousarray(x, dtype=np.float64) for x in (buy, sell, dp_load, outdoor_temp)]
@@ -1687,7 +1701,7 @@ def solve_hvac(
             ) * dt
             comfort = -hvac_discomfort(cfg, T_next, ref_price, dt, low[t + 1], high[t + 1])
             if tether:
-                elec = elec - (admm_rho / 2.0) * (cfg.power_kw * abs(a) * duty - admm_target[t]) ** 2 * dt
+                elec = elec - (admm_rho / 2.0) * (cfg.power_kw * abs(a) * duty - target[t]) ** 2 * dt
 
             Q = elec + comfort + V_next
             improve = Q > best
@@ -1841,6 +1855,9 @@ class PolicySnapshot:
         # Prefer the economics-only solve; fall back to the plan's own battery
         # solution only if pricing was not run.
         sol = res.battery_pricing or res.devices["battery"]
+        if not isinstance(sol, DeviceSolution):
+            raise ValueError("the battery was planned as an LP step and never priced: "
+                             "it has no value function to snapshot")
         n = cfg.horizon.steps
         return cls(
             horizon=cfg.horizon,
@@ -2271,9 +2288,11 @@ def clamp(
     hit: list[str] = []
 
     if limits.max_charge_kw is not None and a > limits.max_charge_kw:
-        a, _ = limits.max_charge_kw, hit.append("max_charge_kw")
+        a = limits.max_charge_kw
+        hit.append("max_charge_kw")
     if limits.max_discharge_kw is not None and a < -limits.max_discharge_kw:
-        a, _ = -limits.max_discharge_kw, hit.append("max_discharge_kw")
+        a = -limits.max_discharge_kw
+        hit.append("max_discharge_kw")
 
     if limits.max_import_kw is not None:
         # net import = battery draw + everything else
@@ -2441,6 +2460,7 @@ def deviation_is_persistent(
 # ========================================================================
 
 if TYPE_CHECKING:  # admm.coordinator imports this module, so only for checkers
+    pass
     pass
 
 
@@ -2699,7 +2719,8 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
 
-    def objective(devices: dict[str, DeviceSolution]) -> tuple[float, np.ndarray, np.ndarray]:
+    def objective(devices: Mapping[str, DeviceSolution | BatteryStep]
+                  ) -> tuple[float, np.ndarray, np.ndarray]:
         net = fc.net_fixed_demand + sum(devices[k].power for k in dev_keys)
         net, curtail = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
         soe = {k: devices[k].trajectory for k in dev_keys if k in batt} or None
@@ -2718,9 +2739,11 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
                 sol = solve_battery(batt[k], h, buy, sell, dp_load=others, admm_rho=0.0,
                                     soc_gates=cfg.soc_gates if k == "battery" else (), limits=limits)
             elif k == "water_heater":
+                assert cfg.water_heater is not None
                 sol = solve_water_heater(cfg.water_heater, h, buy, sell, fc.hot_water_demand,
                                          dp_load=others, limits=limits)
             else:
+                assert cfg.hvac is not None
                 sol = solve_hvac(cfg.hvac, h, buy, sell, fc.outdoor_temp, dp_load=others,
                                  limits=limits)
             trial = dict(res.devices)
@@ -2763,6 +2786,7 @@ def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
     CONDITIONAL on those plans - which is exactly what the price signal claims
     to be, and no more.
     """
+    assert cfg.battery is not None, "pricing needs a battery"
     dp_load = (
         res.battery_dp_load
         if res.battery_dp_load is not None
@@ -2835,9 +2859,11 @@ def _apply_baseline_fallback(
             idle_soe = np.full(n + 1, b.capacity_kwh * b.soc_initial_frac)
             candidates.append((key, np.zeros(n), idle_soe))
         if "water_heater" in dev_keys:
+            assert cfg.water_heater is not None
             temp, pw = baseline_water_heater(cfg.water_heater, cfg.horizon, fc.hot_water_demand)
             candidates.append(("water_heater", pw, temp))
         if "hvac" in dev_keys:
+            assert cfg.hvac is not None
             temp, pw = baseline_hvac(cfg.hvac, cfg.horizon, fc.outdoor_temp)
             candidates.append(("hvac", pw, temp))
 
@@ -3084,11 +3110,12 @@ class _Grid:
             else:
                 m = val < best_val
                 best, best_val = np.where(m, z, best), np.where(m, val, best_val)
+        assert best is not None    # the pieces cover the line, so one was cheapest
         return -best
 
 
 def _objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
-               sols: dict[str, DeviceSolution], batteries: Iterable[str],
+               sols: Mapping[str, BatteryStep | DeviceSolution], batteries: Iterable[str],
                ref: float) -> float:
     """A plan's cost as the testbed reports it: total_objective plus the
     thermal devices' horizon-edge terms their DPs optimise (as
@@ -3097,10 +3124,11 @@ def _objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
     hv = sols["hvac"].trajectory if "hvac" in sols else None
     soe = {k: sols[k].trajectory for k in batteries if k in sols} or None
     obj = total_objective(cfg, net, fc, wh, hv, soe)
-    if wh is not None and cfg.water_heater.comfort_mode == "linear":
-        obj += cfg.water_heater.heat_capacity_kwh_per_k * ref * max(0.0, cfg.water_heater.t_comfort - float(wh[-1]))
-    if hv is not None and cfg.hvac.comfort_mode == "linear":
-        obj += float(hvac_discomfort(cfg.hvac, np.array([float(hv[-1])]), ref, 1.0, *cfg.hvac.band_at(-1))[0])
+    wcfg, hcfg = cfg.water_heater, cfg.hvac      # set whenever their plans are
+    if wh is not None and wcfg is not None and wcfg.comfort_mode == "linear":
+        obj += wcfg.heat_capacity_kwh_per_k * ref * max(0.0, wcfg.t_comfort - float(wh[-1]))
+    if hv is not None and hcfg is not None and hcfg.comfort_mode == "linear":
+        obj += float(hvac_discomfort(hcfg, np.array([float(hv[-1])]), ref, 1.0, *hcfg.band_at(-1)).item())
     return float(obj)
 
 
@@ -3184,6 +3212,13 @@ class ExchangeRun:
 
         # ---- the terminals --------------------------------------------------
         self.grid = _Grid(fc.buy, fc.sell, dt, g.max_import_kw, g.max_export_kw, c_br, cc.kink_smoothing)
+        def dp_step(b: BatteryConfig, gates: tuple[SocGate, ...]
+                    ) -> Callable[[np.ndarray, float], DeviceSolution]:
+            def step(v: np.ndarray, r: float) -> DeviceSolution:
+                return solve_battery(b, h, zero, zero, dp_load=zero, admm_target=v, admm_rho=r / dt,
+                                     soc_gates=gates)
+            return step
+
         keys: list[str] = []
         steps: list[Callable[[np.ndarray, float], BatteryStep | DeviceSolution]] = []
         real: dict[str, BatteryConfig] = {}
@@ -3195,10 +3230,9 @@ class ExchangeRun:
                 gates = cfg.soc_gates if key == "battery" else ()
                 keys.append(key)
                 if cc.exchange_battery_step == "lp" and lp_step_applies(b) and not gates:
-                    steps.append(lambda v, r, key=key, b=pinned: self._battery_lp(key, b, v, r))
+                    steps.append(partial(self._battery_lp, key, pinned))
                 else:
-                    steps.append(lambda v, r, b=pinned, gates=gates: solve_battery(
-                        b, h, zero, zero, dp_load=zero, admm_target=v, admm_rho=r / dt, soc_gates=gates))
+                    steps.append(dp_step(pinned, gates))
                 real[key] = b
         ref = self.ref
         wh = _relaxed(cfg.water_heater, cc.relax_levels, dt)
@@ -3229,7 +3263,8 @@ class ExchangeRun:
         self.alpha, self.c_prev = 1.0, np.inf
         self.eps = cc.exchange_eps * np.sqrt(self.N * n)
         self.records: list[RoundRecord] = []
-        self.best_obj, self.best_round, self.best_sols, self.last_improve = np.inf, 0, None, 0
+        self.best_sols: dict[str, BatteryStep | DeviceSolution] | None = None
+        self.best_obj, self.best_round, self.last_improve = np.inf, 0, 0
         self.stop_reason = "iteration cap"
         self.k = 0                                          # iterations run
         self.done = False
@@ -3249,6 +3284,7 @@ class ExchangeRun:
 
     def _battery_lp(self, key: str, b: BatteryConfig, v: np.ndarray, rho: float) -> BatteryStep:
         """A battery's exact LP step, started from its previous solution."""
+        assert b.terminal_price is not None    # pinned when the step was built
         sol = battery_prox(b, self.dt, v, rho, float(b.terminal_price),
                            start=self._qp.get(key) if self.cc.exchange_warm_battery else None)
         self._qp[key] = sol.state
@@ -3263,8 +3299,10 @@ class ExchangeRun:
         """The real (on/off, three-way) device's plan against the others."""
         cfg, h, fc = self.cfg, self.h, self.fc
         if key == "water_heater":
+            assert cfg.water_heater is not None
             return solve_water_heater(cfg.water_heater, h, fc.buy, self.sell_dev, fc.hot_water_demand,
                                       dp_load=others, limits=self.limits)
+        assert cfg.hvac is not None
         return solve_hvac(cfg.hvac, h, fc.buy, self.sell_dev, fc.outdoor_temp, dp_load=others, limits=self.limits)
 
     def step(self, n_iter: int | None = None) -> bool:
@@ -3652,7 +3690,7 @@ def round_prices(p: dict) -> dict:
     with _lock:
         site, fc = _state.get("site"), _state.get("forecasts")
         res, cache = _state.get("result"), _state.get("prices")
-    if res is None:
+    if res is None or site is None or fc is None or cache is None:   # a solve sets all four
         raise ValueError("no solve yet")
     r = int(p["r"])
     if not 0 <= r < len(res.rounds):

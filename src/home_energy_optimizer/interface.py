@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from importlib import resources
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -57,7 +57,7 @@ class Answer:
     private_cost: float
     trajectory: np.ndarray
     status: str = "ok"
-    detail: object = None
+    detail: Any = None
 
 
 @runtime_checkable
@@ -95,14 +95,14 @@ def _series(x: npt.ArrayLike | None) -> list[float] | None:
     return None if x is None else [float(v) for v in np.asarray(x, dtype=float).ravel()]
 
 
-def query_to_dict(q: Query, step_minutes: float, start: str | None = None) -> dict:
+def query_to_dict(q: Query, step_minutes: float, start: str | None = None) -> dict[str, Any]:
     """The query as a device-query.v1 JSON object (a dict ready for json.dumps).
 
     `q`: the query. `step_minutes`: the slot length. `start`: the first slot's
     start, ISO 8601, if known. The slot count is read from `price_draw`, or from
     `target_kw` for a proximal query; one of them must be set.
     """
-    out: dict = {"version": SCHEMA_VERSION, "kind": q.kind,
+    out: dict[str, Any] = {"version": SCHEMA_VERSION, "kind": q.kind,
                  "horizon": {"step_minutes": float(step_minutes),
                              "slots": len(next(a for a in (q.price_draw, q.target_kw) if a is not None))}}
     if start is not None:
@@ -116,21 +116,22 @@ def query_to_dict(q: Query, step_minutes: float, start: str | None = None) -> di
     return out
 
 
-def query_from_dict(d: dict) -> Query:
+def query_from_dict(d: dict[str, Any]) -> Query:
     """A device-query.v1 JSON object (as parsed by json.loads) back as a Query.
     The horizon is not kept: a Query's arrays carry the slot count."""
-    arr = lambda k: None if d.get(k) is None else np.asarray(d[k], dtype=float)   # noqa: E731
+    def arr(k: str) -> np.ndarray | None:
+        return None if d.get(k) is None else np.asarray(d[k], dtype=float)
     return Query(kind=d["kind"], price_draw=arr("price_draw"), price_supply=arr("price_supply"),
                  residual_kw=arr("residual_kw"), target_kw=arr("target_kw"), rho=float(d.get("rho", 0.0)))
 
 
-def answer_to_dict(a: Answer, solver: str | None = None) -> dict:
+def answer_to_dict(a: Answer, solver: str | None = None) -> dict[str, Any]:
     """The answer as a device-answer.v1 JSON object (a dict ready for json.dumps).
 
     `a`: the answer; its `detail` stays behind (it is in-process only).
     `solver`: an optional label for what produced it (for logs).
     """
-    out = {"version": SCHEMA_VERSION, "plan_kw": _series(a.plan_kw),
+    out: dict[str, Any] = {"version": SCHEMA_VERSION, "plan_kw": _series(a.plan_kw),
            "private_cost": float(a.private_cost), "trajectory": _series(a.trajectory),
            "status": a.status}
     if solver is not None:
@@ -138,18 +139,19 @@ def answer_to_dict(a: Answer, solver: str | None = None) -> dict:
     return out
 
 
-def answer_from_dict(d: dict) -> Answer:
+def answer_from_dict(d: dict[str, Any]) -> Answer:
     """A device-answer.v1 JSON object (as parsed by json.loads) back as an
     Answer, with no `detail`. A missing status reads as "ok"."""
     return Answer(plan_kw=np.asarray(d["plan_kw"], dtype=float), private_cost=float(d["private_cost"]),
                   trajectory=np.asarray(d["trajectory"], dtype=float), status=d.get("status", "ok"))
 
 
-def schema(name: str) -> dict:
+def schema(name: str) -> dict[str, Any]:
     """The packaged JSON Schema as a dict.
 
     `name`: "device-query" or "device-answer". Raises FileNotFoundError for
     any other name.
     """
     text = resources.files("home_energy_optimizer").joinpath(f"schemas/{name}.v{SCHEMA_VERSION}.json").read_text()
-    return json.loads(text)
+    parsed: dict[str, Any] = json.loads(text)
+    return parsed

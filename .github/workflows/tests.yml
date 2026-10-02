@@ -23,3 +23,17 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[test]" scipy osqp jsonschema
       - run: pytest -q
+
+  # mypy over the whole package, configured in pyproject.toml ([tool.mypy]):
+  # default checking everywhere, --strict's flags on the modules other code is
+  # written against. One Python is enough - pyproject pins the version checked
+  # against, so this reports the same thing a local `mypy` does.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[typecheck]" scipy
+      - run: mypy

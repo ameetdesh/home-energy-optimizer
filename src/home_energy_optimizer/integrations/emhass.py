@@ -26,17 +26,18 @@ the interface's plans are + when drawn from the meter.
 from __future__ import annotations
 
 import copy
+import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, replace
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import numpy as np
 import numpy.typing as npt
 
 from home_energy_optimizer.coordinate import apply_curtailment
 from home_energy_optimizer.dw.attribution import ledger
-from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult
+from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, DWResult, RunOptions
 from home_energy_optimizer.interface import Answer, Query
 from home_energy_optimizer.types import (
     BatteryConfig,
@@ -51,14 +52,40 @@ from home_energy_optimizer.types import (
 if TYPE_CHECKING:  # pandas arrives with EMHASS; this package does not require it
     import pandas as pd
 
-_CfgT = TypeVar("_CfgT")
+_CfgT = TypeVar("_CfgT", WaterHeaterConfig, HvacConfig)
+
+
+class EmhassOptimization(Protocol):
+    """What this adapter uses of EMHASS's `Optimization` (emhass.optimization):
+    the one `optimize` is handed, and the one each participant builds for its
+    own devices. EMHASS is not a dependency, so its surface is written down here
+    rather than imported - one list of what an EMHASS upgrade must keep."""
+
+    optim_conf: dict[str, Any]
+    plant_conf: dict[str, Any]
+    retrieve_hass_conf: dict[str, Any]
+    emhass_conf: dict[str, Any]
+    var_load_cost: str
+    var_prod_price: str
+    costfun: str                   # "profit", "cost" or "self-consumption"
+    time_step: float               # hours
+    logger: logging.Logger
+    optim_status: str
+    prob: Any                      # the solved problem; its .value is the objective
+    _persist_q_input: Callable[..., None]
+
+    def perform_optimization(self, data_opt: pd.DataFrame, p_pv: np.ndarray, p_load: np.ndarray,
+                             unit_load_cost: np.ndarray, unit_prod_price: np.ndarray,
+                             **kwargs: Any) -> pd.DataFrame: ...
+
+    def _prepare_power_limit_array(self, value: Any, name: str, n: int) -> np.ndarray: ...
 
 PACKAGE = "home_energy_optimizer"
 # DWCoordinator.run settings. A participant answered by a black-box model gives
 # a weak lower bound, so the gap test alone would run to max_iter: stop once the
 # master's value has stopped falling, then fix the on/off participants to one
 # plan each and let the rest re-plan around them (the dive).
-RUN_DEFAULTS = {"stall": 2, "smoothing": 0.0, "dive": 6}
+RUN_DEFAULTS: RunOptions = {"stall": 2, "smoothing": 0.0, "dive": 6}
 OK_STATUSES = ("Optimal", "Optimal (Relaxed)")
 # Runtime per-load lists perform_optimization takes; cut to a participant's loads.
 RUNTIME_LOAD_LISTS = ("def_total_hours", "def_total_timestep", "def_start_timestep",
@@ -80,7 +107,8 @@ def _per_load_keys() -> set[str]:
                                          "is_electric_load", "def_load_config"}
 
 
-def unsupported(optim_conf: dict, plant_conf: dict, costfun: str, runtime: dict) -> str | None:
+def unsupported(optim_conf: dict[str, Any], plant_conf: dict[str, Any], costfun: str,
+                runtime: dict[str, Any]) -> str | None:
     """Why this configuration cannot be split per device yet, or None if it can.
 
     `optim_conf`, `plant_conf`: EMHASS's configuration dicts. `costfun`: EMHASS's
@@ -93,6 +121,10 @@ def unsupported(optim_conf: dict, plant_conf: dict, costfun: str, runtime: dict)
         return f"costfun {costfun!r} (supported: profit, cost)"
     if oc.get("set_total_pv_sell"):
         return "set_total_pv_sell"
+    named = {d for g in oc.get("participants") or [] for d in g.get("devices", [])}
+    if "battery" in named and not oc.get("set_use_battery"):
+        # EMHASS has no battery, so no state of charge or plant_conf to plan one from
+        return "a participant names the battery, but set_use_battery is off"
     if oc.get("set_use_battery") and oc.get("set_nocharge_from_grid"):
         return "set_nocharge_from_grid (ties the battery to PV)"
     if oc.get("set_battery_first_priority"):
@@ -122,7 +154,7 @@ def unsupported(optim_conf: dict, plant_conf: dict, costfun: str, runtime: dict)
     return None
 
 
-def _hold_q_input(k: int, params: dict, hc: dict) -> None:
+def _hold_q_input(k: int, params: dict[str, Any], hc: dict[str, Any]) -> None:
     """Stand-in for Optimization._persist_q_input in a participant's model: keep
     the heat input a thermal battery starts from (its configured
     `q_input_initial`, else the value it was built with) on every re-solve.
@@ -151,9 +183,9 @@ class EmhassParticipant:
     flow the house can make.
     """
 
-    def __init__(self, opt: Any, key: str, battery: bool, loads: list[int],
+    def __init__(self, opt: EmhassOptimization, key: str, battery: bool, loads: list[int],
                  data_opt: pd.DataFrame, soc_init: float | None, soc_final: float | None,
-                 runtime: dict, buy: np.ndarray, reach_w: float = 1e5) -> None:
+                 runtime: dict[str, Any], buy: np.ndarray, reach_w: float = 1e5) -> None:
         """Build the participant's own EMHASS model: a copy of `opt`'s
         configuration with only this participant's devices enabled (the
         parameters are described on the class). Solves nothing yet; sets
@@ -178,8 +210,9 @@ class EmhassParticipant:
         pc["maximum_power_to_grid"] = float(reach_w)
         pc["compute_curtailment"] = False
         self.key, self.battery, self.loads = key, bool(battery), list(loads)
-        self.opt = Optimization(opt.retrieve_hass_conf, oc, pc, opt.var_load_cost, opt.var_prod_price,
-                                "profit", opt.emhass_conf, opt.logger, num_timesteps=len(data_opt))
+        self.opt: EmhassOptimization = Optimization(
+            opt.retrieve_hass_conf, oc, pc, opt.var_load_cost, opt.var_prod_price,
+            "profit", opt.emhass_conf, opt.logger, num_timesteps=len(data_opt))
         # Every query starts from the same state. On a re-solve EMHASS carries a
         # heat pump's heat input (thermal inertia) over from the last solve, as
         # MPC needs when the horizon moves on; here every solve is the same
@@ -218,7 +251,8 @@ class EmhassParticipant:
             for k in range(len(loads)))
         self._good: Answer | None = None   # the last answer that solved, a stand-in if one fails
         self.solves, self.solve_s = 0, 0.0
-        self._last: tuple | None = None   # (query key, answer): a repeated query is not re-solved
+        self._last: tuple[tuple[Any, ...], Answer] | None = None   # (query key, answer): a
+                                                                   # repeated query is not re-solved
 
     def _run(self, pv_w: np.ndarray, load_w: np.ndarray, buy: np.ndarray,
              sell: np.ndarray) -> Answer:
@@ -277,10 +311,14 @@ class EmhassParticipant:
         participant alone; a best response meters it under `q.residual_kw`,
         split into PV (exported part) and load (imported part). A proximal
         query raises NotImplementedError."""
+        if q.kind in ("price_response", "best_response") and (q.price_draw is None or q.price_supply is None):
+            raise ValueError(f"a {q.kind} query needs price_draw and price_supply")
         if q.kind == "price_response":
+            assert q.price_draw is not None and q.price_supply is not None
             zero = np.zeros(self.n)
             return self._run(zero, zero, q.price_draw, q.price_supply)
         if q.kind == "best_response":
+            assert q.price_draw is not None and q.price_supply is not None
             r = np.asarray(q.residual_kw, dtype=float)
             return self._run(np.maximum(-r, 0.0) * 1000.0, np.maximum(r, 0.0) * 1000.0, q.price_draw, q.price_supply)
         raise NotImplementedError("a proximal step needs a quadratic term EMHASS's model does not have yet")
@@ -301,7 +339,7 @@ class EmhassParticipant:
 
 
 # ------------------------------------------------------------------ the call
-def _groups(optim_conf: dict, devices: list[str]) -> list[dict]:
+def _groups(optim_conf: dict[str, Any], devices: list[str]) -> list[dict[str, Any]]:
     """The participant groups: `optim_conf["participants"]`, with every device
     in `devices` it leaves out as its own group, solved by EMHASS. With no
     `participants`, one EMHASS group per device. Each group is a dict with
@@ -309,7 +347,8 @@ def _groups(optim_conf: dict, devices: list[str]) -> list[dict]:
     spec = optim_conf.get("participants") or []
     if not spec:
         return [{"devices": [d], "solver": "emhass"} for d in devices]
-    seen, out = set(), []
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
     for g in spec:
         devs = list(g["devices"])
         seen.update(devs)
@@ -320,14 +359,14 @@ def _groups(optim_conf: dict, devices: list[str]) -> list[dict]:
     return out
 
 
-def _config(cls: type[_CfgT], overrides: dict) -> _CfgT:
+def _config(cls: type[_CfgT], overrides: dict[str, Any]) -> _CfgT:
     """An instance of the config dataclass `cls` (e.g. WaterHeaterConfig) from
     `overrides`, ignoring keys it has no field for; the rest keep defaults."""
     names = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in overrides.items() if k in names})
 
 
-def _battery(plant_conf: dict, soc_init: float, buy: np.ndarray) -> BatteryConfig:
+def _battery(plant_conf: dict[str, Any], soc_init: float, buy: np.ndarray) -> BatteryConfig:
     """EMHASS's battery as this package's: its SoC window becomes the store, and
     energy left at the end is valued at the horizon's average import price (as
     the package's own planner does), not pinned to soc_final.
@@ -354,20 +393,22 @@ def _battery(plant_conf: dict, soc_init: float, buy: np.ndarray) -> BatteryConfi
                          terminal_mode="linear", terminal_price=float(np.mean(buy)))
 
 
-def _linear_battery(oc: dict, pc: dict) -> bool:
+def _linear_battery(oc: dict[str, Any], pc: dict[str, Any]) -> bool:
     """Whether EMHASS's battery is exactly its linear constraints - the state
     of charge stepped by both efficiencies, power limits, the SoC window and
     the end-of-day target - so the coordinator can hold it in its master LP.
     (The charge-or-discharge binary is relaxed; it matters only at negative
     prices, where the plan is run as net power.)"""
-    zero = lambda v: all(float(x or 0) == 0 for x in (v if isinstance(v, list) else [v]))   # noqa: E731
+    def zero(v: Any) -> bool:
+        return all(float(x or 0) == 0 for x in (v if isinstance(v, list) else [v]))
+
     return (not oc.get("set_battery_dynamic") and zero(oc.get("weight_battery_discharge", 0))
             and zero(oc.get("weight_battery_charge", 0)) and zero(pc.get("battery_stress_cost", 0))
             and zero(pc.get("battery_soc_deficit_cost", 0)) and zero(pc.get("battery_soc_surplus_cost", 0))
             and not pc.get("battery_charge_power_derating"))
 
 
-def optimize(opt: Any, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.ArrayLike,
+def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.ArrayLike,
              unit_load_cost: npt.ArrayLike, unit_prod_price: npt.ArrayLike,
              soc_init: float | None = None, soc_final: float | None = None,
              **runtime: Any) -> pd.DataFrame | None:
@@ -420,18 +461,24 @@ def optimize(opt: Any, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.
     if oc.get("set_use_battery"):
         device_w += max(float(pc["battery_charge_power_max"]), float(pc["battery_discharge_power_max"]))
     reach_w = 2.0 * (float(np.max(np.abs(load_w))) + float(np.max(np.abs(pv_w))) + device_w) + 1000.0
-    participants, site_kw, targets = [], {}, {}
+    participants: list[EmhassParticipant] = []
+    targets: dict[str, float] = {}
+    battery_cfg: BatteryConfig | None = None
+    tank_cfg: WaterHeaterConfig | None = None
+    hvac_cfg: HvacConfig | None = None
     for g in _groups(oc, devices):
         if g["solver"] == "emhass" and g["devices"] == ["battery"] and _linear_battery(oc, pc):
             # EMHASS's battery, as its linear model in the master: the same
             # constraints from the same parameters, held exactly
+            # unsupported() declined a battery without set_use_battery, which sets both
+            assert soc_init is not None and soc_final is not None
             b = replace(_battery(pc, float(soc_init), buy), terminal_price=0.0)
             cap = float(pc["battery_nominal_energy_capacity"]) / 1000.0
             s0 = b.capacity_kwh * b.soc_initial_frac
             reach_up = s0 + n * dt * b.eta_c * b.p_charge_max_kw
             reach_dn = s0 - n * dt * b.p_discharge_max_kw / b.eta_d
             target = float(soc_final) * cap
-            site_kw["battery"] = b
+            battery_cfg = b
             targets["battery"] = min(max(target, b.soe_floor_kwh, reach_dn), b.capacity_kwh, reach_up)
         elif g["solver"] == "emhass":
             loads = sorted(int(d[len("deferrable"):]) for d in g["devices"] if d.startswith("deferrable"))
@@ -445,11 +492,12 @@ def optimize(opt: Any, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.
         elif g["solver"] == PACKAGE:
             for d in g["devices"]:
                 if d == "battery":
-                    site_kw["battery"] = _battery(pc, float(soc_init), buy)
+                    assert soc_init is not None      # as above: set_use_battery is on
+                    battery_cfg = _battery(pc, float(soc_init), buy)
                 elif d == "water_heater":
-                    site_kw["water_heater"] = _config(WaterHeaterConfig, g.get("config", {}))
+                    tank_cfg = _config(WaterHeaterConfig, g.get("config", {}))
                 elif d == "hvac":
-                    site_kw["hvac"] = _config(HvacConfig, g.get("config", {}))
+                    hvac_cfg = _config(HvacConfig, g.get("config", {}))
                 else:
                     log.warning(f"optimization_backend: {PACKAGE} has no solver for {d!r}; using the default solver")
                     return None
@@ -458,20 +506,20 @@ def optimize(opt: Any, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.
             return None
 
     horizon = Horizon(dt=dt, hours=n * dt)
-    col = lambda name, default: (np.asarray(data_opt[name].values, dtype=float)       # noqa: E731
-                                 if name in data_opt else np.full(n, default))
+    def col(name: str, default: float) -> np.ndarray:
+        return np.asarray(data_opt[name].values, dtype=float) if name in data_opt else np.full(n, default)
+
     fc = Forecasts(buy=buy, sell=sell, load=load_w / 1000.0, solar=pv_w / 1000.0,
                    outdoor_temp=col("outdoor_temperature_forecast", 20.0),
                    hot_water_demand=col("hot_water_demand_kw", 0.0))
     grid = GridLimits(max_import_kw=float(pc.get("maximum_power_from_grid", 9000)) / 1000.0,
                       max_export_kw=float(pc.get("maximum_power_to_grid", 9000)) / 1000.0,
                       allow_curtailment=bool(pc.get("compute_curtailment", False)))
-    site = SiteConfig(horizon=horizon, battery=site_kw.get("battery"), water_heater=site_kw.get("water_heater"),
-                      hvac=site_kw.get("hvac"), grid=grid)
+    site = SiteConfig(horizon=horizon, battery=battery_cfg, water_heater=tank_cfg, hvac=hvac_cfg, grid=grid)
     ceiling = np.maximum(pv_w - load_w, 0.0) / 1000.0 if oc.get("set_nodischarge_to_grid") else None
     wh = site.water_heater
     tank_in_master = bool(wh is not None and wh.n_duty_levels > 2)
-    run_kw = RUN_DEFAULTS if participants else {}      # with no EMHASS participant, the package's own defaults
+    run_kw: RunOptions = RUN_DEFAULTS if participants else {}   # with no EMHASS participant, the package's own defaults
     co = DWCoordinator(site, fc, tank_in_master=tank_in_master,
                        participants=participants, export_ceiling=ceiling, soe_targets=targets)
     try:
@@ -498,7 +546,8 @@ def optimize(opt: Any, data_opt: pd.DataFrame, p_pv: npt.ArrayLike, p_load: npt.
     return res
 
 
-def shares(co: DWCoordinator, plan: dict, co_dark: DWCoordinator, plan_dark: dict) -> dict[str, float]:
+def shares(co: DWCoordinator, plan: Mapping[str, Column], co_dark: DWCoordinator,
+           plan_dark: Mapping[str, Column]) -> dict[str, float]:
     """Each player's share of the saving over the horizon (currency): solar and
     every device or participant (dw.attribution: reimbursed its private-cost
     change, then an Owen value between solar and the devices, Aumann-Shapley
@@ -511,7 +560,7 @@ def shares(co: DWCoordinator, plan: dict, co_dark: DWCoordinator, plan_dark: dic
 
 def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
              pv_w: np.ndarray, load_w: np.ndarray, buy: np.ndarray, sell_in: np.ndarray,
-             soc_init: float, devices: list[str], participants: list[EmhassParticipant],
+             soc_init: float | None, devices: list[str], participants: list[EmhassParticipant],
              site: SiteConfig) -> pd.DataFrame:
     """The coordinator's result `r` as EMHASS's opt_res: the same columns and
     units as perform_optimization returns, plus fed_* columns.

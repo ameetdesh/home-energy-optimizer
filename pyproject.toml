@@ -37,6 +37,7 @@ Demo = "https://ameetdesh.github.io/multi_device_optimizer_standalone.html"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
+typecheck = ["mypy>=2.4,<2.5"]  # pinned: a new mypy can find new errors on its own
 ha = ["websockets>=12"]          # tools/ha-lambda-demo talks to HA over the websocket API
 
 # One package: the core, and the two coordinators as home_energy_optimizer.dw and
@@ -48,6 +49,44 @@ include = ["home_energy_optimizer*"]
 
 [tool.setuptools.package-data]
 home_energy_optimizer = ["schemas/*.json"]
+
+[tool.mypy]
+files = ["src/home_energy_optimizer"]
+# CI checks on 3.12; fixing the target keeps a local run on another interpreter
+# reporting the same thing. Runtime support for 3.10 is the test matrix's job.
+python_version = "3.12"
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unused_configs = true
+
+# Not dependencies of this package: the Pyodide-only kernels wheel, EMHASS with
+# the pandas it brings, and scipy (the DW master's optional HiGHS cross-check).
+# Each is imported only where it is used.
+[[tool.mypy.overrides]]
+module = ["dp_kernels", "emhass.*", "pandas", "scipy", "scipy.*"]
+ignore_missing_imports = true
+
+# The surfaces other code is written against are held to mypy's --strict.
+# `strict` itself is global-only, so its per-module flags are listed.
+[[tool.mypy.overrides]]
+module = [
+    "home_energy_optimizer.planner",
+    "home_energy_optimizer.dw.integrate",
+    "home_energy_optimizer.integrations.emhass",
+    "home_energy_optimizer.interface",
+    "home_energy_optimizer.evcc",
+]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

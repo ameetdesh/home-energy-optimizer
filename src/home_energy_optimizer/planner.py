@@ -14,13 +14,16 @@ this one) and is imported only when asked for.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .coordinate import coordinate
 from .types import CoordinationResult, Forecasts, SiteConfig
 
-if TYPE_CHECKING:  # a runtime import would be circular
+if TYPE_CHECKING:  # a runtime import would be circular, or load DW for a type
+    from typing import Unpack
+
     from .admm.coordinator import WarmStart
+    from .dw.integrate import PlanOptions
 
 METHODS = ("dw", "admm")
 
@@ -30,7 +33,7 @@ def _admm(cfg: SiteConfig, fc: Forecasts, warm: WarmStart | None = None) -> Coor
 
 
 def plan(cfg: SiteConfig, fc: Forecasts, method: str = "dw", fallback: bool = True,
-         warm: WarmStart | None = None, **kw: Any) -> CoordinationResult:
+         warm: WarmStart | None = None, **kw: Unpack[PlanOptions]) -> CoordinationResult:
     """Plan a horizon with the chosen coordinator.
 
     With `fallback` (the default), a DW run that cannot start or finish -

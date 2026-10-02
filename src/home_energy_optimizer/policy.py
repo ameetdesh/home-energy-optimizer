@@ -27,7 +27,7 @@ import numpy as np
 
 from .dp_battery import rollout_battery
 from .interp import interp_grid
-from .types import BatteryConfig, CoordinationResult, Forecasts, Horizon, SiteConfig
+from .types import BatteryConfig, CoordinationResult, DeviceSolution, Forecasts, Horizon, SiteConfig
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,9 @@ class PolicySnapshot:
         # Prefer the economics-only solve; fall back to the plan's own battery
         # solution only if pricing was not run.
         sol = res.battery_pricing or res.devices["battery"]
+        if not isinstance(sol, DeviceSolution):
+            raise ValueError("the battery was planned as an LP step and never priced: "
+                             "it has no value function to snapshot")
         n = cfg.horizon.steps
         return cls(
             horizon=cfg.horizon,
@@ -492,9 +495,11 @@ def clamp(
     hit: list[str] = []
 
     if limits.max_charge_kw is not None and a > limits.max_charge_kw:
-        a, _ = limits.max_charge_kw, hit.append("max_charge_kw")
+        a = limits.max_charge_kw
+        hit.append("max_charge_kw")
     if limits.max_discharge_kw is not None and a < -limits.max_discharge_kw:
-        a, _ = -limits.max_discharge_kw, hit.append("max_discharge_kw")
+        a = -limits.max_discharge_kw
+        hit.append("max_discharge_kw")
 
     if limits.max_import_kw is not None:
         # net import = battery draw + everything else
