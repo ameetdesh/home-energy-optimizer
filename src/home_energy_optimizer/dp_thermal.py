@@ -190,6 +190,7 @@ def solve_water_heater(
     POL_f = np.zeros(POL.shape)
     # The compiled kernel is the on/off element only.
     tether = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when tethered
     compiled = cfg.n_duty_levels == 2 and limits is None and not tether and kernel_water_heater(
         np.ascontiguousarray(buy, dtype=np.float64),
         np.ascontiguousarray(sell, dtype=np.float64),
@@ -234,7 +235,7 @@ def solve_water_heater(
             # (t_comfort - t_min) however cold the tank actually got.
             comfort = -wh_discomfort(cfg, T_next, ref_price, dt)
             if tether:
-                cost = cost - (admm_rho / 2.0) * (q_heat - admm_target[t]) ** 2 * dt
+                cost = cost - (admm_rho / 2.0) * (q_heat - target[t]) ** 2 * dt
 
             Q = cost + comfort + V_next
             improve = Q > best
@@ -379,6 +380,7 @@ def solve_hvac(
     # under one flat band. A band that changes goes through it one run of
     # equal-band slots at a time, the last run first; a flat band is one run.
     tether = admm_target is not None and admm_rho > 0
+    target = admm_target if admm_target is not None else np.zeros(0)   # read only when tethered
     compiled = limits is None and cfg.n_duty_levels == 2 and not tether and cfg.comfort_mode == "linear"
     if compiled:
         series = [np.ascontiguousarray(x, dtype=np.float64) for x in (buy, sell, dp_load, outdoor_temp)]
@@ -419,7 +421,7 @@ def solve_hvac(
             ) * dt
             comfort = -hvac_discomfort(cfg, T_next, ref_price, dt, low[t + 1], high[t + 1])
             if tether:
-                elec = elec - (admm_rho / 2.0) * (cfg.power_kw * abs(a) * duty - admm_target[t]) ** 2 * dt
+                elec = elec - (admm_rho / 2.0) * (cfg.power_kw * abs(a) * duty - target[t]) ** 2 * dt
 
             Q = elec + comfort + V_next
             improve = Q > best

@@ -42,7 +42,7 @@ without coordination), and their private cost is what their answers report.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import numpy as np
 
@@ -50,6 +50,10 @@ from home_energy_optimizer.dw.coordinator import Column, Device, DWCoordinator
 from home_energy_optimizer.coordinate import apply_curtailment, breach_price
 from home_energy_optimizer.dp_thermal import baseline_hvac, baseline_water_heater
 from home_energy_optimizer.types import SiteConfig
+
+# A plan entry as callers hand it in: a coordinator Column, or a
+# (power kW, trajectory[, private cost]) tuple.
+PlanEntry = Column | tuple
 
 
 def _tariff_cost(co: DWCoordinator, z: np.ndarray) -> np.ndarray:
@@ -97,13 +101,13 @@ def _participant(co: DWCoordinator, key: str) -> Device | None:
     return next((d for d in co.devices if d.key == key and d.kind == "participant"), None)
 
 
-def _entry(e: Column | tuple) -> tuple[np.ndarray, np.ndarray, float | None]:
+def _entry(e: PlanEntry) -> tuple[np.ndarray, np.ndarray, float | None]:
     """A plan entry as (power kW, state trajectory, private cost or None).
     Accepts a coordinator Column or a (power, trajectory[, cost]) tuple."""
-    if hasattr(e, "power"):
-        return e.power, e.trajectory, float(e.cost)
-    cost = e[2] if len(e) > 2 else None
-    return e[0], e[1], None if cost is None else float(cost)
+    if isinstance(e, tuple):
+        cost = e[2] if len(e) > 2 else None
+        return e[0], e[1], None if cost is None else float(cost)
+    return e.power, e.trajectory, float(e.cost)
 
 
 def _private_cost(co: DWCoordinator, key: str, traj: np.ndarray, cost: float | None) -> float:
@@ -124,7 +128,9 @@ def _device(co: DWCoordinator, key: str) -> Device:
         if k == key:
             return Device(key, "battery", b)
     if key == "water_heater":
+        assert co.cfg.water_heater is not None
         return Device(key, "water_heater", co.cfg.water_heater)
+    assert co.cfg.hvac is not None
     return Device(key, "hvac", co.cfg.hvac)
 
 
@@ -138,37 +144,40 @@ def baseline(co: DWCoordinator, key: str) -> tuple[np.ndarray, np.ndarray]:
 def _baseline(co: DWCoordinator, key: str) -> tuple[np.ndarray, np.ndarray, float | None]:
     """`baseline`, plus the private cost a participant reported for it (None
     for a site device). A participant is asked once per coordinator."""
-    p = _participant(co, key)
-    if p is not None:
+    part = _participant(co, key)
+    if part is not None:
         memo = co.__dict__.setdefault("_baseline_answers", {})
         if key not in memo:
-            memo[key] = p.cfg.baseline()
+            memo[key] = part.participant.baseline()
         a = memo[key]
         return np.asarray(a.plan_kw, dtype=float), np.asarray(a.trajectory, dtype=float), float(a.private_cost)
     cfg, fc, h = co.cfg, co.fc, co.cfg.horizon
     if key.startswith("battery"):
-        b = _device(co, key).cfg
+        b = _device(co, key).battery_cfg
         return np.zeros(h.steps), np.full(h.steps + 1, b.capacity_kwh * b.soc_initial_frac), None
     if key == "water_heater":
+        assert cfg.water_heater is not None
         t, p = baseline_water_heater(cfg.water_heater, h, fc.hot_water_demand)
         return p, t, None
+    assert cfg.hvac is not None
     t, p = baseline_hvac(cfg.hvac, h, fc.outdoor_temp)
     return p, t, None
 
 
-def _device_shares(co: DWCoordinator, plan: dict, keys: list[str]) -> tuple[dict, dict]:
+def _device_shares(co: DWCoordinator, plan: Mapping[str, PlanEntry],
+                   keys: list[str]) -> tuple[dict, dict]:
     """Aumann-Shapley shares of the devices' saving over their baseline, with
     the PV (whatever co.fc holds) fixed: each device's net gain, and its
     private-cost change."""
     fc = co.fc
     base = {k: _baseline(co, k) for k in keys}
-    plan = {k: _entry(plan[k]) for k in keys}
+    entries = {k: _entry(plan[k]) for k in keys}
     z0 = fc.load - fc.solar + sum(base[k][0] for k in keys)
-    z1 = fc.load - fc.solar + sum(plan[k][0] for k in keys)
+    z1 = fc.load - fc.solar + sum(entries[k][0] for k in keys)
     q = _path_prices(co, z0, z1, _meter_cost)
-    df = {k: _private_cost(co, k, plan[k][1], plan[k][2]) - _private_cost(co, k, base[k][1], base[k][2])
+    df = {k: _private_cost(co, k, entries[k][1], entries[k][2]) - _private_cost(co, k, base[k][1], base[k][2])
           for k in keys}
-    return {k: -float(q @ (plan[k][0] - base[k][0])) - df[k] for k in keys}, df
+    return {k: -float(q @ (entries[k][0] - base[k][0])) - df[k] for k in keys}, df
 
 
 def device_keys(co: DWCoordinator) -> list[str]:
@@ -179,8 +188,8 @@ def device_keys(co: DWCoordinator) -> list[str]:
     return keys + [d.key for d in co.devices if d.kind == "participant"]
 
 
-def ledger(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]],
-           co_dark: DWCoordinator, plan_dark: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict:
+def ledger(co: DWCoordinator, plan: Mapping[str, PlanEntry],
+           co_dark: DWCoordinator, plan_dark: Mapping[str, PlanEntry]) -> dict:
     """Each player's bill before and after, the private-cost change and the gain.
 
     `plan` maps device key -> its plan, for every device on the site and every
@@ -195,18 +204,18 @@ def ledger(co: DWCoordinator, plan: dict[str, tuple[np.ndarray, np.ndarray]],
     fc = co.fc
     keys = device_keys(co)
     base = {k: _baseline(co, k) for k in keys}
-    plan = {k: _entry(plan[k]) for k in keys}
+    entries = {k: _entry(plan[k]) for k in keys}
 
     # meter flows: baseline with no PV, thermostats with PV, the plan
     z_dark = fc.load + sum(base[k][0] for k in keys)
     z_thermo = z_dark - fc.solar
-    z_plan = z_thermo + sum(plan[k][0] - base[k][0] for k in keys)
+    z_plan = z_thermo + sum(entries[k][0] - base[k][0] for k in keys)
     bill_dark = float(_tariff_cost(co, z_dark).sum())
     bill_thermo = float(_meter_cost(co, z_thermo).sum())
     bill_plan = float(_meter_cost(co, z_plan).sum())
 
     # the two orders of arrival
-    first_pv, df = _device_shares(co, plan, keys)             # devices after PV
+    first_pv, df = _device_shares(co, entries, keys)             # devices after PV
     first_dev, _ = _device_shares(co_dark, plan_dark, keys)   # devices before PV
     total = bill_dark - bill_plan - sum(df.values())
     v_pv, v_dev = bill_dark - bill_thermo, sum(first_dev.values())

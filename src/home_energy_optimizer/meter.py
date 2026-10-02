@@ -30,7 +30,7 @@ def limit_cost(flow: np.ndarray, sell_t: float, limits: Limits | None) -> np.nda
     """
     if limits is None:
         return 0.0
-    cost = 0.0
+    cost: np.ndarray | float = 0.0
     if limits.max_import_kw is not None:
         cost = cost + limits.breach_price * np.maximum(flow - limits.max_import_kw, 0.0)
     if limits.max_export_kw is not None:

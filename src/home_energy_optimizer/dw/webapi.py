@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import Any
 from dataclasses import replace
 
 import numpy as np
@@ -72,7 +73,7 @@ def _view(co: DWCoordinator, fc: Forecasts, snap: dict, batt_keys: list[str]) ->
     for p in snap["powers"].values():
         net = net + p
     net, curtail = apply_curtailment(net, fc.solar, fc.sell, co.cfg.grid)
-    view = {
+    view: dict[str, Any] = {
         # per device, per hour: cost of being asked to consume one step more /
         # less, re-planning after (src/home_energy_optimizer/dw/sensitivity.py); None where inadmissible
         "flex": {k: {d: [None if v is None else round(v, 5) for v in arr] for d, arr in f.items()}
@@ -252,6 +253,7 @@ def solve(p: dict, progress: Callable[..., None] | None = None) -> dict:
     # The recovered plan carries the FINAL master's prices: it is the plan
     # those prices were computed for, minus the fractional mixing.
     final = r.relaxed_view
+    assert final is not None and r.plan_parts is not None    # both kept by run(record=True)
     plan_snap = {
         "powers": {k: c.power for k, c in r.plan.items()},
         "trajectories": {k: c.trajectory for k, c in r.plan.items()},
@@ -398,12 +400,13 @@ def solve_admm(p: dict, progress: Callable[..., None] | None = None) -> dict:
     # converges to the optimum - and rounding the kink would only move it.
     # With the on/off tank or HVAC the rounding helps runs converge.
     exact = lp and site.water_heater is None and site.hvac is None
+    exact_only: dict[str, Any] = {"kink_smoothing": 0.0} if exact else {}
     cc = CoordinationConfig(exchange_rho=float(p.get("xrho", 0.1)),
                             exchange_rho_gain=0.01 if p.get("rho_adapt", True) else 0.0,
                             exchange_rounds=rounds, polish=bool(p.get("polish", True)),
                             exchange_battery_step="lp" if lp else "dp",
                             exchange_warm_battery=bool(p.get("warm_start", False)),
-                            **({"kink_smoothing": 0.0} if exact else {}))
+                            **exact_only)
     site = replace(site, coordination=cc)
     pid = str(p.get("_progress_id", ""))
     run = _RUNS.get(pid) if p.get("resume") else None
@@ -504,7 +507,7 @@ def solve_admm(p: dict, progress: Callable[..., None] | None = None) -> dict:
     }
 
 
-ROUTES = {"solve": solve, "progress": progress, "ledger": ledger_route}
+ROUTES: dict[str, Callable[..., dict]] = {"solve": solve, "progress": progress, "ledger": ledger_route}
 
 
 def call(name: str, payload: dict,

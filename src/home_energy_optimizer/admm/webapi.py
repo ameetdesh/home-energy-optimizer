@@ -287,7 +287,7 @@ def round_prices(p: dict) -> dict:
     with _lock:
         site, fc = _state.get("site"), _state.get("forecasts")
         res, cache = _state.get("result"), _state.get("prices")
-    if res is None:
+    if res is None or site is None or fc is None or cache is None:   # a solve sets all four
         raise ValueError("no solve yet")
     r = int(p["r"])
     if not 0 <= r < len(res.rounds):

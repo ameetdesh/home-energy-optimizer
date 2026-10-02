@@ -9,8 +9,12 @@ un-reusable outside the single browser page they were written for.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:  # admm.battery_qp imports this module
+    from .admm.battery_qp import BatteryStep
 
 # --------------------------------------------------------------------------
 # Horizon
@@ -338,9 +342,11 @@ class HvacConfig:
 
     def band_at(self, i: int) -> tuple[float, float]:
         """(low, high) at point i of the room trajectory; -1 is the horizon's end."""
-        if self.comfort_low_profile is None:
+        low, high = self.comfort_low_profile, self.comfort_high_profile
+        if low is None:
             return self.t_comfort_low, self.t_comfort_high
-        return float(self.comfort_low_profile[i]), float(self.comfort_high_profile[i])
+        assert high is not None, "validate() requires both profiles or neither"
+        return float(low[i]), float(high[i])
 
     def comfort_band(self, n: int) -> tuple[np.ndarray, np.ndarray]:
         """(low, high) at the n + 1 points of an n-slot room trajectory."""
@@ -539,7 +545,8 @@ class SiteConfig:
 
     def without(self, *names: str) -> SiteConfig:
         """Return a copy with the named devices disabled. Test convenience."""
-        return replace(self, **{n: None for n in names})
+        off: dict[str, Any] = {n: None for n in names}
+        return replace(self, **off)
 
 
 # --------------------------------------------------------------------------
@@ -669,7 +676,9 @@ class RoundRecord:
 class CoordinationResult:
     """Output of a full coordinated solve."""
 
-    devices: dict[str, DeviceSolution]
+    # A DP solution per device - or, for a battery ADMM ran as an exact LP
+    # step, that step's plan, which has no value function (battery_pricing has).
+    devices: dict[str, DeviceSolution | BatteryStep]
     net_grid: np.ndarray
     import_cost: float
     export_revenue: float

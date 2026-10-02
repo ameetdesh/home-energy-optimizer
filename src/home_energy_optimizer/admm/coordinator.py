@@ -40,8 +40,9 @@ steps (a small interior point method in numpy).
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TypeVar
 
 import numpy as np
@@ -70,6 +71,7 @@ from home_energy_optimizer.types import (
     HvacConfig,
     RoundRecord,
     SiteConfig,
+    SocGate,
     WaterHeaterConfig,
 )
 
@@ -141,11 +143,12 @@ class _Grid:
             else:
                 m = val < best_val
                 best, best_val = np.where(m, z, best), np.where(m, val, best_val)
+        assert best is not None    # the pieces cover the line, so one was cheapest
         return -best
 
 
 def _objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
-               sols: dict[str, DeviceSolution], batteries: Iterable[str],
+               sols: Mapping[str, BatteryStep | DeviceSolution], batteries: Iterable[str],
                ref: float) -> float:
     """A plan's cost as the testbed reports it: total_objective plus the
     thermal devices' horizon-edge terms their DPs optimise (as
@@ -154,10 +157,11 @@ def _objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
     hv = sols["hvac"].trajectory if "hvac" in sols else None
     soe = {k: sols[k].trajectory for k in batteries if k in sols} or None
     obj = total_objective(cfg, net, fc, wh, hv, soe)
-    if wh is not None and cfg.water_heater.comfort_mode == "linear":
-        obj += cfg.water_heater.heat_capacity_kwh_per_k * ref * max(0.0, cfg.water_heater.t_comfort - float(wh[-1]))
-    if hv is not None and cfg.hvac.comfort_mode == "linear":
-        obj += float(hvac_discomfort(cfg.hvac, np.array([float(hv[-1])]), ref, 1.0, *cfg.hvac.band_at(-1))[0])
+    wcfg, hcfg = cfg.water_heater, cfg.hvac      # set whenever their plans are
+    if wh is not None and wcfg is not None and wcfg.comfort_mode == "linear":
+        obj += wcfg.heat_capacity_kwh_per_k * ref * max(0.0, wcfg.t_comfort - float(wh[-1]))
+    if hv is not None and hcfg is not None and hcfg.comfort_mode == "linear":
+        obj += float(hvac_discomfort(hcfg, np.array([float(hv[-1])]), ref, 1.0, *hcfg.band_at(-1)).item())
     return float(obj)
 
 
@@ -241,6 +245,13 @@ class ExchangeRun:
 
         # ---- the terminals --------------------------------------------------
         self.grid = _Grid(fc.buy, fc.sell, dt, g.max_import_kw, g.max_export_kw, c_br, cc.kink_smoothing)
+        def dp_step(b: BatteryConfig, gates: tuple[SocGate, ...]
+                    ) -> Callable[[np.ndarray, float], DeviceSolution]:
+            def step(v: np.ndarray, r: float) -> DeviceSolution:
+                return solve_battery(b, h, zero, zero, dp_load=zero, admm_target=v, admm_rho=r / dt,
+                                     soc_gates=gates)
+            return step
+
         keys: list[str] = []
         steps: list[Callable[[np.ndarray, float], BatteryStep | DeviceSolution]] = []
         real: dict[str, BatteryConfig] = {}
@@ -252,10 +263,9 @@ class ExchangeRun:
                 gates = cfg.soc_gates if key == "battery" else ()
                 keys.append(key)
                 if cc.exchange_battery_step == "lp" and lp_step_applies(b) and not gates:
-                    steps.append(lambda v, r, key=key, b=pinned: self._battery_lp(key, b, v, r))
+                    steps.append(partial(self._battery_lp, key, pinned))
                 else:
-                    steps.append(lambda v, r, b=pinned, gates=gates: solve_battery(
-                        b, h, zero, zero, dp_load=zero, admm_target=v, admm_rho=r / dt, soc_gates=gates))
+                    steps.append(dp_step(pinned, gates))
                 real[key] = b
         ref = self.ref
         wh = _relaxed(cfg.water_heater, cc.relax_levels, dt)
@@ -286,7 +296,8 @@ class ExchangeRun:
         self.alpha, self.c_prev = 1.0, np.inf
         self.eps = cc.exchange_eps * np.sqrt(self.N * n)
         self.records: list[RoundRecord] = []
-        self.best_obj, self.best_round, self.best_sols, self.last_improve = np.inf, 0, None, 0
+        self.best_sols: dict[str, BatteryStep | DeviceSolution] | None = None
+        self.best_obj, self.best_round, self.last_improve = np.inf, 0, 0
         self.stop_reason = "iteration cap"
         self.k = 0                                          # iterations run
         self.done = False
@@ -306,6 +317,7 @@ class ExchangeRun:
 
     def _battery_lp(self, key: str, b: BatteryConfig, v: np.ndarray, rho: float) -> BatteryStep:
         """A battery's exact LP step, started from its previous solution."""
+        assert b.terminal_price is not None    # pinned when the step was built
         sol = battery_prox(b, self.dt, v, rho, float(b.terminal_price),
                            start=self._qp.get(key) if self.cc.exchange_warm_battery else None)
         self._qp[key] = sol.state
@@ -320,8 +332,10 @@ class ExchangeRun:
         """The real (on/off, three-way) device's plan against the others."""
         cfg, h, fc = self.cfg, self.h, self.fc
         if key == "water_heater":
+            assert cfg.water_heater is not None
             return solve_water_heater(cfg.water_heater, h, fc.buy, self.sell_dev, fc.hot_water_demand,
                                       dp_load=others, limits=self.limits)
+        assert cfg.hvac is not None
         return solve_hvac(cfg.hvac, h, fc.buy, self.sell_dev, fc.outdoor_temp, dp_load=others, limits=self.limits)
 
     def step(self, n_iter: int | None = None) -> bool:

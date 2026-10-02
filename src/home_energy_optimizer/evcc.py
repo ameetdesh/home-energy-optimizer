@@ -73,7 +73,7 @@ class ContractError(ValueError):
 # --------------------------------------------------------------------------
 
 
-def _require(d: dict, key: str) -> Any:
+def _require(d: dict[str, Any], key: str) -> Any:
     if key not in d:
         raise ContractError(f"missing required field {key!r}")
     return d[key]
@@ -97,7 +97,7 @@ def horizon_from_dt(dt_seconds: list[int]) -> tuple[Horizon, float, bool]:
     return Horizon(dt=dt_h, hours=dt_h * n), dt_h, len(set(dt_seconds)) == 1
 
 
-def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
+def request_to_site(payload: dict[str, Any]) -> tuple[SiteConfig, Forecasts, dict[str, Any]]:
     """Translate an `OptimizationInput` into a SiteConfig + Forecasts.
 
     Returns the pair plus a `meta` dict describing what had to be approximated,
@@ -227,7 +227,7 @@ def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
         hot_water_demand=np.zeros(n),
     )
 
-    meta = {
+    meta: dict[str, Any] = {
         "slots": n,
         "dt_seconds_modal": int(dt_h * SECONDS_PER_HOUR),
         "uniform_dt": uniform,
@@ -263,7 +263,7 @@ def request_to_site(payload: dict) -> tuple[SiteConfig, Forecasts, dict]:
 
 
 def result_to_response(site: SiteConfig, fc: Forecasts, res: CoordinationResult,
-                       meta: dict) -> dict:
+                       meta: dict[str, Any]) -> dict[str, Any]:
     """Translate a CoordinationResult into evcc's `OptimizationResult`."""
     dt_seconds = np.array(meta["dt_seconds"], dtype=float)
     slot_h = dt_seconds / SECONDS_PER_HOUR
@@ -325,20 +325,21 @@ def result_to_response(site: SiteConfig, fc: Forecasts, res: CoordinationResult,
             "grid_export_limit_hit": bool(export_overshoot.sum() > 1e-6),
         },
     }
-    if res.lower_bound is not None:
+    lb, obj = res.lower_bound, res.plan_objective
+    if lb is not None and obj is not None:
         # Not part of evcc's schema. Costs, not benefits: no plan costs less
         # than `lower_bound`, so this one is within `gap` of the best possible
         # (up to the device DPs' grids).
         response["_hems_policy_certificate"] = {
             "method": res.method,
-            "plan_cost": round(float(res.plan_objective), 6),
-            "lower_bound": round(float(res.lower_bound), 6),
-            "gap": round(float(res.gap), 6),
+            "plan_cost": round(float(obj), 6),
+            "lower_bound": round(float(lb), 6),
+            "gap": round(float(obj - lb), 6),
         }
     return response
 
 
-def optimize_charge_schedule(payload: dict, method: str | None = None) -> dict:
+def optimize_charge_schedule(payload: dict[str, Any], method: str | None = None) -> dict[str, Any]:
     """Full `POST /optimize/charge-schedule` handler.
 
     Returns evcc's `OptimizationResult`. Contract violations raise
@@ -371,7 +372,7 @@ def optimize_charge_schedule(payload: dict, method: str | None = None) -> dict:
     return response
 
 
-def health() -> dict:
+def health() -> dict[str, Any]:
     """`GET /optimize/health`."""
     from . import __version__
 

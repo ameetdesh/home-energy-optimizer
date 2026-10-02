@@ -13,7 +13,7 @@ certifies its plans (docs/theory.tex).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -37,6 +37,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:  # admm.coordinator imports this module, so only for checkers
+    from .admm.battery_qp import BatteryStep
     from .admm.coordinator import WarmStart
 
 
@@ -295,7 +296,8 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
 
-    def objective(devices: dict[str, DeviceSolution]) -> tuple[float, np.ndarray, np.ndarray]:
+    def objective(devices: Mapping[str, DeviceSolution | BatteryStep]
+                  ) -> tuple[float, np.ndarray, np.ndarray]:
         net = fc.net_fixed_demand + sum(devices[k].power for k in dev_keys)
         net, curtail = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
         soe = {k: devices[k].trajectory for k in dev_keys if k in batt} or None
@@ -314,9 +316,11 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
                 sol = solve_battery(batt[k], h, buy, sell, dp_load=others, admm_rho=0.0,
                                     soc_gates=cfg.soc_gates if k == "battery" else (), limits=limits)
             elif k == "water_heater":
+                assert cfg.water_heater is not None
                 sol = solve_water_heater(cfg.water_heater, h, buy, sell, fc.hot_water_demand,
                                          dp_load=others, limits=limits)
             else:
+                assert cfg.hvac is not None
                 sol = solve_hvac(cfg.hvac, h, buy, sell, fc.outdoor_temp, dp_load=others,
                                  limits=limits)
             trial = dict(res.devices)
@@ -359,6 +363,7 @@ def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
     CONDITIONAL on those plans - which is exactly what the price signal claims
     to be, and no more.
     """
+    assert cfg.battery is not None, "pricing needs a battery"
     dp_load = (
         res.battery_dp_load
         if res.battery_dp_load is not None
@@ -431,9 +436,11 @@ def _apply_baseline_fallback(
             idle_soe = np.full(n + 1, b.capacity_kwh * b.soc_initial_frac)
             candidates.append((key, np.zeros(n), idle_soe))
         if "water_heater" in dev_keys:
+            assert cfg.water_heater is not None
             temp, pw = baseline_water_heater(cfg.water_heater, cfg.horizon, fc.hot_water_demand)
             candidates.append(("water_heater", pw, temp))
         if "hvac" in dev_keys:
+            assert cfg.hvac is not None
             temp, pw = baseline_hvac(cfg.hvac, cfg.horizon, fc.outdoor_temp)
             candidates.append(("hvac", pw, temp))
 

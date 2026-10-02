@@ -21,11 +21,15 @@ tier answer "what now?" from a state the plan did not predict.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Unpack
 
 import numpy as np
 
-from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult
+from home_energy_optimizer.admm.battery_qp import BatteryStep
+from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult, RunOptions
 from home_energy_optimizer.coordinate import (
     apply_curtailment,
     baseline_solution,
@@ -40,8 +44,16 @@ _EMPTY2 = np.empty((0, 0))
 _EMPTY1 = np.empty(0)
 
 
+class PlanOptions(RunOptions, total=False):
+    """`dw_plan`'s keyword options - its own two, then `DWCoordinator.run`'s -
+    which is what `plan(..., **options)` passes on."""
+
+    tank_in_master: bool | str
+    ev_duty_cycle: bool
+
+
 def dw_plan(cfg: SiteConfig, fc: Forecasts, tank_in_master: bool | str = "auto",
-            ev_duty_cycle: bool = False, **run_kw: Any) -> CoordinationResult:
+            ev_duty_cycle: bool = False, **run_kw: Unpack[RunOptions]) -> CoordinationResult:
     """Plan with the recommended DW configuration; return a CoordinationResult.
 
     `tank_in_master="auto"` puts the tank in the master LP when its element
@@ -67,7 +79,7 @@ def dw_plan(cfg: SiteConfig, fc: Forecasts, tank_in_master: bool | str = "auto",
 
 def to_coordination_result(co: DWCoordinator, r: DWResult) -> CoordinationResult:
     cfg, fc, dt = co.cfg, co.fc, co.dt
-    devices = {
+    devices: dict[str, DeviceSolution | BatteryStep] = {
         k: DeviceSolution(trajectory=c.trajectory.copy(), power=c.power.copy(),
                           value=_EMPTY2, policy=_EMPTY2, states=_EMPTY1, actions=_EMPTY1)
         for k, c in r.plan.items()
