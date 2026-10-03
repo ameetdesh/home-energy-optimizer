@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pytest
 
-from home_energy_optimizer.integrations.emhass import _battery, optimize, unsupported
+from home_energy_optimizer.integrations.emhass import _battery, optimize, plan_status, unsupported
 
 PLANT = {"battery_nominal_energy_capacity": 10000, "battery_minimum_state_of_charge": 0.3,
          "battery_maximum_state_of_charge": 0.9, "battery_charge_power_max": 5000,
@@ -46,7 +46,23 @@ def test_a_battery_participant_without_an_emhass_battery_falls_back():
         time_step = 0.5
         logger = logging.getLogger("emhass-test")
 
-    assert unsupported(Opt.optim_conf, Opt.plant_conf, Opt.costfun, {}) is not None
+    reason = unsupported(Opt.optim_conf, Opt.plant_conf, Opt.costfun, {})
+    assert reason is not None
     n = 4
-    assert optimize(Opt(), list(range(n)), np.zeros(n), np.full(n, 500.0),
+    opt = Opt()
+    assert optimize(opt, list(range(n)), np.zeros(n), np.full(n, 500.0),
                     np.full(n, 0.3), np.full(n, 0.1)) is None
+    # ...and say why, so EMHASS can report which solver made the plan.
+    assert opt.fed_fallback_reason == f"not available for {reason}"
+
+
+def test_a_plan_is_optimal_only_when_its_gap_is_closed():
+    """"Optimal" is a proof: the plan is within 0.1% of its lower bound. A
+    plan the coordinator stopped on with the bound still open is runnable,
+    and EMHASS publishes it, but it is reported "Optimal_Inaccurate"."""
+    assert plan_status(10.0, 10.0) == "Optimal"
+    assert plan_status(10.0, 9.995) == "Optimal"           # 0.05% of 10
+    assert plan_status(10.0, 9.9) == "Optimal_Inaccurate"   # 1%
+    assert plan_status(0.0, -0.0005) == "Optimal"          # absolute below 1
+    assert plan_status(0.0, -0.01) == "Optimal_Inaccurate"
+    assert plan_status(-200.0, -200.1) == "Optimal"         # a profit: scale by |upper|

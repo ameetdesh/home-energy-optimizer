@@ -71,6 +71,9 @@ class EmhassOptimization(Protocol):
     time_step: float               # hours
     logger: logging.Logger
     optim_status: str
+    # Set by this adapter on every call: why it declined, or None when it
+    # planned. EMHASS reads it to say which solver actually made the plan.
+    fed_fallback_reason: str | None
     prob: Any                      # the solved problem; its .value is the objective
     _persist_q_input: Callable[..., None]
 
@@ -87,6 +90,27 @@ PACKAGE = "home_energy_optimizer"
 # plan each and let the rest re-plan around them (the dive).
 RUN_DEFAULTS: RunOptions = {"stall": 2, "smoothing": 0.0, "dive": 6}
 OK_STATUSES = ("Optimal", "Optimal (Relaxed)")
+# A plan is reported "Optimal" only when it is proven within this relative
+# distance of the best possible (DWCoordinator.run's own gap_tol); otherwise
+# "Optimal_Inaccurate": a runnable plan, published as usual (both are in
+# EMHASS's OK statuses), but not a certified optimum - the coordinator stopped
+# on a stall, its iteration cap, or no new proposals with the bound still open.
+GAP_TOL = 1e-3
+
+
+def plan_status(upper: float, lower: float) -> str:
+    """EMHASS's optim_status for a coordinated plan with objective `upper`
+    and lower bound `lower`."""
+    return "Optimal" if upper - lower <= GAP_TOL * max(1.0, abs(upper)) else "Optimal_Inaccurate"
+
+
+def _decline(opt: EmhassOptimization, reason: str) -> None:
+    """Log why the coordinator will not plan and record it on `opt` for EMHASS;
+    EMHASS's default solver then plans."""
+    opt.logger.warning(f"optimization_backend: {reason}; using the default solver")
+    opt.fed_fallback_reason = reason
+
+
 # Runtime per-load lists perform_optimization takes; cut to a participant's loads.
 RUNTIME_LOAD_LISTS = ("def_total_hours", "def_total_timestep", "def_start_timestep",
                       "def_end_timestep", "def_init_temp", "min_power_of_deferrable_loads")
@@ -424,7 +448,9 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     other keyword arguments.
 
     Returns a DataFrame with the columns perform_optimization returns (the same
-    names and units) plus `fed_meter_price`, `fed_lower_bound`, `fed_gap` and
+    names and units; optim_status is "Optimal" only for a plan proven within
+    GAP_TOL of the best, else "Optimal_Inaccurate") plus `fed_meter_price`,
+    `fed_lower_bound`, `fed_gap`, `fed_stop_reason`, `fed_iterations` and
     one `fed_share_<player>` per player (solar, each device or participant):
     its share of the saving over the horizon, in currency, the same in every row.
     Returns None, after logging why, when it cannot plan this configuration or
@@ -433,11 +459,12 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     log = opt.logger
     oc, pc = opt.optim_conf, opt.plant_conf
     backend = oc.get("optimization_backend", "cvxpy")
+    opt.fed_fallback_reason = None           # EMHASS may hand the same object back next run
     reason = unsupported(oc, pc, opt.costfun, runtime)
     if backend != "dantzig_wolfe":
         reason = reason or f"backend {backend!r} (this version runs dantzig_wolfe)"
     if reason:
-        log.warning(f"optimization_backend={backend}: not available for {reason}; using the default solver")
+        _decline(opt, f"not available for {reason}")
         return None
 
     t0 = time.perf_counter()
@@ -446,7 +473,7 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     sell_in = np.asarray(unit_prod_price, dtype=float)
     sell = sell_in if opt.costfun == "profit" else np.zeros(n)
     if np.any(sell > buy + 1e-12):
-        log.warning("optimization_backend: an export price above the import price; using the default solver")
+        _decline(opt, "an export price above the import price")
         return None
     pv_w, load_w = np.asarray(p_pv, dtype=float), np.asarray(p_load, dtype=float)
     if soc_init is None and oc.get("set_use_battery"):
@@ -484,7 +511,7 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
             loads = sorted(int(d[len("deferrable"):]) for d in g["devices"] if d.startswith("deferrable"))
             unknown = [d for d in g["devices"] if d != "battery" and not d.startswith("deferrable")]
             if unknown:
-                log.warning(f"optimization_backend: EMHASS has no device {unknown}; using the default solver")
+                _decline(opt, f"EMHASS has no device {unknown}")
                 return None
             key = "+".join(g["devices"])
             participants.append(EmhassParticipant(opt, key, "battery" in g["devices"], loads, data_opt,
@@ -499,10 +526,10 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
                 elif d == "hvac":
                     hvac_cfg = _config(HvacConfig, g.get("config", {}))
                 else:
-                    log.warning(f"optimization_backend: {PACKAGE} has no solver for {d!r}; using the default solver")
+                    _decline(opt, f"{PACKAGE} has no solver for {d!r}")
                     return None
         else:
-            log.warning(f"optimization_backend: unknown solver {g['solver']!r}; using the default solver")
+            _decline(opt, f"unknown solver {g['solver']!r}")
             return None
 
     horizon = Horizon(dt=dt, hours=n * dt)
@@ -525,7 +552,7 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     try:
         r = co.run(**run_kw)
     except Exception as exc:                            # a plan is always published
-        log.warning(f"optimization_backend: the coordinator failed ({exc}); using the default solver")
+        _decline(opt, f"the coordinator failed ({type(exc).__name__}: {exc})")
         return None
 
     res = _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site)
@@ -539,7 +566,7 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
             res[f"fed_share_{player}"] = share
     except Exception as exc:                            # the plan stands without its split
         log.warning(f"optimization_backend: could not split the saving ({exc})")
-    opt.optim_status = "Optimal"
+    opt.optim_status = str(res["optim_status"].iloc[0])
     solves = sum(p.solves for p in participants)
     log.info(f"optimization_backend=dantzig_wolfe: {r.iterations} iterations, gap {r.upper - r.lower:.4f}, "
              f"{solves} participant solves, {time.perf_counter() - t0:.2f} s")
@@ -634,10 +661,12 @@ def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
         out["cost_fun_profit"] = cost_profit
     else:
         out["cost_fun_cost"] = scale * buy * out["P_grid_pos"].values
-    out["optim_status"] = "Optimal"
+    out["optim_status"] = plan_status(float(r.upper), float(r.lower))
     for c, v in extra.items():
         out[c] = v
     out["fed_meter_price"] = r.prices
     out["fed_lower_bound"] = float(r.lower)
     out["fed_gap"] = float(r.upper - r.lower)
+    out["fed_stop_reason"] = r.stop_reason or "converged"
+    out["fed_iterations"] = int(r.iterations)
     return out

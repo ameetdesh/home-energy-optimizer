@@ -471,7 +471,14 @@ so existing automations and charts keep working. Plus:
 | `P_hvac`, `temp_hvac` | the heat pump's power (W) and room temperature (°C) |
 | `fed_meter_price` | the cost of one more kWh at the meter, per slot — the master's dual |
 | `fed_lower_bound`, `fed_gap` | how far this plan can be, at most, from the best possible one |
+| `fed_stop_reason`, `fed_iterations` | why the coordinator stopped (`converged`, `stalled`, `no new proposals`, `iteration cap`) and after how many rounds |
 | `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
+
+`optim_status` is `Optimal` only when the plan is proven within 0.1% of its
+lower bound; otherwise `Optimal_Inaccurate` — a runnable plan, which EMHASS
+publishes as usual, without that proof. When the adapter declines a
+configuration it logs why and sets `fed_fallback_reason` on EMHASS's
+`Optimization` object, and EMHASS's own MILP plans.
 
 The shares are the part no single MILP can give you: `fed_share_solar`,
 `fed_share_battery`, `fed_share_water_heater`, `fed_share_hvac` and
