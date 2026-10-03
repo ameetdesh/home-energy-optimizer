@@ -70,7 +70,7 @@ After a `run`, under *Developer tools → States*:
 | `sensor.p_batt_forecast` | EMHASS | the battery's power now (W; + discharging), planned by home-energy-optimizer |
 | `sensor.soc_batt_forecast` | EMHASS | its state of charge (%) |
 | `sensor.p_deferrable0`, `sensor.p_deferrable1` | EMHASS | the two loads (W), planned by EMHASS's own model |
-| `sensor.p_grid_forecast`, `sensor.optim_status` | EMHASS | the meter, and `Optimal` |
+| `sensor.p_grid_forecast`, `sensor.optim_status` | EMHASS | the meter, and `Optimal` (proven within 0.1% of the best) or `Optimal_Inaccurate` (a runnable plan without that proof) |
 | `sensor.coordination_share_solar`, `…_battery`, `…_deferrable0_deferrable1` | this script | each player's share of the saving over the horizon |
 | `sensor.coordination_meter_price` | this script | the coordinator's price at the meter now, with the whole horizon in its `forecasts` attribute |
 | `sensor.coordination_gap` | this script | how far the plan can be from the best possible one (0: proven optimal) |
