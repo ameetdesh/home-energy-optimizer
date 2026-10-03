@@ -116,6 +116,7 @@ def interp_uniform(
 
 if TYPE_CHECKING:  # admm.battery_qp imports this module
     pass
+    pass
 
 # --------------------------------------------------------------------------
 # Horizon
@@ -604,6 +605,92 @@ class GridLimits:
 
 
 @dataclass(frozen=True)
+class SubMeter:
+    """Devices (and optionally the PV) behind one connection to the house's
+    AC bus, with that connection's own limits: a hybrid inverter, or a
+    sub-panel whose breaker several devices share.
+
+    Like GridLimits these are COUPLING constraints, but on a subset of the
+    devices. Dantzig-Wolfe models each sub-meter in its master LP: a balance
+    row at the sub-meter (its "bus") and the connection's flows to the house,
+    so every member device is priced at the sub-meter's own price (that row's
+    dual) instead of the meter's. Where the connection is not at a limit the
+    two differ only by the conversion efficiency; where it is, they separate
+    (docs/theory.tex, "Sub-meters and local prices").
+
+    Signs follow the devices: a member's power is positive when it draws. The
+    connection's limits are AC-side, in kW: `max_export_kw` from the bus to
+    the house (an inverter's AC output rating), `max_import_kw` from the house
+    to the bus (its AC input rating). None means no limit. `eta_export` and
+    `eta_import` are the conversion efficiencies each way (1.0 for a
+    sub-panel). Power beyond a limit is planned only where nothing else fits,
+    and charged at the grid's breach price, as a grid-limit breach is.
+
+    `pv`: the PV is on this bus (a hybrid inverter's DC side). Its output then
+    reaches the house through the connection, and is clipped there - at no
+    cost - when the connection cannot pass it.
+    """
+
+    name: str
+    members: tuple[str, ...] = ()
+    pv: bool = False
+    max_export_kw: float | None = None
+    max_import_kw: float | None = None
+    eta_export: float = 1.0
+    eta_import: float = 1.0
+
+    def validate(self) -> None:
+        if not self.name:
+            raise ValueError("a sub-meter needs a name")
+        for name in ("max_export_kw", "max_import_kw"):
+            v = getattr(self, name)
+            if v is not None and v < 0:
+                raise ValueError(f"{self.name}: {name} must be >= 0 or None, got {v}")
+        for name in ("eta_export", "eta_import"):
+            v = getattr(self, name)
+            if not 0.0 < v <= 1.0:
+                raise ValueError(f"{self.name}: {name} must be in (0, 1], got {v}")
+        if not self.members and not self.pv:
+            raise ValueError(f"{self.name}: a sub-meter needs members or the PV")
+        if len(set(self.members)) != len(self.members):
+            raise ValueError(f"{self.name}: a member is listed twice")
+
+    @property
+    def export_cap_dc(self) -> float:
+        """The most the bus can send to the house, bus-side (kW); inf if unlimited."""
+        return np.inf if self.max_export_kw is None else self.max_export_kw / self.eta_export
+
+    @property
+    def import_cap_dc(self) -> float:
+        """The most the bus can take from the house, bus-side (kW); inf if unlimited."""
+        return np.inf if self.max_import_kw is None else self.max_import_kw * self.eta_import
+
+
+def hybrid_inverter(batteries: tuple[str, ...] = ("battery",), max_output_kw: float | None = None,
+                    max_input_kw: float | None = None, eta_dc_ac: float = 1.0,
+                    eta_ac_dc: float = 1.0) -> SubMeter:
+    """A hybrid inverter: the PV and `batteries` on its DC bus, the house on
+    its AC side. `max_output_kw` is its AC output rating (None: no limit),
+    `max_input_kw` its AC input rating (None: the same as the output).
+    EMHASS's inverter_ac_output_max, inverter_ac_input_max,
+    inverter_efficiency_dc_ac and inverter_efficiency_ac_dc."""
+    return SubMeter("inverter", tuple(batteries), pv=True, max_export_kw=max_output_kw,
+                    max_import_kw=max_output_kw if max_input_kw is None else max_input_kw,
+                    eta_export=eta_dc_ac, eta_import=eta_ac_dc)
+
+
+def group_limit(name: str, members: tuple[str, ...], min_kw: float | None = None,
+                max_kw: float | None = None) -> SubMeter:
+    """A limit on what `members` draw together, kW: at most `max_kw` (a shared
+    breaker), at least `min_kw` (negative: at most -min_kw of export). None:
+    no limit that way."""
+    if min_kw is not None and min_kw > 0:
+        raise ValueError("min_kw > 0 would force the members to draw; use <= 0 (an export limit)")
+    return SubMeter(name, tuple(members), max_import_kw=max_kw,
+                    max_export_kw=None if min_kw is None else -min_kw)
+
+
+@dataclass(frozen=True)
 class SiteConfig:
     """Everything the coordinator needs. Devices are optional (None = absent)."""
 
@@ -620,6 +707,9 @@ class SiteConfig:
     soc_gates: tuple[SocGate, ...] = ()
     grid: GridLimits = field(default_factory=GridLimits)
     coordination: CoordinationConfig = field(default_factory=CoordinationConfig)
+    # Devices behind their own connection to the house (a hybrid inverter, a
+    # shared breaker): see SubMeter. Each device and the PV in at most one.
+    submeters: tuple[SubMeter, ...] = ()
 
     @property
     def battery_list(self) -> tuple[BatteryConfig, ...]:
@@ -643,6 +733,27 @@ class SiteConfig:
                 dev.validate()
         if self.hvac is not None:
             self.hvac.comfort_band(self.horizon.steps)   # a profile must fit the horizon
+        seen: set[str] = set()
+        names: set[str] = set()
+        for sm in self.submeters:
+            sm.validate()
+            if sm.name in names:
+                raise ValueError(f"two sub-meters are named {sm.name!r}")
+            names.add(sm.name)
+            if seen & set(sm.members):
+                raise ValueError(f"{sm.name}: a device is behind two sub-meters")
+            seen |= set(sm.members)
+        if sum(sm.pv for sm in self.submeters) > 1:
+            raise ValueError("the PV can be behind one sub-meter only")
+
+    @property
+    def pv_submeter(self) -> SubMeter | None:
+        """The sub-meter the PV is behind, or None (the PV is on the house's AC bus)."""
+        return next((sm for sm in self.submeters if sm.pv), None)
+
+    def submeter_of(self, key: str) -> int | None:
+        """Index of the sub-meter device `key` is behind, or None."""
+        return next((i for i, sm in enumerate(self.submeters) if key in sm.members), None)
 
     def without(self, *names: str) -> SiteConfig:
         """Return a copy with the named devices disabled. Test convenience."""
@@ -805,6 +916,9 @@ class CoordinationResult:
     # PV thrown away per slot (kW) and its total (kWh).
     curtailment: np.ndarray | None = None
     curtailed_kwh: float = 0.0
+    # battery 0's bus (meter.Bus) when it sits behind a sub-meter; None on
+    # the AC bus. Its pricing solve and the policy snapshot use it.
+    battery_bus: Bus | None = None
     battery_dp_load: np.ndarray | None = None
     baseline_cost: float = 0.0
     # Which coordinator produced this: "admm" (coordinate) or "dw" (dw/).
@@ -856,6 +970,50 @@ class CoordinationResult:
 # ========================================================================
 # src/home_energy_optimizer/meter.py
 # ========================================================================
+
+class Bus(NamedTuple):
+    """A device's own bus, when it sits behind a sub-meter (types.SubMeter,
+    e.g. a battery on a hybrid inverter's DC side). Per slot, the bus's draw is
+    the device's plus `others` (the other members' draw, minus the PV on the
+    bus); the house sees what `bus_flow` says. Ratings are bus-side kW."""
+    others: np.ndarray
+    eta_export: float
+    eta_import: float
+    export_cap: float            # inf: no limit
+    import_cap: float
+    clip_cap: np.ndarray         # PV the bus may clip, per slot (kW)
+    breach_price: float          # currency per kWh beyond a rating
+
+
+def bus_flow(draw: np.ndarray | float, clip_cap: np.ndarray | float, eta_export: float, eta_import: float,
+             export_cap: float, import_cap: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One bus's connection to the house, at bus draw `draw` (kW, + = the bus
+    needs power; PV on it already subtracted): returns (flow to the house in
+    kW, PV clipped, kW beyond a rating, what the bus sends bus-side).
+
+    Sending is capped at `export_cap`; PV beyond it is clipped (free) up to
+    `clip_cap`, and anything still over is sent anyway, as a breach. Taking
+    beyond `import_cap` is a breach too. The house sees eta_export x sent, or
+    taken / eta_import. submeter.meter_from_draws and the battery DP both use
+    this, so they cannot disagree.
+    """
+    draw = np.asarray(draw, dtype=float)
+    surplus = np.maximum(-draw, 0.0)
+    forced = np.maximum(surplus - export_cap, 0.0)
+    clip = np.minimum(forced, clip_cap)
+    send = surplus - clip
+    take = np.maximum(draw, 0.0)
+    over = (forced - clip) + np.maximum(take - import_cap, 0.0)
+    return eta_export * send - take / eta_import, clip, over, send
+
+
+def bus_cost(a: np.ndarray, t: int, bus: Bus) -> tuple[np.ndarray, np.ndarray]:
+    """For device actions `a` (kW, + = drawing) at slot t on `bus`: (the
+    house's draw through the connection, kW; the breach cost per kW-slot)."""
+    flow, _, over, _ = bus_flow(a + bus.others[t], bus.clip_cap[t], bus.eta_export, bus.eta_import,
+                                bus.export_cap, bus.import_cap)
+    return -flow, bus.breach_price * over
+
 
 class Limits(NamedTuple):
     max_import_kw: float | None
@@ -1015,10 +1173,15 @@ def solve_battery(
     admm_rho: float = 0.0,
     soc_gates: tuple[SocGate, ...] = (),
     limits: Limits | None = None,
+    bus: Bus | None = None,
 ) -> DeviceSolution:
     """Solve the battery DP and roll out the optimal trajectory.
 
     `limits`: price the grid limits into the reward (home_energy_optimizer.meter).
+    `bus`: the battery sits behind a sub-meter (a hybrid inverter's DC bus):
+    its power is bus-side, and the meter sees it through the connection's
+    efficiency and ratings, with PV on the bus clipped where the rating
+    forces it (meter.bus_flow). `dp_load` is then the rest of the meter.
 
     Sign convention: positive power = CHARGING (drawing from the meter),
     negative = discharging. This matches the POC and is the opposite of
@@ -1066,6 +1229,7 @@ def solve_battery(
         and not np.any(gate_min_soe >= 0)
         and floor == 0.0
         and limits is None
+        and bus is None
     )
     compiled = plain and kernel_battery(
         np.ascontiguousarray(buy, dtype=np.float64),
@@ -1090,11 +1254,13 @@ def solve_battery(
         S_next = np.clip(S_col + effA * dt, floor, cap)
         V_next = interp_grid(S_next, S, V[t + 1])
 
-        # Load-aware reward: the battery sees its marginal effect on net import.
-        imp = Ac + dp_load[t]
+        # Load-aware reward: the battery sees its marginal effect on net import
+        # (through its bus's connection, if it has one).
+        draw, over = (Ac, 0.0) if bus is None else bus_cost(Ac, t, bus)
+        imp = draw + dp_load[t]
         reward = (
             -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
-            - limit_cost(imp, sell[t], limits)
+            - limit_cost(imp, sell[t], limits) - over
         ) * dt
         if use_admm:
             reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
@@ -1117,7 +1283,7 @@ def solve_battery(
     soc, power = rollout_battery(
         cfg, horizon, V, S, A, buy, sell, dp_load, admm_target if use_admm else None,
         admm_rho if use_admm else 0.0, start_step=0, start_soe=cap * cfg.soc_initial_frac,
-        limits=limits,
+        limits=limits, bus=bus,
     )
 
     return DeviceSolution(
@@ -1145,6 +1311,7 @@ def rollout_battery(
     start_step: int,
     start_soe: float,
     limits: Limits | None = None,
+    bus: Bus | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Greedy forward replay of a stored value function from ANY (t, soe).
 
@@ -1183,10 +1350,11 @@ def rollout_battery(
         S_next = np.clip(s + effA * dt, floor, cap)
         V_next = interp_grid(S_next.reshape(1, -1), S, V[t + 1]).ravel()
 
-        imp = Ac + dp_load[t]
+        draw, over = (Ac, 0.0) if bus is None else bus_cost(Ac, t, bus)
+        imp = draw + dp_load[t]
         reward = (
             -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
-            - limit_cost(imp, sell[t], limits)
+            - limit_cost(imp, sell[t], limits) - over
         ) * dt
         if use_admm:
             reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
@@ -1224,6 +1392,9 @@ class PolicySnapshot:
     admm_target: np.ndarray | None = None
     admm_rho: float = 0.0
     generated_at: float = 0.0
+    # The battery's bus, when it sits behind a sub-meter (a hybrid inverter):
+    # actions are then bus-side, and reach the meter through it.
+    bus: Bus | None = None
 
     @classmethod
     def from_result(
@@ -1255,13 +1426,19 @@ class PolicySnapshot:
                 else np.zeros(n)
             ),
             generated_at=time.time(),
+            bus=res.battery_bus,
         )
 
     # -- persistence --------------------------------------------------------
 
     def save(self, path: str) -> None:
+        extra: dict[str, Any] = {} if self.bus is None else {
+            "bus_others": self.bus.others, "bus_clip_cap": self.bus.clip_cap,
+            "bus_scalars": np.array([self.bus.eta_export, self.bus.eta_import, self.bus.export_cap,
+                                     self.bus.import_cap, self.bus.breach_price])}
         np.savez_compressed(
             path,
+            **extra,
             value=self.value,
             policy=self.policy,
             states=self.states,
@@ -1315,6 +1492,9 @@ class PolicySnapshot:
             admm_target=(target if target.size else None),
             admm_rho=float(z["admm_rho"]),
             generated_at=float(z["generated_at"]),
+            bus=(Bus(z["bus_others"], float(z["bus_scalars"][0]), float(z["bus_scalars"][1]),
+                     float(z["bus_scalars"][2]), float(z["bus_scalars"][3]), z["bus_clip_cap"],
+                     float(z["bus_scalars"][4])) if "bus_others" in z else None),
         )
 
     # -- helpers ------------------------------------------------------------
@@ -1385,9 +1565,10 @@ def q_values(
     v_next = interp_grid(s_next.reshape(1, -1), snap.states, snap.value[t + 1]).ravel()
 
     delta = snap.dp_load[t] if dp_load_kw is None else float(dp_load_kw)
-    imp = Ac + delta
+    draw, over = (Ac, 0.0) if snap.bus is None else bus_cost(Ac, t, snap.bus)
+    imp = draw + delta
     reward = (
-        -snap.buy[t] * np.maximum(imp, 0.0) + snap.sell[t] * np.maximum(-imp, 0.0)
+        -snap.buy[t] * np.maximum(imp, 0.0) + snap.sell[t] * np.maximum(-imp, 0.0) - over
     ) * dt
     if snap.admm_target is not None and snap.admm_rho > 0:
         reward = reward - (snap.admm_rho / 2.0) * (Ac - snap.admm_target[t]) ** 2 * dt
@@ -1629,6 +1810,7 @@ def rollout(snap: PolicySnapshot, t: int, soe: float) -> tuple[np.ndarray, np.nd
         snap.admm_rho,
         start_step=t,
         start_soe=soe,
+        bus=snap.bus,
     )
 
 

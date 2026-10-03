@@ -20,12 +20,14 @@ Everything here reads a `PolicySnapshot` and mutates nothing.
 from __future__ import annotations
 
 import time
+from typing import Any
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from .dp_battery import rollout_battery
+from .meter import Bus, bus_cost
 from .interp import interp_grid
 from .types import BatteryConfig, CoordinationResult, DeviceSolution, Forecasts, Horizon, SiteConfig
 
@@ -50,6 +52,9 @@ class PolicySnapshot:
     admm_target: np.ndarray | None = None
     admm_rho: float = 0.0
     generated_at: float = 0.0
+    # The battery's bus, when it sits behind a sub-meter (a hybrid inverter):
+    # actions are then bus-side, and reach the meter through it.
+    bus: Bus | None = None
 
     @classmethod
     def from_result(
@@ -81,13 +86,19 @@ class PolicySnapshot:
                 else np.zeros(n)
             ),
             generated_at=time.time(),
+            bus=res.battery_bus,
         )
 
     # -- persistence --------------------------------------------------------
 
     def save(self, path: str) -> None:
+        extra: dict[str, Any] = {} if self.bus is None else {
+            "bus_others": self.bus.others, "bus_clip_cap": self.bus.clip_cap,
+            "bus_scalars": np.array([self.bus.eta_export, self.bus.eta_import, self.bus.export_cap,
+                                     self.bus.import_cap, self.bus.breach_price])}
         np.savez_compressed(
             path,
+            **extra,
             value=self.value,
             policy=self.policy,
             states=self.states,
@@ -141,6 +152,9 @@ class PolicySnapshot:
             admm_target=(target if target.size else None),
             admm_rho=float(z["admm_rho"]),
             generated_at=float(z["generated_at"]),
+            bus=(Bus(z["bus_others"], float(z["bus_scalars"][0]), float(z["bus_scalars"][1]),
+                     float(z["bus_scalars"][2]), float(z["bus_scalars"][3]), z["bus_clip_cap"],
+                     float(z["bus_scalars"][4])) if "bus_others" in z else None),
         )
 
     # -- helpers ------------------------------------------------------------
@@ -211,9 +225,10 @@ def q_values(
     v_next = interp_grid(s_next.reshape(1, -1), snap.states, snap.value[t + 1]).ravel()
 
     delta = snap.dp_load[t] if dp_load_kw is None else float(dp_load_kw)
-    imp = Ac + delta
+    draw, over = (Ac, 0.0) if snap.bus is None else bus_cost(Ac, t, snap.bus)
+    imp = draw + delta
     reward = (
-        -snap.buy[t] * np.maximum(imp, 0.0) + snap.sell[t] * np.maximum(-imp, 0.0)
+        -snap.buy[t] * np.maximum(imp, 0.0) + snap.sell[t] * np.maximum(-imp, 0.0) - over
     ) * dt
     if snap.admm_target is not None and snap.admm_rho > 0:
         reward = reward - (snap.admm_rho / 2.0) * (Ac - snap.admm_target[t]) ** 2 * dt
@@ -455,6 +470,7 @@ def rollout(snap: PolicySnapshot, t: int, soe: float) -> tuple[np.ndarray, np.nd
         snap.admm_rho,
         start_step=t,
         start_soe=soe,
+        bus=snap.bus,
     )
 
 

@@ -24,7 +24,7 @@ import numpy.typing as npt
 
 from ._kernels import kernel_battery
 from .interp import interp_grid
-from .meter import Limits, limit_cost
+from .meter import Bus, Limits, bus_cost, limit_cost
 from .types import BatteryConfig, DeviceSolution, Horizon, SocGate
 
 
@@ -157,10 +157,15 @@ def solve_battery(
     admm_rho: float = 0.0,
     soc_gates: tuple[SocGate, ...] = (),
     limits: Limits | None = None,
+    bus: Bus | None = None,
 ) -> DeviceSolution:
     """Solve the battery DP and roll out the optimal trajectory.
 
     `limits`: price the grid limits into the reward (home_energy_optimizer.meter).
+    `bus`: the battery sits behind a sub-meter (a hybrid inverter's DC bus):
+    its power is bus-side, and the meter sees it through the connection's
+    efficiency and ratings, with PV on the bus clipped where the rating
+    forces it (meter.bus_flow). `dp_load` is then the rest of the meter.
 
     Sign convention: positive power = CHARGING (drawing from the meter),
     negative = discharging. This matches the POC and is the opposite of
@@ -208,6 +213,7 @@ def solve_battery(
         and not np.any(gate_min_soe >= 0)
         and floor == 0.0
         and limits is None
+        and bus is None
     )
     compiled = plain and kernel_battery(
         np.ascontiguousarray(buy, dtype=np.float64),
@@ -232,11 +238,13 @@ def solve_battery(
         S_next = np.clip(S_col + effA * dt, floor, cap)
         V_next = interp_grid(S_next, S, V[t + 1])
 
-        # Load-aware reward: the battery sees its marginal effect on net import.
-        imp = Ac + dp_load[t]
+        # Load-aware reward: the battery sees its marginal effect on net import
+        # (through its bus's connection, if it has one).
+        draw, over = (Ac, 0.0) if bus is None else bus_cost(Ac, t, bus)
+        imp = draw + dp_load[t]
         reward = (
             -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
-            - limit_cost(imp, sell[t], limits)
+            - limit_cost(imp, sell[t], limits) - over
         ) * dt
         if use_admm:
             reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt
@@ -259,7 +267,7 @@ def solve_battery(
     soc, power = rollout_battery(
         cfg, horizon, V, S, A, buy, sell, dp_load, admm_target if use_admm else None,
         admm_rho if use_admm else 0.0, start_step=0, start_soe=cap * cfg.soc_initial_frac,
-        limits=limits,
+        limits=limits, bus=bus,
     )
 
     return DeviceSolution(
@@ -287,6 +295,7 @@ def rollout_battery(
     start_step: int,
     start_soe: float,
     limits: Limits | None = None,
+    bus: Bus | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Greedy forward replay of a stored value function from ANY (t, soe).
 
@@ -325,10 +334,11 @@ def rollout_battery(
         S_next = np.clip(s + effA * dt, floor, cap)
         V_next = interp_grid(S_next.reshape(1, -1), S, V[t + 1]).ravel()
 
-        imp = Ac + dp_load[t]
+        draw, over = (Ac, 0.0) if bus is None else bus_cost(Ac, t, bus)
+        imp = draw + dp_load[t]
         reward = (
             -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
-            - limit_cost(imp, sell[t], limits)
+            - limit_cost(imp, sell[t], limits) - over
         ) * dt
         if use_admm:
             reward = reward - (admm_rho / 2.0) * (Ac - target[t]) ** 2 * dt

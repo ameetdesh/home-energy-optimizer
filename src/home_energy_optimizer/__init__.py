@@ -55,15 +55,19 @@ from .types import (
     RoundRecord,
     SiteConfig,
     SocGate,
+    SubMeter,
     WaterHeaterConfig,
+    group_limit,
+    hybrid_inverter,
 )
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 __all__ = [
     "BatteryConfig", "CoordinationConfig", "CoordinationResult", "Counterfactual",
     "DeviceSolution", "Forecasts", "GridLimits", "HardLimits", "Horizon", "HvacConfig",
-    "PolicySnapshot", "RoundRecord", "SiteConfig", "SocGate", "WaterHeaterConfig",
+    "PolicySnapshot", "RoundRecord", "SiteConfig", "SocGate", "SubMeter", "WaterHeaterConfig",
+    "group_limit", "hybrid_inverter",
     "action", "baseline_hvac", "blend_measured", "from_csv", "from_series",
     "open_meteo_pv", "open_meteo_temperature", "resample_to_horizon", "baseline_solution", "baseline_water_heater",
     "clamp", "coordinate", "demo_forecasts", "evaluate", "marginal_value",

@@ -14,6 +14,50 @@ from typing import NamedTuple
 import numpy as np
 
 
+class Bus(NamedTuple):
+    """A device's own bus, when it sits behind a sub-meter (types.SubMeter,
+    e.g. a battery on a hybrid inverter's DC side). Per slot, the bus's draw is
+    the device's plus `others` (the other members' draw, minus the PV on the
+    bus); the house sees what `bus_flow` says. Ratings are bus-side kW."""
+    others: np.ndarray
+    eta_export: float
+    eta_import: float
+    export_cap: float            # inf: no limit
+    import_cap: float
+    clip_cap: np.ndarray         # PV the bus may clip, per slot (kW)
+    breach_price: float          # currency per kWh beyond a rating
+
+
+def bus_flow(draw: np.ndarray | float, clip_cap: np.ndarray | float, eta_export: float, eta_import: float,
+             export_cap: float, import_cap: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One bus's connection to the house, at bus draw `draw` (kW, + = the bus
+    needs power; PV on it already subtracted): returns (flow to the house in
+    kW, PV clipped, kW beyond a rating, what the bus sends bus-side).
+
+    Sending is capped at `export_cap`; PV beyond it is clipped (free) up to
+    `clip_cap`, and anything still over is sent anyway, as a breach. Taking
+    beyond `import_cap` is a breach too. The house sees eta_export x sent, or
+    taken / eta_import. submeter.meter_from_draws and the battery DP both use
+    this, so they cannot disagree.
+    """
+    draw = np.asarray(draw, dtype=float)
+    surplus = np.maximum(-draw, 0.0)
+    forced = np.maximum(surplus - export_cap, 0.0)
+    clip = np.minimum(forced, clip_cap)
+    send = surplus - clip
+    take = np.maximum(draw, 0.0)
+    over = (forced - clip) + np.maximum(take - import_cap, 0.0)
+    return eta_export * send - take / eta_import, clip, over, send
+
+
+def bus_cost(a: np.ndarray, t: int, bus: Bus) -> tuple[np.ndarray, np.ndarray]:
+    """For device actions `a` (kW, + = drawing) at slot t on `bus`: (the
+    house's draw through the connection, kW; the breach cost per kW-slot)."""
+    flow, _, over, _ = bus_flow(a + bus.others[t], bus.clip_cap[t], bus.eta_export, bus.eta_import,
+                                bus.export_cap, bus.import_cap)
+    return -flow, bus.breach_price * over
+
+
 class Limits(NamedTuple):
     max_import_kw: float | None
     max_export_kw: float | None

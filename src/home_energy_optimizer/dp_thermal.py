@@ -19,7 +19,7 @@ import numpy.typing as npt
 
 from ._kernels import kernel_hvac, kernel_water_heater
 from .interp import interp_uniform
-from .meter import Limits, limit_cost
+from .meter import Bus, Limits, bus_cost, limit_cost
 from .types import DeviceSolution, Horizon, HvacConfig, WaterHeaterConfig
 
 # Action grids. Index into these with the integer stored in POL. The tank's is
@@ -148,8 +148,11 @@ def solve_water_heater(
     admm_target: np.ndarray | None = None,
     admm_rho: float = 0.0,
     ref_price: float | None = None,
+    bus: Bus | None = None,
 ) -> DeviceSolution:
     """Solve the hot-water tank DP. `limits`: see home_energy_optimizer.meter.
+    `bus`: the tank is behind a sub-meter (meter.Bus); `dp_load` is then the
+    rest of the meter, as for the battery DP.
 
     `admm_target`/`admm_rho`: an optional tether (admm_rho/2)(p - target)^2 dt
     on the element's power, as the battery DP has - ADMM's proximal step
@@ -191,7 +194,7 @@ def solve_water_heater(
     # The compiled kernel is the on/off element only.
     tether = admm_target is not None and admm_rho > 0
     target = admm_target if admm_target is not None else np.zeros(0)   # read only when tethered
-    compiled = cfg.n_duty_levels == 2 and limits is None and not tether and kernel_water_heater(
+    compiled = cfg.n_duty_levels == 2 and limits is None and bus is None and not tether and kernel_water_heater(
         np.ascontiguousarray(buy, dtype=np.float64),
         np.ascontiguousarray(sell, dtype=np.float64),
         np.ascontiguousarray(dp_load, dtype=np.float64),
@@ -225,10 +228,11 @@ def solve_water_heater(
             idx, w = interp_uniform(V[t + 1], cfg.t_min, cfg.t_max, cfg.n_states, T_next)
             V_next = V[t + 1, idx] * (1 - w) + V[t + 1, np.minimum(idx + 1, cfg.n_states - 1)] * w
 
-            imp = q_heat + dp_load[t]
+            draw, over = (q_heat, 0.0) if bus is None else bus_cost(q_heat, t, bus)
+            imp = draw + dp_load[t]
             cost = (
                 -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
-                - limit_cost(imp, sell[t], limits)
+                - limit_cost(imp, sell[t], limits) - over
             ) * dt
             # Priced on the TRUE next temperature. Under the old projection this
             # read the clamped value, so the shortfall saturated at
@@ -351,11 +355,12 @@ def solve_hvac(
     admm_target: np.ndarray | None = None,
     admm_rho: float = 0.0,
     ref_price: float | None = None,
+    bus: Bus | None = None,
 ) -> DeviceSolution:
     """Solve the HVAC DP. Ternary action, soft two-sided comfort band (flat, or
     one per trajectory point: HvacConfig.comfort_band).
     `limits`: see home_energy_optimizer.meter. `admm_target`/`admm_rho`: an optional
-    tether on its power, as for the tank. `ref_price`: as for the tank."""
+    tether on its power, as for the tank. `ref_price`, `bus`: as for the tank."""
     t_start = time.perf_counter()
     n = horizon.steps
     dt = horizon.dt
@@ -381,7 +386,8 @@ def solve_hvac(
     # equal-band slots at a time, the last run first; a flat band is one run.
     tether = admm_target is not None and admm_rho > 0
     target = admm_target if admm_target is not None else np.zeros(0)   # read only when tethered
-    compiled = limits is None and cfg.n_duty_levels == 2 and not tether and cfg.comfort_mode == "linear"
+    compiled = (limits is None and bus is None and cfg.n_duty_levels == 2 and not tether
+                and cfg.comfort_mode == "linear")
     if compiled:
         series = [np.ascontiguousarray(x, dtype=np.float64) for x in (buy, sell, dp_load, outdoor_temp)]
         grid = np.ascontiguousarray(T, dtype=np.float64)
@@ -414,10 +420,12 @@ def solve_hvac(
             idx, w = interp_uniform(V[t + 1], cfg.t_min, cfg.t_max, cfg.n_states, T_next)
             V_next = V[t + 1, idx] * (1 - w) + V[t + 1, np.minimum(idx + 1, cfg.n_states - 1)] * w
 
-            imp = cfg.power_kw * abs(a) * duty + dp_load[t]
+            draw, over = ((cfg.power_kw * abs(a) * duty, 0.0) if bus is None
+                          else bus_cost(cfg.power_kw * abs(a) * duty, t, bus))
+            imp = draw + dp_load[t]
             elec = (
                 -buy[t] * np.maximum(imp, 0.0) + sell[t] * np.maximum(-imp, 0.0)
-                - limit_cost(imp, sell[t], limits)
+                - limit_cost(imp, sell[t], limits) - over
             ) * dt
             comfort = -hvac_discomfort(cfg, T_next, ref_price, dt, low[t + 1], high[t + 1])
             if tether:

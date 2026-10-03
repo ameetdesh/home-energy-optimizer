@@ -38,6 +38,7 @@ ORDER = [
     "src/home_energy_optimizer/dp_thermal.py",
     "src/home_energy_optimizer/policy.py",
     "src/home_energy_optimizer/coordinate.py",
+    "src/home_energy_optimizer/submeter.py",
     "src/home_energy_optimizer/admm/battery_qp.py",
     "src/home_energy_optimizer/admm/coordinator.py",
     "src/home_energy_optimizer/admm/webapi.py",

@@ -33,7 +33,7 @@ solver="highs" to use scipy's HiGHS instead, e.g. to cross-check.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
@@ -47,7 +47,6 @@ from home_energy_optimizer.dw.lpsolver import Triplets, choose_one
 from home_energy_optimizer.dw.lpsolver import linprog as np_linprog
 
 from home_energy_optimizer.coordinate import (
-    apply_curtailment,
     breach_price,
     battery_terminal_penalty,
     breach_energy,
@@ -68,6 +67,8 @@ from home_energy_optimizer.dp_thermal import (
     wh_discomfort,
 )
 from home_energy_optimizer.interface import Participant, Query
+from home_energy_optimizer.meter import Bus
+from home_energy_optimizer.submeter import device_bus, fixed_demand, site_meter, submeter_penalty
 from home_energy_optimizer.types import (
     BatteryConfig,
     DeviceSolution,
@@ -292,6 +293,9 @@ class DWResult:
     incumbent_used: bool = False      # the returned plan came from an earlier iteration
     admm_value: float | None = None   # ADMM's objective, when the pool was seeded from it
     columns: dict | None = None       # device key -> list of Column (the pool)
+    # sub-meter name -> its bus's price, currency/kWh (the dual of its balance
+    # row): what its member devices were priced at. Empty with no sub-meter.
+    local_prices: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 class DWCoordinator:
@@ -312,7 +316,10 @@ class DWCoordinator:
             raise ValueError("solver must be 'numpy' or 'highs'")
         self.solver = solver
         self.n, self.dt = cfg.horizon.steps, cfg.horizon.dt
-        self.d = fc.net_fixed_demand.copy()
+        # The meter's inflexible part. PV behind a sub-meter (a hybrid
+        # inverter) is not in it: it reaches the meter through its bus.
+        self.d = fixed_demand(cfg, fc).astype(float)
+        self.subs = cfg.submeters
         self.ref = float(np.mean(fc.buy))
         if np.any(fc.sell > fc.buy + 1e-12):
             # The meter cost is then non-convex (buy low, sell high in the same
@@ -358,6 +365,13 @@ class DWCoordinator:
             self.devices.append(Device(p.key, "participant", p))
         self.export_ceiling = None if export_ceiling is None else np.asarray(export_ceiling, dtype=float)
         self.soe_targets = dict(soe_targets or {})
+        keys = {d.key for d in self.devices} | {k for k, _ in self.lp_batts}
+        if self.lp_tank is not None:
+            keys.add("water_heater")
+        for sm in self.subs:
+            unknown = set(sm.members) - keys
+            if unknown:
+                raise ValueError(f"sub-meter {sm.name!r}: no device {sorted(unknown)}")
 
         self._build_meter_block()
         # Running minimum of (cost + price . power) per device at every price
@@ -368,6 +382,23 @@ class DWCoordinator:
         self._seen_min: list[dict[str, float]] = []
         for dev in self.devices:
             dev.on_add = self._note
+
+    # ----------------------------------------------------------- local prices
+    def _bus(self, key: str) -> int:
+        """Which balance row device `key` is in: 0 the meter, 1 + s sub-meter s."""
+        s = self.cfg.submeter_of(key)
+        return 0 if s is None else 1 + s
+
+    def price_of(self, y: np.ndarray, dev: Device | str) -> np.ndarray:
+        """The price device `dev` sees in the dual vector `y` (the meter's
+        duals, then each sub-meter's, n each): its own bus's. Per kW-slot,
+        like `y`."""
+        b = self._bus(dev if isinstance(dev, str) else dev.key)
+        return y[b * self.n : (b + 1) * self.n]
+
+    def local_prices(self, y: np.ndarray) -> dict[str, np.ndarray]:
+        """Each sub-meter's bus price in `y`, currency/kWh."""
+        return {sm.name: y[(1 + s) * self.n : (2 + s) * self.n] / self.dt for s, sm in enumerate(self.subs)}
 
     # ------------------------------------------------------------------ costs
     def private_cost(self, dev: Device, traj: np.ndarray) -> float:
@@ -388,20 +419,20 @@ class DWCoordinator:
 
     # --------------------------------------------------------------- oracles
     def _solve(self, dev: Device, buy: np.ndarray, sell: np.ndarray,
-               dp_load: np.ndarray | None = None) -> DeviceSolution:
+               dp_load: np.ndarray | None = None, bus: Bus | None = None) -> DeviceSolution:
         h, fc = self.cfg.horizon, self.fc
         if dev.kind == "battery":
             gates = self.cfg.soc_gates if dev.key == "battery" else ()
-            return solve_battery(dev.battery_cfg, h, buy, sell, dp_load=dp_load, soc_gates=gates)
+            return solve_battery(dev.battery_cfg, h, buy, sell, dp_load=dp_load, soc_gates=gates, bus=bus)
         buy = _PriceVector(buy, self.ref)
         sell = _PriceVector(sell, self.ref)
         if dev.kind == "water_heater":
-            return solve_water_heater(dev.tank_cfg, h, buy, sell, fc.hot_water_demand, dp_load=dp_load)
-        return solve_hvac(dev.hvac_cfg, h, buy, sell, fc.outdoor_temp, dp_load=dp_load)
+            return solve_water_heater(dev.tank_cfg, h, buy, sell, fc.hot_water_demand, dp_load=dp_load, bus=bus)
+        return solve_hvac(dev.hvac_cfg, h, buy, sell, fc.outdoor_temp, dp_load=dp_load, bus=bus)
 
     def _note(self, dev: Device, col: Column) -> None:
         for p, mins in zip(self._priced, self._seen_min):
-            v = col.cost + float(p @ col.power)
+            v = col.cost + float(self.price_of(p, dev) @ col.power)
             if v < mins.get(dev.key, np.inf):
                 mins[dev.key] = v
 
@@ -438,20 +469,30 @@ class DWCoordinator:
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "price")
 
-    def load_aware_oracle(self, dev: Device, others: np.ndarray, price_kwh: np.ndarray) -> Column:
-        """A HEURISTIC column: today's load-aware DP against the others' mix.
+    def load_aware_oracle(self, dev: Device, others: Mapping[str, np.ndarray], price_kwh: np.ndarray) -> Column:
+        """A HEURISTIC column: today's load-aware DP against the others' mix
+        (`others`: every other device's power, by key).
 
         Any feasible plan is a legal column, so the master can absorb the
         ADMM-style best response too. The kink makes this column good at
         self-consumption plans that a linear price reaches only by mixing
         many extreme points. Limits reach it the way mu does in coordinate():
         as a premium where the master price exceeds the tariff.
+
+        With sub-meters the rest of the meter is what `site_meter` makes of
+        the others (a battery's bus-side power reaches the meter through its
+        inverter), and a device behind one meets its bus as well (meter.Bus).
         """
+        bus, residual = device_bus(self.cfg, self.fc, dev.key, others)
         buy = np.maximum(self.fc.buy, price_kwh)
         sell = np.minimum(self.fc.sell, price_kwh)
         if dev.kind == "participant":
-            return self._ask(dev, Query("best_response", buy, sell, residual_kw=self.d + others), "load_aware")
-        sol = self._solve(dev, buy, sell, dp_load=self.d + others)
+            if bus is not None:
+                # a participant answers a residual at the meter, not a bus:
+                # its bus's price (price_kwh, from price_of) says it all
+                return replace(self.price_oracle(dev, price_kwh), source="load_aware")
+            return self._ask(dev, Query("best_response", buy, sell, residual_kw=residual), "load_aware")
+        sol = self._solve(dev, buy, sell, dp_load=residual, bus=bus)
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "load_aware")
 
@@ -572,9 +613,32 @@ class DWCoordinator:
         blocks.append((-1.0, -fc.sell * dt, full(exp_cap)))                     # export
         if g.max_export_kw is not None:
             blocks.append((-1.0, (B - fc.sell) * dt, full(inf)))                # over export cap
-        if curtail_ok:
+        if curtail_ok and self.cfg.pv_submeter is None:
             blocks.append((-1.0, np.zeros(self.n), fc.solar.copy()))            # curtail
         self.meter_blocks = blocks
+
+        # Each sub-meter's connection, as variables between its bus row and
+        # the meter row: (meter coef, bus coef, cost per slot, upper bound).
+        # Sending x (bus-side) puts eta_export * x on the house; taking x
+        # draws x / eta_import from it. Beyond a rating: the breach price.
+        self.node_blocks: list[list[tuple[float, float, np.ndarray, np.ndarray]]] = []
+        Bn = breach_price(g, fc.buy, fc.sell)    # a rating is a limit even with no grid limit
+        for sm in self.subs:
+            nb = []
+            out_cap, in_cap = sm.export_cap_dc, sm.import_cap_dc
+            zero = np.zeros(self.n)
+            nb.append((sm.eta_export, -1.0, zero, np.minimum(out_cap, inf)))            # send
+            if np.isfinite(out_cap):
+                nb.append((sm.eta_export, -1.0, full(Bn * dt), full(inf)))            # send past it
+            nb.append((-1.0 / sm.eta_import, 1.0, zero, np.minimum(in_cap, inf)))      # take
+            if np.isfinite(in_cap):
+                nb.append((-1.0 / sm.eta_import, 1.0, full(Bn * dt), full(inf)))     # take past it
+            if sm.pv:
+                # PV clipped on the bus: free; only what the rating forces,
+                # unless curtailment is allowed (then any of it)
+                clip = fc.solar.copy() if curtail_ok else np.maximum(fc.solar - out_cap, 0.0)
+                nb.append((0.0, -1.0, zero, clip))
+            self.node_blocks.append(nb)
 
     # ---------------------------------------------------------------- solvers
     def _lp(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
@@ -618,7 +682,7 @@ class DWCoordinator:
         return res.x, res.fun
 
     def _tank_block(self, A: Triplets, c: np.ndarray, lb: np.ndarray, ub: np.ndarray,
-                    rhs: np.ndarray, j0: int, row0: int, meter: bool = True
+                    rhs: np.ndarray, j0: int, row0: int, meter: bool = True, bal_row: int = 0
                     ) -> tuple[int, int, Callable[[np.ndarray], Column]]:
         """Write the tank's LP into (A, c, bounds, rhs) at column j0, row row0.
 
@@ -650,7 +714,7 @@ class DWCoordinator:
         c[S:S + n] = price_k * dt
         c[ST] = C * self.ref
         if meter:
-            A[t, D + t] = -P                     # meter balance: minus consumption
+            A[bal_row + t, D + t] = -P           # its balance row (the meter's): minus consumption
         dyn = row0 + t
         A[dyn, T + t] = 1.0
         A[dyn[1:], T + t[:-1]] = -(1.0 - r[1:] * dt)
@@ -686,14 +750,19 @@ class DWCoordinator:
             float, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Column]]:
         """Returns (value, column weights, meter duals, convexity duals, battery plans)."""
         n, devs, dt = self.n, self.devices, self.dt
-        n_meter = len(self.meter_blocks) * n
+        S = len(self.subs)
+        # Rows: the meter (n), each sub-meter's bus (n each), the convexity
+        # rows, then the batteries' and the tank's own rows. The first three
+        # are the border that couples the rest.
+        n_bal = n * (1 + S)
+        n_meter = (len(self.meter_blocks) + sum(len(nb_) for nb_ in self.node_blocks)) * n
         n_cols = sum(len(d.columns) for d in devs)
         nb = len(self.lp_batts)
         # per LP battery: charge c[n], discharge e[n], soe s[1..n]
         tank_nv = 4 * n + 2 if self.lp_tank is not None else 0
         tank_nr = 2 * n + 1 if self.lp_tank is not None else 0
         nv = n_meter + n_cols + 3 * n * nb + tank_nv
-        n_rows = n + len(devs) + n * nb + tank_nr
+        n_rows = n_bal + len(devs) + n * nb + tank_nr
 
         c = np.zeros(nv)
         ub = np.full(nv, np.inf)
@@ -703,22 +772,35 @@ class DWCoordinator:
         A = Triplets((n_rows, nv))
         rhs = np.zeros(n_rows)
         rhs[:n] = self.d
-        rhs[n : n + len(devs)] = 1.0
+        for si, sm in enumerate(self.subs):
+            if sm.pv:
+                rhs[(1 + si) * n : (2 + si) * n] = -self.fc.solar
+        rhs[n_bal : n_bal + len(devs)] = 1.0
+        t_all = np.arange(n)
         for mb, (coef, cost, upper) in enumerate(self.meter_blocks):
             c[mb * n : (mb + 1) * n] = cost
             ub[mb * n : (mb + 1) * n] = upper
-            A[np.arange(n), np.arange(mb * n, (mb + 1) * n)] = coef
-        j = n_meter
+            A[t_all, np.arange(mb * n, (mb + 1) * n)] = coef
+        j = len(self.meter_blocks) * n
+        for si, blocks in enumerate(self.node_blocks):
+            for mcoef, bcoef, cost, upper in blocks:
+                c[j : j + n] = cost
+                ub[j : j + n] = upper
+                if mcoef:
+                    A[t_all, j + t_all] = mcoef
+                A[(1 + si) * n + t_all, j + t_all] = bcoef
+                j += n
         for di, dev in enumerate(devs):
+            r0 = self._bus(dev.key) * n
             for col in dev.columns:
                 c[j] = col.cost
-                A[:n, j] = -col.power.reshape(-1, 1)
-                A[n + di, j] = 1.0
+                A[r0 : r0 + n, j] = -col.power.reshape(-1, 1)
+                A[n_bal + di, j] = 1.0
                 # An aggregate an on/off device cannot run is fine for the LP
                 # (it is a point of the convex hull) but not for recovery.
                 ub[j] = 1.0 if (not integer or col.runnable or dev.modulating) else 0.0
                 j += 1
-        base_row = n + len(devs)
+        base_row = n_bal + len(devs)
         batt_cols: list[tuple[str, BatteryConfig, int, int, int]] = []
         for bi, (key, b) in enumerate(self.lp_batts):
             C0, E0, S0 = j, j + n, j + 2 * n
@@ -731,8 +813,9 @@ class DWCoordinator:
             if key in self.soe_targets:
                 lb[S0 + n - 1] = ub[S0 + n - 1] = self.soe_targets[key]
             t = np.arange(n)
-            A[t, C0 + t] = -1.0          # meter balance: minus consumption
-            A[t, E0 + t] = +1.0
+            r0 = self._bus(key) * n      # its balance row: the meter's, or its bus's
+            A[r0 + t, C0 + t] = -1.0     # minus consumption
+            A[r0 + t, E0 + t] = +1.0
             r = base_row + bi * n + t    # s[t+1] - s[t] - dt*eta_c*c + dt*e/eta_d = 0
             A[r, S0 + t] = 1.0
             A[r[1:], S0 + t[:-1]] = -1.0
@@ -745,7 +828,8 @@ class DWCoordinator:
 
         tank_decode = None
         if self.lp_tank is not None:
-            _, _, tank_decode = self._tank_block(A, c, lb, ub, rhs, j, base_row + n * nb)
+            _, _, tank_decode = self._tank_block(A, c, lb, ub, rhs, j, base_row + n * nb,
+                                                 bal_row=self._bus("water_heater") * n)
         const = sum(_pinned_price(b) * b.capacity_kwh * b.soc_initial_frac
                     for _, b in self.lp_batts)
         lam_sl = slice(n_meter, n_meter + n_cols)
@@ -773,8 +857,11 @@ class DWCoordinator:
             return fun + const, x[lam_sl], None, None, batt_plans(x)
 
         x, fun, duals = self._lp(c, A, rhs, lb, ub, border=base_row)
-        pi = duals[:n]           # d(cost)/d(d_t): currency per kW-slot
-        sigma = duals[n : n + len(devs)]
+        # d(cost)/d(d_t), currency per kW-slot: the meter's, then each bus's.
+        # Every price this class hands around is this whole vector; price_of
+        # picks a device's own.
+        pi = duals[:n_bal]
+        sigma = duals[n_bal : n_bal + len(devs)]
         self.batt_lambda = {     # SoE-balance duals: the exact LP costate
             key: duals[base_row + bi * n : base_row + (bi + 1) * n]
             for bi, (key, *_rest) in enumerate(batt_cols)
@@ -805,8 +892,8 @@ class DWCoordinator:
             powers[key], trajs[key] = col.power, col.trajectory
         # lambda on s[t+1]: an extra kWh on the right of SoE row t lowers cost.
         lam = {k: -v for k, v in getattr(self, "batt_lambda", {}).items()}
-        return {"price": pi / self.dt, "powers": powers, "trajectories": trajs,
-                "active": active, "lambda": lam}
+        return {"price": pi[: self.n] / self.dt, "local_prices": self.local_prices(pi),
+                "powers": powers, "trajectories": trajs, "active": active, "lambda": lam}
 
     def blend_plan(self, dev: Device, w: np.ndarray) -> Column:
         """Execute a weighted mix of a modulating device's plans.
@@ -869,12 +956,20 @@ class DWCoordinator:
         Valid at ANY pi, not only the master's, which is what lets the
         smoothed price produce a bound too. -inf outside the dual box.
         """
-        total = float(pi @ self.d)
+        n = self.n
+        meter = pi[:n]
+        total = float(meter @ self.d)
+        for si, sm in enumerate(self.subs):
+            if sm.pv:                                   # the bus row's right-hand side: -PV
+                total -= float(pi[(1 + si) * n : (2 + si) * n] @ self.fc.solar)
         for dev in self.devices:
             col = best[dev.key]
-            total += col.cost + float(pi @ col.power)
-        for coef, cost, upper in self.meter_blocks:
-            red = cost - pi * coef
+            total += col.cost + float(self.price_of(pi, dev) @ col.power)
+        boxes = [(cost - meter * coef, upper) for coef, cost, upper in self.meter_blocks]
+        for si, blocks in enumerate(self.node_blocks):
+            mu = pi[(1 + si) * n : (2 + si) * n]
+            boxes += [(cost - meter * mcoef - mu * bcoef, upper) for mcoef, bcoef, cost, upper in blocks]
+        for red, upper in boxes:
             if np.any((red < -1e-12) & ~np.isfinite(upper)):
                 return -np.inf
             total += float(np.sum(np.minimum(0.0, red * np.where(np.isfinite(upper), upper, 0.0))))
@@ -891,8 +986,9 @@ class DWCoordinator:
             # vars c[n], e[n], s[n]
             nv = 3 * n
             cc = np.zeros(nv)
-            cc[:n] = pi
-            cc[n : 2 * n] = -pi
+            price = self.price_of(pi, key)
+            cc[:n] = price
+            cc[n : 2 * n] = -price
             cc[3 * n - 1] = -_pinned_price(b)
             A = Triplets((n, nv))
             t = np.arange(n)
@@ -916,7 +1012,7 @@ class DWCoordinator:
             A = Triplets((nr, nv))
             cc, lbt, ubt, rhs = np.zeros(nv), np.zeros(nv), np.full(nv, np.inf), np.zeros(nr)
             self._tank_block(A, cc, lbt, ubt, rhs, 0, 0, meter=False)
-            cc[:n] += pi * self.lp_tank.power_kw          # the meter price on its consumption
+            cc[:n] += self.price_of(pi, "water_heater") * self.lp_tank.power_kw   # its bus's price on its consumption
             _, fun, _ = self._lp(cc, A, rhs, lbt, ubt)
             total += fun
         return total
@@ -924,10 +1020,8 @@ class DWCoordinator:
     # ---------------------------------------------------------------- evaluate
     def evaluate(self, powers: dict[str, np.ndarray], trajs: dict[str, np.ndarray]) -> float:
         """Score a plan exactly as coordinate() scores its rounds."""
-        net = self.d.copy()
-        for p in powers.values():
-            net = net + p
-        net, curtail = apply_curtailment(net, self.fc.solar, self.fc.sell, self.cfg.grid)
+        flows = site_meter(self.cfg, self.fc, powers)
+        net, curtail = flows.net, flows.curtail
         if self.export_ceiling is not None:
             # A hard cap: what is exported past it must be curtailed PV, as the
             # master would; a plan that cannot is not runnable.
@@ -936,7 +1030,7 @@ class DWCoordinator:
                 if not (self.cfg.grid.allow_curtailment and np.all(over <= self.fc.solar - curtail + 1e-6)):
                     return np.inf
                 net = net + over
-        return extended_objective(self.cfg, self.fc, net, trajs)
+        return extended_objective(self.cfg, self.fc, net, trajs) + submeter_penalty(self.cfg, self.fc, flows)
 
     def participants_cost(self, plan: dict[str, Column]) -> float:
         """The sum of the participants' private costs (currency) in `plan`
@@ -996,13 +1090,13 @@ class DWCoordinator:
 
     def parts(self, plan: dict[str, Column]) -> dict:
         """The objective of a plan, term by term - what `evaluate` sums."""
-        net = self.d + sum(c.power for c in plan.values())
-        net, curtail = apply_curtailment(net, self.fc.solar, self.fc.sell, self.cfg.grid)
+        flows = site_meter(self.cfg, self.fc, {k: c.power for k, c in plan.items()})
+        net = flows.net
         trajs = {k: c.trajectory for k, c in plan.items()}
         fc, dt = self.fc, self.dt
         bill = float(np.sum(np.maximum(net, 0) * fc.buy * dt) - np.sum(np.maximum(-net, 0) * fc.sell * dt))
         comfort = comfort_penalty(self.cfg, trajs.get("water_heater"), trajs.get("hvac"), self.ref)
-        breach = grid_penalty(self.cfg, net, fc.buy, fc.sell)
+        breach = grid_penalty(self.cfg, net, fc.buy, fc.sell) + submeter_penalty(self.cfg, fc, flows)
         batt = battery_terminal_penalty(
             self.cfg, {k: v for k, v in trajs.items() if k.startswith("battery")} or None, fc.buy)
         goal = site_battery_extras(self.cfg, trajs)   # SoC goals / gates (EVs)
@@ -1015,7 +1109,7 @@ class DWCoordinator:
         return {"bill": bill, "comfort": comfort, "breach": breach, "battery_terminal": batt,
                 "thermal_edge": edge, "battery_goal": goal, "participants": part,
                 "total": bill + comfort + breach + batt + edge + goal + part,
-                "breach_kwh": float(np.sum(breach_energy(self.cfg, net))),
+                "breach_kwh": float(np.sum(breach_energy(self.cfg, net)) + np.sum(flows.breach_kwh)),
                 "peak_import": float(net.max()), "peak_export": float(-net.min())}
 
     def polish(self, plan: dict[str, Column], sweeps: int = 3) -> tuple[dict[str, Column], float]:
@@ -1029,7 +1123,7 @@ class DWCoordinator:
         for _ in range(sweeps):
             improved = False
             for dev in self.devices:
-                others = sum((c.power for k, c in plan.items() if k != dev.key), np.zeros(self.n))
+                others = {k: c.power for k, c in plan.items() if k != dev.key}
                 cand = self.load_aware_oracle(dev, others, self.fc.buy)
                 trial = dict(plan)
                 trial[dev.key] = cand
@@ -1074,13 +1168,14 @@ class DWCoordinator:
             rmp, lam, pi, _, bplans = self.solve_master()
             weights = self.split_weights(lam)
             mix = self.mixed_power(weights)
-            total_mix = sum(mix.values()) + sum(c.power for c in bplans.values())
+            powers = {**mix, **{k: c.power for k, c in bplans.items()}}
             added = 0
             for d in self.devices:
                 if d.key not in fixed:
-                    added += d.add(self.price_oracle(d, pi / dt))
+                    added += d.add(self.price_oracle(d, self.price_of(pi, d) / dt))
                     if heuristic_columns:
-                        added += d.add(self.load_aware_oracle(d, total_mix - mix[d.key], pi / dt))
+                        others = {k: v for k, v in powers.items() if k != d.key}
+                        added += d.add(self.load_aware_oracle(d, others, self.price_of(pi, d) / dt))
             history.append({"iter": f"dive {k + 1}", "rmp": rmp, "lb": history[-1]["lb"] if history else -np.inf,
                             "gap": np.nan, "columns": sum(len(d.columns) for d in self.devices), "added": added,
                             "ms": (time.perf_counter() - t0) * 1000})
@@ -1223,16 +1318,17 @@ class DWCoordinator:
                 best = {}
                 exact = True
                 for dev in self.devices:
-                    col, sol = self.price_solve(dev, p / dt)
+                    q = self.price_of(p, dev)
+                    col, sol = self.price_solve(dev, q / dt)
                     if pk == 0 and response in ("both", "sensitivity") and sol is not None:
-                        added += self._add_variants(dev, sol, col, p / dt, sens_keep, flex if record else None)
+                        added += self._add_variants(dev, sol, col, q / dt, sens_keep, flex if record else None)
                     # The DP is an exact pricing oracle only up to its grid:
                     # a pool column can undercut it (measured: HVAC, 0.0026 at
                     # a binding import limit). Take the min over both, so the
                     # bound never exceeds the master; record the shortfall,
                     # because it is how far the certificate itself can be off.
-                    pool_best = min(dev.columns, key=lambda c: c.cost + p @ c.power)
-                    shortfall = (col.cost + p @ col.power) - (pool_best.cost + p @ pool_best.power)
+                    pool_best = min(dev.columns, key=lambda c: c.cost + q @ c.power)
+                    shortfall = (col.cost + q @ col.power) - (pool_best.cost + q @ pool_best.power)
                     self.pricing_error = max(getattr(self, "pricing_error", 0.0), float(shortfall))
                     best[dev.key] = col if shortfall <= 0 else pool_best
                     exact = exact and col.exact
@@ -1245,15 +1341,16 @@ class DWCoordinator:
                 lb = self.lagrangian_lp(p, best) if (self.lp_batts or self.lp_tank is not None) else self.lagrangian(p, best)
                 priced.append(p.copy())
                 self._priced.append(p.copy())
-                self._seen_min.append({d.key: min(c.cost + float(p @ c.power) for c in d.columns)
+                self._seen_min.append({d.key: min(c.cost + float(self.price_of(p, d) @ c.power) for c in d.columns)
                                        for d in self.devices})
                 if lb > best_lb:
                     best_lb, center = lb, p.copy()
 
             if heuristic_columns:
-                total_mix = sum(mix.values()) + sum(c.power for c in bplans.values())
+                powers = {**mix, **{k: c.power for k, c in bplans.items()}}
                 for dev in self.devices:
-                    added += dev.add(self.load_aware_oracle(dev, total_mix - mix[dev.key], pi / dt))
+                    others = {k: v for k, v in powers.items() if k != dev.key}
+                    added += dev.add(self.load_aware_oracle(dev, others, self.price_of(pi, dev) / dt))
 
             gap = rmp - best_lb
             if snap is not None and flex:
@@ -1300,7 +1397,7 @@ class DWCoordinator:
             best = {}
             for d in self.devices:
                 # a stand-in column carrying the minimum value at this price
-                v = min(self._seen_min[i][d.key], min(c.cost + float(p @ c.power) for c in d.columns))
+                v = min(self._seen_min[i][d.key], min(c.cost + float(self.price_of(p, d) @ c.power) for c in d.columns))
                 best[d.key] = Column(np.zeros(self.n), np.zeros(self.n + 1), v, "min")
             lb = self.lagrangian_lp(p, best) if (self.lp_batts or self.lp_tank is not None) else self.lagrangian(p, best)
             best_lb = max(best_lb, lb)
@@ -1326,7 +1423,7 @@ class DWCoordinator:
 
         return DWResult(
             upper=upper, lower=best_lb, relaxed=relaxed, iterations=it, plan=plan,
-            weights=weights, prices=pi / dt, history=history,
+            weights=weights, prices=pi[: self.n] / dt, history=history,
             ms=(time.perf_counter() - t0) * 1000,
             n_columns=sum(len(d.columns) for d in self.devices),
             fractional_devices=frac,
@@ -1337,6 +1434,7 @@ class DWCoordinator:
             incumbent_used=incumbent_used,
             admm_value=getattr(self, "admm_value", None),
             columns={d.key: d.columns for d in self.devices},
+            local_prices=self.local_prices(pi),
         )
 
 
@@ -1368,18 +1466,16 @@ def extended_objective(cfg: SiteConfig, fc: Forecasts, net: np.ndarray,
 def baseline_objective(cfg: SiteConfig, fc: Forecasts) -> float:
     """Thermostats, idle batteries, same curtailment - on extended_objective."""
     h = cfg.horizon
-    net = fc.net_fixed_demand.copy()
-    trajs = {}
+    trajs: dict[str, np.ndarray] = {}
+    powers: dict[str, np.ndarray] = {}
     for i, b in enumerate(cfg.battery_list):
         trajs[SiteConfig.battery_key(i)] = np.full(h.steps + 1, b.capacity_kwh * b.soc_initial_frac)
     if cfg.water_heater is not None:
-        t, p = baseline_water_heater(cfg.water_heater, h, fc.hot_water_demand)
-        net, trajs["water_heater"] = net + p, t
+        trajs["water_heater"], powers["water_heater"] = baseline_water_heater(cfg.water_heater, h, fc.hot_water_demand)
     if cfg.hvac is not None:
-        t, p = baseline_hvac(cfg.hvac, h, fc.outdoor_temp)
-        net, trajs["hvac"] = net + p, t
-    net, _ = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
-    return extended_objective(cfg, fc, net, trajs)
+        trajs["hvac"], powers["hvac"] = baseline_hvac(cfg.hvac, h, fc.outdoor_temp)
+    flows = site_meter(cfg, fc, powers)
+    return extended_objective(cfg, fc, flows.net, trajs) + submeter_penalty(cfg, fc, flows)
 
 
 def dw_coordinate(cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,

@@ -7,6 +7,10 @@ Home Assistant.
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --every 30
     python tools/emhass-coordination/coordinate.py down                    # stop EMHASS
 
+    # a hybrid inverter (PV and battery on its DC bus, 4 kW AC), 8 kW of PV:
+    HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_hybrid.json
+    HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
+
 `up` builds EMHASS from the branch of davidusb-geek/emhass#1158 (the
 coordinated backend is not in a released EMHASS yet), adds
 home-energy-optimizer, writes EMHASS's secrets from Home Assistant's own
@@ -46,7 +50,7 @@ HERE = Path(__file__).resolve().parent
 BUILD, RUN = HERE / ".build", HERE / ".run"
 EMHASS_REPO = "https://github.com/ameetdesh/emhass.git"
 EMHASS_BRANCH = "federated-all"            # davidusb-geek/emhass#1158
-PACKAGE = "home-energy-optimizer>=0.2.2"
+PACKAGE = "home-energy-optimizer>=0.2.5"
 IMAGE, CONTAINER = "emhass-coordinated", "emhass-coordinated"
 # EMHASS listens on 5000 inside the container. On the host, 5000 is taken by
 # macOS (AirPlay Receiver), so it is published on 5050 by default.
@@ -112,8 +116,16 @@ def up(args: argparse.Namespace) -> None:
 
     # 2. ...plus home-energy-optimizer, which EMHASS's Dockerfile does not
     #    install (it installs no optional extras)
+    #    - from PyPI, or from a local checkout (`--package-src`), built to a wheel
     BUILD.mkdir(exist_ok=True)
-    (BUILD / "Dockerfile").write_text(f'FROM {IMAGE}-base\nRUN uv pip install "{PACKAGE}"\n')
+    for old in BUILD.glob("*.whl"):
+        old.unlink()
+    if args.package_src:
+        sh(sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "-w", str(BUILD), args.package_src)
+        wheel = next(BUILD.glob("home_energy_optimizer-*.whl")).name
+        (BUILD / "Dockerfile").write_text(f"FROM {IMAGE}-base\nCOPY {wheel} /tmp/\nRUN uv pip install /tmp/{wheel}\n")
+    else:
+        (BUILD / "Dockerfile").write_text(f'FROM {IMAGE}-base\nRUN uv pip install "{PACKAGE}"\n')
     sh("docker", "build", "-q", "-t", IMAGE, str(BUILD))
 
     # 3. EMHASS's secrets, from Home Assistant's own settings. Inside the
@@ -132,7 +144,9 @@ def up(args: argparse.Namespace) -> None:
     # 4. start it, with a copy of config.json as EMHASS's configuration. A copy,
     #    because saving in EMHASS's web UI rewrites the mounted file; the one
     #    next to this script stays the source of truth, re-copied on every `up`.
-    (RUN / "config.json").write_text((HERE / "config.json").read_text())
+    config = Path(args.config) if Path(args.config).is_absolute() else HERE / args.config
+    (RUN / "config.json").write_text(config.read_text())
+    print(f"EMHASS's configuration: {config.name}")
     sh("docker", "rm", "-f", CONTAINER, check=False, capture=True)
     sh("docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped",
        "-p", f"{args.port}:5000", "--add-host", "host.docker.internal:host-gateway",
@@ -161,14 +175,14 @@ def down(_args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------- run
-def demo_forecasts(start: datetime) -> dict[str, list[float]]:
+def demo_forecasts(start: datetime, pv_peak: float = 5000.0) -> dict[str, list[float]]:
     """A plausible day from `start`, one value per step, by local hour: PV up
-    to 5 kW at noon, a morning and an evening load, a day/night tariff with
-    an evening peak, a flat export price."""
+    to `pv_peak` W at noon, a morning and an evening load, a day/night tariff
+    with an evening peak, a flat export price."""
     hrs = [(start + timedelta(minutes=STEP_MIN * i)) for i in range(HORIZON)]
     hod = [t.hour + t.minute / 60 for t in hrs]
     return {
-        "pv_power_forecast": [round(max(0.0, 5000 * math.sin(math.pi * (h - 6) / 14))) if 6 <= h <= 20 else 0.0
+        "pv_power_forecast": [round(max(0.0, pv_peak * math.sin(math.pi * (h - 6) / 14))) if 6 <= h <= 20 else 0.0
                               for h in hod],
         "load_power_forecast": [round(500 + 1000 * math.exp(-((h - 19) / 2) ** 2)
                                       + 300 * math.exp(-((h - 7.5) / 1) ** 2)) for h in hod],
@@ -185,7 +199,7 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
     if args.forecasts:
         fc = json.loads(Path(args.forecasts).read_text())
     else:
-        fc = demo_forecasts(start)
+        fc = demo_forecasts(start, args.pv_peak)
     body = {**fc, "prediction_horizon": len(fc["load_cost_forecast"]),
             "soc_init": args.soc, "soc_final": args.soc,
             "operating_hours_of_each_deferrable_load": args.hours}
@@ -210,13 +224,23 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
     first = plan[0]
     shares = {k[len("fed_share_"):]: float(v) for k, v in first.items() if k.startswith("fed_share_")}
     local = lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)  # noqa: E731
-    print(f"\nplan for {len(plan)} steps from {local(first['timestamp']):%a %H:%M %Z}  ({secs:.1f} s)")
+    hybrid = "P_hybrid_inverter" in first
+    print(f"\nplan for {len(plan)} steps from {local(first['timestamp']):%a %H:%M %Z}  ({secs:.1f} s); "
+          f"{first.get('optim_status', '?')}"
+          + (f", the coordinator {first['fed_stop_reason']} after {first['fed_iterations']} rounds"
+             if "fed_stop_reason" in first else ""))
     print(f"{'time':>6} {'PV W':>6} {'load W':>7} {'batt W':>7} {'SoC':>5} {'def0 W':>7} {'def1 W':>7} "
-          f"{'grid W':>7} {'buy':>5} {'meter':>6}")
+          + (f"{'inv W':>6} {'clip W':>6} " if hybrid else "") + f"{'grid W':>7} {'buy':>5} {'meter':>6}")
     for r in plan[:: max(1, len(plan) // 12)]:
         print(f"{local(r['timestamp']):%H:%M}".rjust(6) + f" {r['P_PV']:>6.0f} {r['P_Load']:>7.0f} {r['P_batt']:>7.0f} "
               f"{100 * r['SOC_opt']:>4.0f}% {r.get('P_deferrable0', 0):>7.0f} {r.get('P_deferrable1', 0):>7.0f} "
-              f"{r['P_grid']:>7.0f} {r['unit_load_cost']:>5.2f} {r.get('fed_meter_price', float('nan')):>6.3f}")
+              + (f"{r['P_hybrid_inverter']:>6.0f} {r.get('P_PV_curtailment', 0):>6.0f} " if hybrid else "")
+              + f"{r['P_grid']:>7.0f} {r['unit_load_cost']:>5.2f} {r.get('fed_meter_price', float('nan')):>6.3f}")
+    if hybrid:
+        dt = STEP_MIN / 60
+        clipped = sum(r.get("P_PV_curtailment", 0) for r in plan) * dt / 1000
+        print(f"\nhybrid inverter: at most {max(r['P_hybrid_inverter'] for r in plan):.0f} W to the house "
+              f"(inv W: + DC to AC), {clipped:.1f} kWh of PV not used")
     if shares:
         print("\nshare of the saving over the horizon (currency):")
         for player, v in shares.items():
@@ -262,6 +286,11 @@ def main() -> None:
     u.add_argument("--emhass-src", help="an existing EMHASS checkout of the PR branch (default: clone it)")
     u.add_argument("--port", type=int, default=PORT, help=f"host port for EMHASS (default {PORT}; "
                    "set EMHASS_URL to match for `run` if you change it)")
+    u.add_argument("--config", default="config.json",
+                   help="EMHASS configuration to start with, next to this script or a path "
+                        "(config_hybrid.json: a hybrid inverter)")
+    u.add_argument("--package-src", help="install home-energy-optimizer from this local checkout "
+                   f"instead of PyPI ({PACKAGE})")
     u.set_defaults(fn=up)
     r = sub.add_parser("run", help="plan, publish to Home Assistant, report the coordination")
     r.add_argument("--forecasts", help="JSON with pv_power_forecast, load_power_forecast (W), "
@@ -270,6 +299,7 @@ def main() -> None:
     r.add_argument("--hours", type=float, nargs="+", default=[3, 4],
                    help="hours each deferrable load must run")
     r.add_argument("--every", type=float, default=0, help="re-plan every N minutes (MPC)")
+    r.add_argument("--pv-peak", type=float, default=5000.0, help="the demo day's PV peak, W (default 5000)")
     r.set_defaults(fn=run)
     d = sub.add_parser("down", help="stop and remove the EMHASS container")
     d.set_defaults(fn=down)

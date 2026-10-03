@@ -9,7 +9,7 @@
   --bg:#f6f7f9; --panel:#fff; --ink:#1d2330; --muted:#6b7385; --faint:#9aa1b0; --line:#e4e7ec; --hover:#f1f3f6;
   --sel:#e8f0fe; --sel-ink:#1a56db; --good:#0f9d58; --warn:#b26a00; --bad:#d93025;
   --c-blend:#3b82f6; --c-run:#0f9d58; --c-bound:#8b5cf6;
-  --c-buy:#e8a33d; --c-sell:#34a36b; --c-pi:#0e9aa7; --c-lam:#8b5cf6;
+  --c-buy:#e8a33d; --c-sell:#34a36b; --c-pi:#0e9aa7; --c-lam:#8b5cf6; --c-mu:#d946ef; --c-inv:#475569;
   --c-pv:#f2b705; --c-load:#8a93a6; --c-draw:#d98a2b; --c-net:#e0457b; --c-tank:#e4572e; --c-hvac:#7c4dff; --c-out:#9aa1b0;
   --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
 }
@@ -111,6 +111,9 @@ canvas{display:block;width:100%;height:170px;cursor:crosshair}
         <div class="row"><label>Import limit</label><output id="o_max_import_kw"></output><input type="range" id="max_import_kw" min="0" max="20" step="0.5" value="7"></div>
         <div class="row"><label>Export limit</label><output id="o_max_export_kw"></output><input type="range" id="max_export_kw" min="0" max="20" step="0.5" value="0"></div>
         <div class="row"><label>Horizon</label><output id="o_hours"></output><input type="range" id="hours" min="12" max="48" step="12" value="24"></div>
+        <div class="row" title="The PV and every battery on one hybrid inverter's DC bus: what they send the house, or take from it, passes through the inverter (its efficiency, its rating). The master gives that bus its own price, and the batteries are priced at it."><label>Hybrid inverter</label>
+          <span class="chips" style="margin:0"><span class="chip" id="hybridChip">PV + batteries behind one inverter</span></span></div>
+        <div class="row" id="invRow" style="display:none" title="The inverter's AC rating, each way: the most it delivers to the house, and the most it takes from it. PV beyond it is clipped; off = no limit."><label>Inverter limit</label><output id="o_inverter_kw"></output><input type="range" id="inverter_kw" min="0" max="15" step="0.5" value="0"></div>
         <div class="grp">Batteries</div>
         <div class="row"><label>Batteries</label><output id="o_n_batteries"></output><input type="range" id="n_batteries" min="1" max="10" value="2"></div>
         <div class="row"><label>Battery size</label><output id="o_batt_capacity"></output><input type="range" id="batt_capacity" min="0" max="40" step="0.5" value="10"></div>
@@ -201,7 +204,7 @@ canvas{display:block;width:100%;height:170px;cursor:crosshair}
         <th title="Change in its own private cost against the baseline: discomfort, stored energy drawn down (valued at the average import price), a missed EV goal. Positive = a sacrifice; negative = it ends better off (e.g. a fuller battery).">private Δ</th>
         <th title="net gain = −change − private Δ: what it was paid, less what it gave up. These add up to the total saving.">net gain</th>
       </tr></thead><tbody id="ledgerRows"></tbody></table>
-      <div class="status" style="margin-top:6px" title="Baseline: no PV, thermostats on, batteries idle. Each device is first reimbursed its private-cost change. The saving is then shared between solar and the devices by averaging two orders of arrival: PV first (solar earns what PV saves on its own; the devices share the coordination saving) and devices first (the devices share what a plan with no PV saves; solar earns the rest). Within the devices, each kWh a device shifts is priced at the average tariff the house meets as all devices move together (Aumann–Shapley). This is an Owen value; it tracks the full Shapley value closely without re-solving every coalition, at the cost of one extra plan with no PV. The household load does not move, so its bill does not change. See docs/theory.tex.">Rule: reimburse each device's private-cost change, then share the saving between solar and the devices over both orders of arrival, and among the devices by Aumann–Shapley. Hover for detail.</div>
+      <div class="status" style="margin-top:6px" title="Baseline: no PV, thermostats on, batteries idle. Each device is first reimbursed its private-cost change. The saving is then shared between solar and the devices by averaging two orders of arrival: PV first (solar earns what PV saves on its own; the devices share the coordination saving) and devices first (the devices share what a plan with no PV saves; solar earns the rest). Within the devices, each kWh a device shifts is priced at the average tariff the house meets as all devices move together (Aumann–Shapley). This is an Owen value; it tracks the full Shapley value closely without re-solving every coalition, at the cost of one extra plan with no PV. With a hybrid inverter, a battery behind it is priced at the inverter bus's own price instead of the meter's: the average, along the same path, of what one more kWh on its bus is worth - its local price. The household load does not move, so its bill does not change. See docs/theory.tex.">Rule: reimburse each device's private-cost change, then share the saving between solar and the devices over both orders of arrival, and among the devices by Aumann–Shapley. Hover for detail.</div>
     </details>
     <div class="card" id="chSoc"><h2>Battery energy <span class="note">kWh</span></h2><div class="legend"></div><canvas></canvas></div>
     <div class="card" id="chTank"><h2>Hot-water tank <span class="note">°C</span></h2><div class="legend"></div><canvas></canvas></div>
@@ -244,10 +247,11 @@ function resetBand(){ BAND = null; syncBandUi(); }
 
 /* ---------------------------------------------------------------- controls */
 const devs = {battery:true, wh:true, hvac:true};
-const opts = {battery_in_master:true, allow_curtailment:true, smoothing:true, heuristic_columns:true, polish:true, seed_admm:false, rho_adapt:true};
+const opts = {battery_in_master:true, allow_curtailment:true, smoothing:true, heuristic_columns:true, polish:true, seed_admm:false, rho_adapt:true, hybrid:false};
 const fmt = {n_batteries:v=>v, batt_capacity:v=>v+' kWh', soe_min:v=>+v?v+' %':'off', tank_comfort:v=>v+' °C', solar_peak:v=>v+' kW',
   max_import_kw:v=>+v?v+' kW':'off', max_export_kw:v=>+v?v+' kW':'off', hours:v=>v+' h',
-  max_iter:v=>v, batt_charge:v=>v+' kW', eta:v=>(+v).toFixed(2), grid:v=>v, xrho:v=>(+v).toFixed(2)};
+  max_iter:v=>v, batt_charge:v=>v+' kW', eta:v=>(+v).toFixed(2), grid:v=>v, xrho:v=>(+v).toFixed(2),
+  inverter_kw:v=>+v?v+' kW':'off'};
 Object.keys(fmt).forEach(id => { const el = $('#'+id), o = $('#o_'+id);
   const sync = () => o.textContent = fmt[id](el.value); el.addEventListener('input', sync); sync();
   el.addEventListener('change', () => solve()); });
@@ -272,6 +276,9 @@ document.querySelectorAll('#devChips .chip').forEach(el => el.onclick = () => {
   devs[el.dataset.dev] = !devs[el.dataset.dev]; el.classList.toggle('on', devs[el.dataset.dev]); solve(); });
 document.querySelectorAll('#optChips .chip').forEach(el => el.onclick = () => {
   opts[el.dataset.opt] = !opts[el.dataset.opt]; el.classList.toggle('on', opts[el.dataset.opt]); solve(); });
+$('#hybridChip').onclick = () => {
+  opts.hybrid = !opts.hybrid; $('#hybridChip').classList.toggle('on', opts.hybrid);
+  $('#invRow').style.display = opts.hybrid ? '' : 'none'; solve(); };
 // the button: solve; while ADMM runs, pause; when paused, resume
 $('#solve').onclick = () => solve(!SOLVING && PAUSED_ID !== null, true);
 
@@ -284,6 +291,7 @@ function params(){
     eta:+v('eta'), grid:+v('grid'), tank_levels: v('tank_levels')==='lp' ? 'lp' : +v('tank_levels'), hvac_levels:+v('hvac_levels'),
     response:v('response'), pool:v('pool'), recovery:v('recovery'), solver:v('solver'),
     method:v('method'), xrho:+v('xrho'), battery_step:v('batt_step'), warm_start:v('warm_start') === 'warm',
+    inverter_kw:+v('inverter_kw'),
     enable_battery: devs.battery && +v('batt_capacity') > 0, enable_wh: devs.wh, enable_hvac: devs.hvac, ...opts,
     ...(EDIT ? {buy_h: EDIT.buy, sell_h: EDIT.sell, load_h: EDIT.load, draw_h: EDIT.draw} : {}),
     ...(BAND ? {room_low_h: BAND.low, room_high_h: BAND.high} : {})};
@@ -736,6 +744,8 @@ function renderCharts(){
              : 'Value of one more kWh stored in battery 1: the LP\'s shadow price on its energy balance.'},
       {id:'price:band', label:'no-trade band', color:css('--c-lam'), data:lam, band:[V.import_below, V.export_above],
        hint:'Battery 1 buys below the lower edge (λ·η) and sells above the upper edge (λ/η); in between it holds.'}] : []),
+    ...(V.local_price ? [{id:'price:mu', label:'inverter bus price μ', color:css('--c-mu'), data:V.local_price, width:2,
+       hint:'What one more kWh on the inverter\'s DC bus is worth (the LP\'s shadow price on the bus): the price the batteries behind it are paid. With the inverter below its rating it follows the meter price through the inverter\'s efficiency; at its rating the two separate - while PV is being clipped it falls to 0, so storing that PV costs nothing.'}] : []),
   ];
   chart('#chPrice', {...base, series: PRICE_SERIES, handles: [HB, HS]});
 
@@ -744,6 +754,7 @@ function renderCharts(){
   const used = DATA.solar.map((v, i) => v - curt[i]);
   const curtailed = curt.some(v => v > 1e-6);
   const imp = DATA.grid.max_import_kw, exp = DATA.grid.max_export_kw;
+  const inv = DATA.inverter, invLim = inv && inv.max_output_kw;
   const LOAD_SERIES = {id:'pw:load', label:'load', color:css('--c-load'), data:DATA.load, width:EDITABLE_W, hint:'Inflexible household load. Drag the dots to change it.'};
   const DRAW_SERIES = {id:'pw:draw', label:'hot-water draw', color:css('--c-draw'), data:DATA.hot_water, width:EDITABLE_W,
     hint:'Heat the hot-water draw takes from the tank (kW, at setpoint), not electricity. Drag the dots to change it; the tank re-plans.'};
@@ -755,12 +766,17 @@ function renderCharts(){
      hint:'Solar available (the forecast). Where it sits above "PV used", the difference was curtailed.'},
     ...(curtailed ? [{id:'pw:curt', label:`curtailed (${(V.curtailed_kwh ?? 0).toFixed(1)} kWh)`, color:css('--bad'), data:curt,
        band:[used, DATA.solar], tipFromData:true,
-       hint:'PV discarded: when an export cap is full and storage cannot absorb it, or when the export price is negative.'}] : []),
+       hint: inv ? 'PV not used: clipped where the inverter is at its rating and the batteries cannot absorb it, or curtailed for an export cap or a negative export price.'
+                 : 'PV discarded: when an export cap is full and storage cannot absorb it, or when the export price is negative.'}] : []),
     LOAD_SERIES,
     ...(tankOn ? [DRAW_SERIES] : []),
     ...keys.map((k, i) => ({id:'pw:' + k, label:`battery ${i + 1}`, color:bcol(i), data:dev(k).power, hint:'+ charging, − discharging.'})),
     ...(dev('water_heater') ? [{id:'pw:tank', label:'tank', color:css('--c-tank'), data:dev('water_heater').power, hint:'Water-heater element power.'}] : []),
     ...(dev('hvac') ? [{id:'pw:hvac', label:'HVAC', color:css('--c-hvac'), data:dev('hvac').power, hint:'Heat-pump electrical power, heating or cooling.'}] : []),
+    ...(V.inverter_ac ? [{id:'pw:inv', label:'inverter (AC)', color:css('--c-inv'), data:V.inverter_ac.map(v => -v), width:2,
+       hint:'The hybrid inverter at the house: − delivering to it (PV and battery discharge, after its losses), + taking from it (charging the batteries from the grid). The batteries\' own lines are their DC power.'}] : []),
+    ...(invLim ? [{id:'pw:invlim', label:'inverter limit', color:css('--c-inv'), dash:true, width:1.2, data:Array(n).fill(-invLim),
+       hint:`The inverter's rating: it delivers at most ${invLim} kW to the house.`}] : []),
     {id:'pw:net', label:'meter', color:css('--c-net'), data:V.net_grid, width:2.4, hint:'Net meter power: + importing, − exporting.'},
     ...(imp ? [{id:'pw:imp', label:'import limit', color:css('--bad'), dash:true, width:1.2, data:Array(n).fill(imp)}] : []),
     ...(exp ? [{id:'pw:exp', label:'export limit', color:css('--bad'), dash:true, width:1.2, data:Array(n).fill(-exp)}] : []),
