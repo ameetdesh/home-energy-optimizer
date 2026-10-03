@@ -20,9 +20,10 @@ import numpy.typing as npt
 
 from home_energy_optimizer.dw.attribution import ledger
 from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, baseline_objective
-from home_energy_optimizer.coordinate import apply_curtailment, baseline_solution, net_cost
+from home_energy_optimizer.coordinate import baseline_solution, net_cost
 from home_energy_optimizer.profiles import demo_forecasts
-from home_energy_optimizer.types import Forecasts, Horizon, SiteConfig
+from home_energy_optimizer.submeter import site_meter
+from home_energy_optimizer.types import Forecasts, Horizon, SiteConfig, hybrid_inverter
 from home_energy_optimizer.admm.webapi import build_site
 
 
@@ -69,10 +70,8 @@ def _series(x: npt.ArrayLike) -> list[float]:
 
 def _view(co: DWCoordinator, fc: Forecasts, snap: dict, batt_keys: list[str]) -> dict:
     """One plottable plan: a master snapshot, or the recovered plan."""
-    net = co.d.copy()
-    for p in snap["powers"].values():
-        net = net + p
-    net, curtail = apply_curtailment(net, fc.solar, fc.sell, co.cfg.grid)
+    flows = site_meter(co.cfg, fc, snap["powers"])
+    net, curtail = flows.net, flows.curtail
     view: dict[str, Any] = {
         # per device, per hour: cost of being asked to consume one step more /
         # less, re-planning after (src/home_energy_optimizer/dw/sensitivity.py); None where inadmissible
@@ -84,6 +83,11 @@ def _view(co: DWCoordinator, fc: Forecasts, snap: dict, batt_keys: list[str]) ->
                         "trajectory": _series(snap["trajectories"][k])}
                     for k in snap["powers"]},
         "price": _series(snap["price"]) if snap.get("price") is not None else None,
+        # behind a sub-meter (the hybrid inverter): its AC power (+ = to the
+        # house) and its bus's own price, where the master has one
+        "inverter_ac": _series(flows.ac["inverter"]) if "inverter" in flows.ac else None,
+        "local_price": (_series(snap["local_prices"]["inverter"])
+                        if "inverter" in (snap.get("local_prices") or {}) else None),
         "lambdas": {k: _series(v) for k, v in snap.get("lambda", {}).items()},
         "active": {k: [[round(a[0], 4), a[1], (a[2] if len(a) > 2 else None)] for a in v]
                    for k, v in snap.get("active", {}).items()},
@@ -158,6 +162,13 @@ def apply_band(site: SiteConfig, p: dict) -> SiteConfig:
                                       comfort_high_profile=tuple(high.tolist())))
 
 
+def _inverter(site: SiteConfig) -> dict | None:
+    """The hybrid inverter the page drew, or None: its AC ratings (None: no limit)."""
+    sm = site.pv_submeter
+    return None if sm is None else {"max_output_kw": sm.max_export_kw, "max_input_kw": sm.max_import_kw,
+                                    "eta": sm.eta_export, "batteries": list(sm.members)}
+
+
 def _comfort(site: SiteConfig) -> dict:
     """The thresholds the Temperatures chart draws: the tank's setpoint, and
     the room's band at each point of its trajectory."""
@@ -204,7 +215,19 @@ def _site_fc(p: dict) -> tuple[SiteConfig, Forecasts, bool]:
     fc = demo_forecasts(site.horizon, tariff=p.get("tariff", "dynamic"),
                         solar_peak_kw=float(p.get("solar_peak", 5.0)))
     fc = apply_edits(fc, site.horizon, p)
-    return value_stored_energy(site, fc), fc, tank_lp
+    return value_stored_energy(apply_inverter(site, p), fc), fc, tank_lp
+
+
+def apply_inverter(site: SiteConfig, p: dict) -> SiteConfig:
+    """With `hybrid`, the PV and every battery behind one hybrid inverter
+    (types.hybrid_inverter): `inverter_kw` its AC rating each way (0 or
+    absent: no limit), `inverter_eta` its efficiency each way."""
+    if not p.get("hybrid"):
+        return site
+    kw = float(p.get("inverter_kw") or 0.0)
+    eta = float(p.get("inverter_eta", 0.97))
+    keys = tuple(SiteConfig.battery_key(i) for i, b in enumerate(site.battery_list) if b.capacity_kwh > 0)
+    return replace(site, submeters=(hybrid_inverter(keys, kw or None, kw or None, eta, eta),))
 
 
 def value_stored_energy(site: SiteConfig, fc: Forecasts) -> SiteConfig:
@@ -258,6 +281,7 @@ def solve(p: dict, progress: Callable[..., None] | None = None) -> dict:
         "powers": {k: c.power for k, c in r.plan.items()},
         "trajectories": {k: c.trajectory for k, c in r.plan.items()},
         "price": final["price"],
+        "local_prices": final.get("local_prices"),
         "lambda": final["lambda"],
         # A modulating tank's plan is its blend: show the weights it kept.
         "active": {k: (c.mix if c.source == "blend" else [(1.0, c.source, c.born)])
@@ -306,6 +330,7 @@ def solve(p: dict, progress: Callable[..., None] | None = None) -> dict:
         "battery_floors": [b.soe_floor_kwh for b in site.battery_list],
         "grid": {"max_import_kw": site.grid.max_import_kw,
                  "max_export_kw": site.grid.max_export_kw},
+        "inverter": _inverter(site),
         "comfort": _comfort(site),
         "pool": pool,
         "ledger": ledger_route(p)["ledger"] if p.get("ledger") else None,
@@ -483,6 +508,7 @@ def solve_admm(p: dict, progress: Callable[..., None] | None = None) -> dict:
         "battery_capacities": [b.capacity_kwh for b in site.battery_list],
         "battery_floors": [b.soe_floor_kwh for b in site.battery_list],
         "grid": {"max_import_kw": site.grid.max_import_kw, "max_export_kw": site.grid.max_export_kw},
+        "inverter": _inverter(site),
         "comfort": _comfort(site),
         "pool": {},
         "ledger": ledger_route(p)["ledger"] if p.get("ledger") else None,

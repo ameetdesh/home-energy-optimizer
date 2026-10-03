@@ -31,13 +31,13 @@ import numpy as np
 from home_energy_optimizer.admm.battery_qp import BatteryStep
 from home_energy_optimizer.dw.coordinator import DWCoordinator, DWResult, RunOptions
 from home_energy_optimizer.coordinate import (
-    apply_curtailment,
     baseline_solution,
     device_sell_price,
     net_cost,
     total_objective,
 )
 from home_energy_optimizer.dp_battery import solve_battery
+from home_energy_optimizer.submeter import device_bus, site_meter, submeter_penalty
 from home_energy_optimizer.types import CoordinationResult, DeviceSolution, Forecasts, SiteConfig
 
 _EMPTY2 = np.empty((0, 0))
@@ -84,20 +84,23 @@ def to_coordination_result(co: DWCoordinator, r: DWResult) -> CoordinationResult
                           value=_EMPTY2, policy=_EMPTY2, states=_EMPTY1, actions=_EMPTY1)
         for k, c in r.plan.items()
     }
-    raw = co.d + sum(c.power for c in r.plan.values())
-    net, curtail = apply_curtailment(raw, fc.solar, fc.sell, cfg.grid)
+    powers = {k: c.power for k, c in r.plan.items()}
+    flows = site_meter(cfg, fc, powers)
+    net, curtail = flows.net, flows.curtail
     trajs = {k: c.trajectory for k, c in r.plan.items()}
     soe = {k: v for k, v in trajs.items() if k.startswith("battery")} or None
 
     # The fast tier's value function: battery 0 at the tariff, everything else
     # held at the DW plan - the same conditioning ADMM's pricing re-solve uses.
-    pricing, dp_load = None, None
+    # Behind a sub-meter (a hybrid inverter), battery 0 meets its bus: the PV
+    # and other members on it, and the connection's efficiency and ratings.
+    pricing, dp_load, bus = None, None, None
     key0 = SiteConfig.battery_key(0)
     if cfg.battery is not None and key0 in r.plan:
-        dp_load = co.d + sum(c.power for k, c in r.plan.items() if k != key0)
+        bus, dp_load = device_bus(cfg, fc, key0, powers)
         pricing = solve_battery(cfg.battery, cfg.horizon, fc.buy,
                                 device_sell_price(fc.sell, cfg.grid),
-                                dp_load=dp_load, soc_gates=cfg.soc_gates)
+                                dp_load=dp_load, soc_gates=cfg.soc_gates, bus=bus)
 
     g = cfg.grid
     return CoordinationResult(
@@ -107,7 +110,7 @@ def to_coordination_result(co: DWCoordinator, r: DWResult) -> CoordinationResult
         export_revenue=float(np.sum(np.maximum(-net, 0.0) * fc.sell) * dt),
         net_cost=net_cost(net, fc.buy, fc.sell, dt),
         total_objective=total_objective(cfg, net, fc, trajs.get("water_heater"),
-                                        trajs.get("hvac"), soe),
+                                        trajs.get("hvac"), soe) + submeter_penalty(cfg, fc, flows),
         rounds_run=r.iterations,
         battery_pricing=pricing,
         grid_import_excess=(float(np.maximum(net - g.max_import_kw, 0.0).max())
@@ -117,6 +120,7 @@ def to_coordination_result(co: DWCoordinator, r: DWResult) -> CoordinationResult
         curtailment=curtail,
         curtailed_kwh=float(curtail.sum() * dt),
         battery_dp_load=dp_load,
+        battery_bus=bus,
         baseline_cost=baseline_solution(cfg, fc)[1],
         method="dw",
         lower_bound=float(r.lower),

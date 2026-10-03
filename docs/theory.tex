@@ -1063,6 +1063,144 @@ $- \Delta f$.}
 \end{table}
 
 %=============================================================================
+\section{Sub-meters and local prices}
+\label{sec:submeters}
+
+Some devices do not reach the meter directly. A hybrid inverter puts the PV and
+the batteries on a DC bus, and what they send the house passes through the
+inverter, with its losses and its rating; a sub-panel puts a heat pump and an EV
+charger behind one breaker. Each is a \emph{sub-meter}
+(\texttt{types.SubMeter}): a bus $b$ holding the members $\mathcal K_b$ (and, for
+a hybrid inverter, the PV), connected to the house's AC bus. Like the grid limits
+these couple devices, but only some of them, and the coordinators treat them the
+same way: as more rows in the master, priced by their duals.
+
+\subsection{The model}
+
+In slot $t$ the connection sends $x_t \ge 0$ from the bus (bus side) and
+delivers $\eta_{\mathrm o} x_t$ to the house, or takes $y_t \ge 0$ (bus side)
+and draws $y_t/\eta_{\mathrm i}$ from it. Its AC ratings bound
+$\eta_{\mathrm o} x_t \le R_{\mathrm o}$ and $y_t/\eta_{\mathrm i} \le R_{\mathrm i}$;
+power beyond them is planned only where nothing else fits, at the breach price
+$\cbr$, as a grid limit's. PV on the bus may be clipped, $0 \le \kappa_t \le g_t$,
+for free. (Without curtailment allowed, only what the rating forces:
+$\kappa_t \le [g_t - R_{\mathrm o}/\eta_{\mathrm o}]^+$; an inverter does that
+itself.) The bus balances,
+\begin{equation}
+  \textstyle\sum_{k \in \mathcal K_b} p_{k,t} + x_t - y_t + \kappa_t = g^b_t
+  \qquad [\text{dual } \dt\,\mu^b_t],
+  \label{eq:bus}
+\end{equation}
+with $g^b_t$ the PV on the bus (zero for a sub-panel), and the meter row
+\eqref{eq:meter} loses the members and the bus's PV and gains the connection,
+$z_t = d'_t + \chi_t + \sum_{k \notin \cup_b \mathcal K_b} p_{k,t}
++ \sum_b (y^b_t/\eta^b_{\mathrm i} - \eta^b_{\mathrm o} x^b_t)$, with $d'_t$ the
+load minus the PV left on the AC bus. A shared breaker is the same with
+$\eta = 1$ and no PV (\texttt{types.group\_limit}). Everything that scores a plan
+--- both coordinators, the fast tier, the saving split --- computes the meter
+from the devices' powers through one function (\texttt{submeter.site\_meter}),
+which makes the connection's best use slot by slot exactly as these rows do.
+
+\subsection{Local prices}
+
+The dual $\mu^b_t$ of \eqref{eq:bus} is what one more kWh drawn on the bus costs
+the house: the bus's \emph{local price}. A device on the bus is priced at it
+instead of at $\pi_t$ --- its reduced cost \eqref{eq:reduced} reads
+$f + \dt\,\mu^{b\top} p - \sigma_k$ --- and the bound \eqref{eq:bound} gains,
+per bus, $-\dt\,\mu^{b\top} g^b$ and the connection's own terms
+$\min_{x,y,\kappa}$ over its boxes, closed form like the meter's. Nothing else
+changes: $L(\pi, \mu)$ is still the Lagrangian dual function, now for the meter
+rows and the bus rows together, and $L \le J^\star$ is still weak duality.
+
+LP optimality pins $\mu^b_t$ down from $\pi_t$ (writing $\eta_{\mathrm o}$,
+$\eta_{\mathrm i}$ for bus $b$'s):
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+\item sending, below the rating: $\mu^b_t = \eta_{\mathrm o}\,\pi_t$ --- a kWh on
+  the bus is worth what it fetches at the meter, less the inverter's loss;
+\item taking, below the rating: $\mu^b_t = \pi_t/\eta_{\mathrm i}$;
+\item neither: $\eta_{\mathrm o}\pi_t \le \mu^b_t \le \pi_t/\eta_{\mathrm i}$, the
+  connection's own no-trade band;
+\item sending at the rating: $\mu^b_t \le \eta_{\mathrm o}\pi_t$, and while PV is
+  clipped, $\mu^b_t = 0$ --- one more kWh on the bus would be clipped too.
+\end{itemize}
+The last case is what the rows are for: at midday, with the inverter full, a
+battery behind it is offered energy at $0$ while the meter's price is still the
+export price, so it stores the PV that would otherwise be clipped even when
+exporting would pay. These are nodal prices in the sense of spot pricing
+\cite{schweppe1988}, with the inverter as a lossy, rated line.
+
+\paragraph{One relaxation.} Sending and taking at once loses energy, and never
+pays while energy has a non-negative value; with curtailment allowed, clipping
+dominates it anyway. The LP does not forbid it --- EMHASS uses a binary
+per slot --- just as it does not forbid a battery charging and discharging at
+once. Where prices are negative and curtailment is off, the master can use it to
+burn energy; the scored plan cannot, since \texttt{site\_meter} nets the two.
+
+\subsection{In ADMM and in the fast tier}
+
+In proximal message passing the house is a network \cite{kraning2014}: each bus is
+a net with its own price and average, its members' terminals and the PV's on it,
+and the connection is a device with one terminal on each net, $(s, -\eta_{\mathrm o}s)$
+for $s \ge 0$ and $(s, -s/\eta_{\mathrm i})$ for $s < 0$. Its proximal step
+minimises over four pieces of $s$, each a quadratic with a closed-form minimiser,
+clipped to the piece. A device DP behind a bus (\texttt{meter.Bus}) scores each
+action through the connection, so the fast tier's $\lambda$ and its actions
+respect the rating.
+
+\subsection{Who saves what, at local prices}
+
+Section~\ref{sec:ledger} priced each kWh a device shifts at the average slope of
+the meter cost along the path from the baseline to the plan. With sub-meters the
+bill in slot $t$ is a function $C_t(u)$ of several totals --- what the AC bus draws
+and what each sub-meter's bus draws --- and Aumann--Shapley prices a device's kWh at
+the average, along the same straight path $u(s) = u^0 + s\,(u^1 - u^0)$, of the
+bill's slope in \emph{its} bus's total:
+\[
+  \hat c^b_t = \frac1\dt\int_0^1 \frac{\partial C_t}{\partial u_b}\big(u(s)\big)\,ds,
+  \qquad
+  \text{gain}_k = -\dt\textstyle\sum_t \hat c^{b(k)}_t\,\big(p_{k,t} - p^0_{k,t}\big) - \Delta f_k .
+\]
+Since $\sum_b \dt\,\hat c^b_t\,(u^1_b - u^0_b) = C_t(u^1) - C_t(u^0)$ by the
+fundamental theorem of calculus along the path, the gains still add up to the
+devices' saving exactly. With one bus this is the secant of
+Section~\ref{sec:ledger}. $C_t$ is piecewise linear, so its gradient is constant
+between kinks; the code (\texttt{dw.attribution.\_bus\_prices}) cuts each slot's
+path into cells, adds a cell's gradient times its length where the gradient is
+the same at both ends, and halves the others, so the integral is exact up to
+rounding. The Owen value between solar and the devices is unchanged.
+
+The effect is the one the local prices suggest. Table~\ref{tab:hybrid} sweeps
+the inverter's rating on the demo site (9~kW of PV, a 10~kWh battery and an
+on/off water heater on the AC side, $\eta = 0.95$ each way). As the rating
+falls, PV is clipped and solar's share falls with it. The battery's share first
+rises --- it is credited, at its bus's price, for clipped PV it stores --- then
+falls once the rating also limits what it can deliver to the house in the
+evening.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{rrrrrrrr}
+\toprule
+rating & DW cost & bound & ADMM & PV clipped & solar & battery & water heater \\
+\midrule
+none  & $-3.555$ & $-3.574$ & $-3.495$ & $0.00$  & $10.726$ & $2.482$ & $2.964$ \\
+5~kW  & $-2.952$ & $-2.964$ & $-2.946$ & $1.68$  & $9.533$  & $3.130$ & $2.907$ \\
+4~kW  & $-1.812$ & $-1.864$ & $-1.790$ & $7.53$  & $8.541$  & $3.066$ & $2.823$ \\
+3~kW  & $-0.142$ & $-0.532$ & $-0.127$ & $14.78$ & $7.179$  & $2.784$ & $2.797$ \\
+2.5~kW & $0.865$ & $0.210$  & $0.887$  & $18.91$ & $6.312$  & $2.622$ & $2.820$ \\
+\bottomrule
+\end{tabular}
+\caption{A hybrid inverter's rating swept (\texttt{bench/hybrid\_inverter.py}):
+cost (cur/day) of the Dantzig--Wolfe plan and its bound, of ADMM's plan, PV
+clipped (kWh), and the net gains of the saving split. Wherever PV is clipped the
+inverter bus's price is $0$. The gap that opens at tight ratings is the on/off
+water heater's: the relaxed master runs it at part power on exactly the spare
+AC capacity, which no on/off plan can; with a modulating element it closes.}
+\label{tab:hybrid}
+\end{table}
+
+%=============================================================================
 \section{The two coordinators compared}
 \label{sec:compare}
 
@@ -1321,6 +1459,10 @@ J.~Rivera, P.~Wolfrum, S.~Hirche, C.~Goebel and H.-A.~Jacobsen.
 \newblock Alternating Direction Method of Multipliers for Decentralized
 Electric Vehicle Charging Control.
 \newblock \emph{IEEE Conference on Decision and Control}, 2013.
+
+\bibitem{schweppe1988}
+F.~C.~Schweppe, M.~C.~Caramanis, R.~D.~Tabors and R.~E.~Bohn,
+\emph{Spot Pricing of Electricity}. Kluwer, 1988.
 
 \bibitem{shapley1953}
 L.~S.~Shapley.

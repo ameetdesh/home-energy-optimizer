@@ -38,6 +38,7 @@ ORDER = [
     ("src/home_energy_optimizer/dp_battery.py", None),
     ("src/home_energy_optimizer/dp_thermal.py", None),
     ("src/home_energy_optimizer/coordinate.py", None),
+    ("src/home_energy_optimizer/submeter.py", None),            # sub-meters: the meter from the devices' powers
     ("src/home_energy_optimizer/admm/battery_qp.py", None),             # the exact LP battery step
     ("src/home_energy_optimizer/admm/coordinator.py", None),            # ADMM (imports from coordinate)
     ("src/home_energy_optimizer/policy.py", None),       # the ADMM mode's value of a stored kWh

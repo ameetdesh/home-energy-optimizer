@@ -494,12 +494,49 @@ A home automation loop must always get a plan, so the adapter returns `None` and
 lets EMHASS run its default solver — logging the option responsible — rather
 than raising. `unsupported()` lists the cases: a `costfun` other than `profit` or
 `cost`, `set_total_pv_sell`, `set_nocharge_from_grid` with a battery,
-`set_battery_first_priority`, a hybrid inverter, more than one battery,
+`set_battery_first_priority`, more than one battery,
 `heat_topology`, shared thermal tanks, deferrable load groups,
 `cost_forecast_per_deferrable_load`, `set_deferrable_startup_penalty`,
 `deferrable_load_max_cost`, capacity charges, and the `soc_target` family of
 runtime arguments. An export price above the import price in some slot, or a
 coordinator failure, falls back the same way.
+
+A **hybrid inverter** (`inverter_is_hybrid`) is planned: the PV and EMHASS's
+battery on its DC bus become a sub-meter (below), with EMHASS's
+`inverter_ac_output_max`, `inverter_ac_input_max` and both efficiencies, and the
+plan carries `P_hybrid_inverter` with EMHASS's meaning (+ DC to AC). It still
+falls back with `set_nodischarge_to_grid` (EMHASS ties the battery to the
+meter's direction then), `inverter_stress_cost`, an inverter rated only by
+`pv_inverter_model` name, or the battery inside an EMHASS participant group.
+
+---
+
+## Sub-meters: a hybrid inverter, a shared breaker
+
+Some devices reach the meter through their own connection: the PV and batteries
+on a hybrid inverter's DC bus, or a heat pump and an EV charger behind one
+breaker. Each is a `SubMeter` on the site:
+
+```python
+from home_energy_optimizer import SiteConfig, group_limit, hybrid_inverter
+
+site = SiteConfig(..., submeters=(
+    hybrid_inverter(("battery",), max_output_kw=5.0, eta_dc_ac=0.97, eta_ac_dc=0.97),
+    group_limit("garage", ("water_heater", "hvac"), max_kw=3.0),
+))
+```
+
+Dantzig–Wolfe models each as a balance row of its own in the master, so a device
+behind it is priced at **its bus's price** (`DWResult.local_prices`) rather than
+the meter's: equal to the meter price through the inverter's efficiency while
+the connection has headroom, and 0 while PV is being clipped at the inverter's
+rating — so a battery there stores PV that would otherwise be lost. ADMM treats
+each bus as a net of its own, the battery DP and the fast tier score each action
+through the connection, and the saving split prices each device's kWh at its
+bus's price. `docs/theory.tex`, "Sub-meters and local prices";
+`bench/hybrid_inverter.py` sweeps an inverter's rating. The DW page (Advanced →
+Site) has a **Hybrid inverter** switch and an **Inverter limit** slider, and
+draws the bus price μ on the Prices chart.
 
 ---
 
@@ -553,6 +590,8 @@ src/home_energy_optimizer/     the package (import home_energy_optimizer)
   dp_battery.py    battery DP; returns the value function and policy
   dp_thermal.py    hot-water and HVAC DPs, and their thermostat baselines
   coordinate.py    plan scoring shared by both coordinators; coordinate() runs ADMM
+  meter.py         a device's view of the meter: grid limits, and its bus behind a sub-meter
+  submeter.py      the meter from every device's power, through sub-meters (hybrid inverter, breaker)
   planner.py       plan(): Dantzig-Wolfe (default) or ADMM, one result type
   policy.py        value function -> actions, prices, counterfactuals
   feeds.py         real forecast inputs

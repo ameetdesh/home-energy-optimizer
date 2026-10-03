@@ -15,6 +15,7 @@ import numpy as np
 
 if TYPE_CHECKING:  # admm.battery_qp imports this module
     from .admm.battery_qp import BatteryStep
+    from .meter import Bus
 
 # --------------------------------------------------------------------------
 # Horizon
@@ -503,6 +504,92 @@ class GridLimits:
 
 
 @dataclass(frozen=True)
+class SubMeter:
+    """Devices (and optionally the PV) behind one connection to the house's
+    AC bus, with that connection's own limits: a hybrid inverter, or a
+    sub-panel whose breaker several devices share.
+
+    Like GridLimits these are COUPLING constraints, but on a subset of the
+    devices. Dantzig-Wolfe models each sub-meter in its master LP: a balance
+    row at the sub-meter (its "bus") and the connection's flows to the house,
+    so every member device is priced at the sub-meter's own price (that row's
+    dual) instead of the meter's. Where the connection is not at a limit the
+    two differ only by the conversion efficiency; where it is, they separate
+    (docs/theory.tex, "Sub-meters and local prices").
+
+    Signs follow the devices: a member's power is positive when it draws. The
+    connection's limits are AC-side, in kW: `max_export_kw` from the bus to
+    the house (an inverter's AC output rating), `max_import_kw` from the house
+    to the bus (its AC input rating). None means no limit. `eta_export` and
+    `eta_import` are the conversion efficiencies each way (1.0 for a
+    sub-panel). Power beyond a limit is planned only where nothing else fits,
+    and charged at the grid's breach price, as a grid-limit breach is.
+
+    `pv`: the PV is on this bus (a hybrid inverter's DC side). Its output then
+    reaches the house through the connection, and is clipped there - at no
+    cost - when the connection cannot pass it.
+    """
+
+    name: str
+    members: tuple[str, ...] = ()
+    pv: bool = False
+    max_export_kw: float | None = None
+    max_import_kw: float | None = None
+    eta_export: float = 1.0
+    eta_import: float = 1.0
+
+    def validate(self) -> None:
+        if not self.name:
+            raise ValueError("a sub-meter needs a name")
+        for name in ("max_export_kw", "max_import_kw"):
+            v = getattr(self, name)
+            if v is not None and v < 0:
+                raise ValueError(f"{self.name}: {name} must be >= 0 or None, got {v}")
+        for name in ("eta_export", "eta_import"):
+            v = getattr(self, name)
+            if not 0.0 < v <= 1.0:
+                raise ValueError(f"{self.name}: {name} must be in (0, 1], got {v}")
+        if not self.members and not self.pv:
+            raise ValueError(f"{self.name}: a sub-meter needs members or the PV")
+        if len(set(self.members)) != len(self.members):
+            raise ValueError(f"{self.name}: a member is listed twice")
+
+    @property
+    def export_cap_dc(self) -> float:
+        """The most the bus can send to the house, bus-side (kW); inf if unlimited."""
+        return np.inf if self.max_export_kw is None else self.max_export_kw / self.eta_export
+
+    @property
+    def import_cap_dc(self) -> float:
+        """The most the bus can take from the house, bus-side (kW); inf if unlimited."""
+        return np.inf if self.max_import_kw is None else self.max_import_kw * self.eta_import
+
+
+def hybrid_inverter(batteries: tuple[str, ...] = ("battery",), max_output_kw: float | None = None,
+                    max_input_kw: float | None = None, eta_dc_ac: float = 1.0,
+                    eta_ac_dc: float = 1.0) -> SubMeter:
+    """A hybrid inverter: the PV and `batteries` on its DC bus, the house on
+    its AC side. `max_output_kw` is its AC output rating (None: no limit),
+    `max_input_kw` its AC input rating (None: the same as the output).
+    EMHASS's inverter_ac_output_max, inverter_ac_input_max,
+    inverter_efficiency_dc_ac and inverter_efficiency_ac_dc."""
+    return SubMeter("inverter", tuple(batteries), pv=True, max_export_kw=max_output_kw,
+                    max_import_kw=max_output_kw if max_input_kw is None else max_input_kw,
+                    eta_export=eta_dc_ac, eta_import=eta_ac_dc)
+
+
+def group_limit(name: str, members: tuple[str, ...], min_kw: float | None = None,
+                max_kw: float | None = None) -> SubMeter:
+    """A limit on what `members` draw together, kW: at most `max_kw` (a shared
+    breaker), at least `min_kw` (negative: at most -min_kw of export). None:
+    no limit that way."""
+    if min_kw is not None and min_kw > 0:
+        raise ValueError("min_kw > 0 would force the members to draw; use <= 0 (an export limit)")
+    return SubMeter(name, tuple(members), max_import_kw=max_kw,
+                    max_export_kw=None if min_kw is None else -min_kw)
+
+
+@dataclass(frozen=True)
 class SiteConfig:
     """Everything the coordinator needs. Devices are optional (None = absent)."""
 
@@ -519,6 +606,9 @@ class SiteConfig:
     soc_gates: tuple[SocGate, ...] = ()
     grid: GridLimits = field(default_factory=GridLimits)
     coordination: CoordinationConfig = field(default_factory=CoordinationConfig)
+    # Devices behind their own connection to the house (a hybrid inverter, a
+    # shared breaker): see SubMeter. Each device and the PV in at most one.
+    submeters: tuple[SubMeter, ...] = ()
 
     @property
     def battery_list(self) -> tuple[BatteryConfig, ...]:
@@ -542,6 +632,27 @@ class SiteConfig:
                 dev.validate()
         if self.hvac is not None:
             self.hvac.comfort_band(self.horizon.steps)   # a profile must fit the horizon
+        seen: set[str] = set()
+        names: set[str] = set()
+        for sm in self.submeters:
+            sm.validate()
+            if sm.name in names:
+                raise ValueError(f"two sub-meters are named {sm.name!r}")
+            names.add(sm.name)
+            if seen & set(sm.members):
+                raise ValueError(f"{sm.name}: a device is behind two sub-meters")
+            seen |= set(sm.members)
+        if sum(sm.pv for sm in self.submeters) > 1:
+            raise ValueError("the PV can be behind one sub-meter only")
+
+    @property
+    def pv_submeter(self) -> SubMeter | None:
+        """The sub-meter the PV is behind, or None (the PV is on the house's AC bus)."""
+        return next((sm for sm in self.submeters if sm.pv), None)
+
+    def submeter_of(self, key: str) -> int | None:
+        """Index of the sub-meter device `key` is behind, or None."""
+        return next((i for i, sm in enumerate(self.submeters) if key in sm.members), None)
 
     def without(self, *names: str) -> SiteConfig:
         """Return a copy with the named devices disabled. Test convenience."""
@@ -704,6 +815,9 @@ class CoordinationResult:
     # PV thrown away per slot (kW) and its total (kWh).
     curtailment: np.ndarray | None = None
     curtailed_kwh: float = 0.0
+    # battery 0's bus (meter.Bus) when it sits behind a sub-meter; None on
+    # the AC bus. Its pricing solve and the policy snapshot use it.
+    battery_bus: Bus | None = None
     battery_dp_load: np.ndarray | None = None
     baseline_cost: float = 0.0
     # Which coordinator produced this: "admm" (coordinate) or "dw" (dw/).

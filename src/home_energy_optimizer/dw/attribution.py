@@ -38,18 +38,33 @@ the saving over the thermostat baseline WITH PV.
 Participants (interface.Participant, e.g. an EMHASS device) take part like the
 site's own devices: their baseline is their own `baseline()` answer (their plan
 without coordination), and their private cost is what their answers report.
+
+Behind a sub-meter (a hybrid inverter, a shared breaker; types.SubMeter) a
+kWh is not worth what it is at the meter: it reaches the meter through the
+connection's efficiency and ratings. The bill is then a function of several
+totals per slot - what the house's AC bus draws, and what each sub-meter's
+bus draws - and Aumann-Shapley prices each device's kWh at the average,
+along the same straight path, of the bill's slope in ITS bus's total: its
+local price. Per slot the bill is piecewise linear along the path, so the
+average is computed exactly, piece by piece (`_bus_prices`); the shares still
+add up to the total. With no sub-meter there is one total, and this is the
+secant above.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 import numpy as np
 
 from home_energy_optimizer.dw.coordinator import Column, Device, DWCoordinator
 from home_energy_optimizer.coordinate import apply_curtailment, breach_price
 from home_energy_optimizer.dp_thermal import baseline_hvac, baseline_water_heater
-from home_energy_optimizer.types import SiteConfig
+from home_energy_optimizer.submeter import ac_solar, meter_from_draws
+from home_energy_optimizer.types import Forecasts, SiteConfig
+
+AC = "ac"     # the house's own AC bus, beside each sub-meter's (by name)
 
 # A plan entry as callers hand it in: a coordinator Column, or a
 # (power kW, trajectory[, private cost]) tuple.
@@ -59,11 +74,17 @@ PlanEntry = Column | tuple
 def _tariff_cost(co: DWCoordinator, z: np.ndarray) -> np.ndarray:
     """Grid cost per slot at a meter flow z that is already final (no
     curtailment left to apply): the tariff plus any priced breach."""
-    cfg, fc, dt = co.cfg, co.fc, co.dt
+    return _tariff_cost_at(co, co.fc, z)
+
+
+def _tariff_cost_at(co: DWCoordinator, fc: Forecasts, z: np.ndarray) -> np.ndarray:
+    """`_tariff_cost` with the tariff of `fc` (the same slots, or a subset);
+    the breach price is the horizon's, from co.fc."""
+    cfg, dt = co.cfg, co.dt
     c = (np.maximum(z, 0.0) * fc.buy - np.maximum(-z, 0.0) * fc.sell) * dt
     g = cfg.grid
     if g.active:
-        b = breach_price(g, fc.buy, fc.sell)
+        b = breach_price(g, co.fc.buy, co.fc.sell)
         if g.max_import_kw is not None:
             c = c + np.maximum(z - g.max_import_kw, 0.0) * b * dt
         if g.max_export_kw is not None:
@@ -94,6 +115,104 @@ def _path_prices(co: DWCoordinator, start: np.ndarray, end: np.ndarray,
     local = (cost(co, start + eps) - cost(co, start - eps)) / (2 * eps)
     moving = np.abs(dz) > 1e-9
     return np.where(moving, dm / np.where(moving, dz, 1.0), local)
+
+
+def _bus_of(co: DWCoordinator, key: str) -> str:
+    """Which bus device `key` is on: AC, or its sub-meter's name."""
+    s = co.cfg.submeter_of(key)
+    return AC if s is None else co.cfg.submeters[s].name
+
+
+def _draws(co: DWCoordinator, fc: Forecasts, powers: Mapping[str, np.ndarray],
+           load: bool = True) -> dict[str, np.ndarray]:
+    """Each bus's total draw (kW per slot) for device powers `powers`: AC
+    carries the load (if `load`) less the PV on the AC bus."""
+    n = co.n
+    x = {AC: (fc.load if load else np.zeros(n)) - ac_solar(co.cfg, fc)}
+    x.update({sm.name: np.zeros(n) for sm in co.cfg.submeters})
+    for k, p in powers.items():
+        b = _bus_of(co, k)
+        x[b] = x[b] + p
+    return x
+
+
+def _slot_cost(co: DWCoordinator, fc: Forecasts, x: Mapping[str, np.ndarray]) -> np.ndarray:
+    """The bill per slot (currency) at bus draws `x` (`_draws`), as the
+    objective scores it: sub-meter flows, curtailment, tariff, every breach."""
+    flows = meter_from_draws(co.cfg, fc, x[AC], {k: v for k, v in x.items() if k != AC})
+    c = _tariff_cost_at(co, fc, flows.net)
+    if np.any(flows.breach_kwh > 0):
+        c = c + flows.breach_kwh * breach_price(co.cfg.grid, co.fc.buy, co.fc.sell)
+    return c
+
+
+def _slots(fc: Forecasts, idx: np.ndarray) -> Forecasts:
+    """`fc` restricted to slots `idx` (repeats allowed): one entry per index."""
+    return replace(fc, buy=fc.buy[idx], sell=fc.sell[idx], load=fc.load[idx], solar=fc.solar[idx],
+                   outdoor_temp=fc.outdoor_temp[idx], hot_water_demand=fc.hot_water_demand[idx])
+
+
+def _bus_prices(co: DWCoordinator, fc: Forecasts, x0: Mapping[str, np.ndarray],
+                x1: Mapping[str, np.ndarray], cells: int = 16, depth: int = 40) -> dict[str, np.ndarray]:
+    """Aumann-Shapley local prices: per bus and slot, the average along the
+    straight path x0 -> x1 of the bill's slope in that bus's draw (currency
+    per kW-slot). Sum over buses of price x (x1 - x0) is the bill's change.
+
+    Per slot the bill is piecewise linear along the path, so its gradient is
+    constant between kinks. Each slot's path is cut into `cells`; a cell
+    whose gradient is the same just inside both ends is one linear piece and
+    adds its gradient times its length, exactly. Any other cell is halved,
+    up to `depth` times; a cell still not one piece is then a sliver around a
+    kink, and adds its midpoint gradient, corrected so the cell's total is its
+    exact change in the bill. With no sub-meter there is one bus, and this
+    is `_path_prices`' secant.
+    """
+    buses = list(x0)
+    n = co.n
+    d = {b: np.asarray(x1[b], dtype=float) - np.asarray(x0[b], dtype=float) for b in buses}
+    if len(buses) == 1:
+        b = buses[0]
+        return {b: _path_prices(co, x0[b], x1[b], lambda c, z: _slot_cost(c, fc, {b: z}))}
+
+    def point(idx: np.ndarray, s: np.ndarray, shift: str | None = None, h: float = 0.0) -> dict[str, np.ndarray]:
+        return {b: x0[b][idx] + s * d[b][idx] + (h if b == shift else 0.0) for b in buses}
+
+    def cost(idx: np.ndarray, x: dict[str, np.ndarray]) -> np.ndarray:
+        return _slot_cost(co, _slots(fc, idx), x)
+
+    def grad(idx: np.ndarray, s: np.ndarray) -> np.ndarray:
+        h = 1e-5      # kW: central differences are exact on a linear piece, up to rounding
+        f = _slots(fc, idx)
+        return np.array([(_slot_cost(co, f, point(idx, s, b, h)) - _slot_cost(co, f, point(idx, s, b, -h))) / (2 * h)
+                         for b in buses])
+
+    avg = np.zeros((len(buses), n))
+    T = np.repeat(np.arange(n), cells)
+    L = np.tile(np.arange(cells) / cells, n)
+    R = L + 1.0 / cells
+    for level in range(depth + 1):
+        if not len(T):
+            break
+        w = R - L
+        gl, gr = grad(T, L + 1e-3 * w), grad(T, R - 1e-3 * w)
+        one = np.all(np.abs(gl - gr) <= 1e-7 * (1.0 + np.abs(gl) + np.abs(gr)), axis=0)
+        if level == depth or len(T) > 64 * n:     # slivers (the cap only guards against a runaway)
+            one = np.ones_like(one)
+            gm = grad(T, 0.5 * (L + R))
+            # make each sliver's contribution its exact change in the bill
+            dc = cost(T, point(T, R)) - cost(T, point(T, L))
+            dd = np.array([d[b][T] for b in buses])
+            rest = dc - np.sum(gm * dd, axis=0) * w
+            big = np.argmax(np.abs(dd), axis=0)
+            safe = np.where(np.abs(dd[big, np.arange(len(T))]) > 1e-12, dd[big, np.arange(len(T))], 1.0)
+            gm[big, np.arange(len(T))] += np.where(np.abs(dd[big, np.arange(len(T))]) > 1e-12, rest / (w * safe), 0.0)
+            gl = gm
+        for i in range(len(buses)):
+            np.add.at(avg[i], T[one], gl[i, one] * w[one])
+        M = 0.5 * (L + R)
+        keep = ~one
+        T, L, R = np.concatenate([T[keep], T[keep]]), np.concatenate([L[keep], M[keep]]), np.concatenate([M[keep], R[keep]])
+    return {b: avg[i] for i, b in enumerate(buses)}
 
 
 def _participant(co: DWCoordinator, key: str) -> Device | None:
@@ -172,12 +291,21 @@ def _device_shares(co: DWCoordinator, plan: Mapping[str, PlanEntry],
     fc = co.fc
     base = {k: _baseline(co, k) for k in keys}
     entries = {k: _entry(plan[k]) for k in keys}
-    z0 = fc.load - fc.solar + sum(base[k][0] for k in keys)
-    z1 = fc.load - fc.solar + sum(entries[k][0] for k in keys)
-    q = _path_prices(co, z0, z1, _meter_cost)
     df = {k: _private_cost(co, k, entries[k][1], entries[k][2]) - _private_cost(co, k, base[k][1], base[k][2])
           for k in keys}
-    return {k: -float(q @ (entries[k][0] - base[k][0])) - df[k] for k in keys}, df
+    if not co.cfg.submeters:
+        z0 = fc.load - fc.solar + sum(base[k][0] for k in keys)
+        z1 = fc.load - fc.solar + sum(entries[k][0] for k in keys)
+        q = _path_prices(co, z0, z1, _meter_cost)
+        return {k: -float(q @ (entries[k][0] - base[k][0])) - df[k] for k in keys}, df
+    qb = _bus_prices(co, fc, _draws(co, fc, {k: base[k][0] for k in keys}),
+                     _draws(co, fc, {k: entries[k][0] for k in keys}))
+    return {k: -float(qb[_bus_of(co, k)] @ (entries[k][0] - base[k][0])) - df[k] for k in keys}, df
+
+
+def _split(x: Mapping[str, np.ndarray]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """`_draws` as meter_from_draws takes it: (AC draw, {sub-meter: draw})."""
+    return x[AC], {k: v for k, v in x.items() if k != AC}
 
 
 def device_keys(co: DWCoordinator) -> list[str]:
@@ -206,13 +334,13 @@ def ledger(co: DWCoordinator, plan: Mapping[str, PlanEntry],
     base = {k: _baseline(co, k) for k in keys}
     entries = {k: _entry(plan[k]) for k in keys}
 
-    # meter flows: baseline with no PV, thermostats with PV, the plan
-    z_dark = fc.load + sum(base[k][0] for k in keys)
-    z_thermo = z_dark - fc.solar
-    z_plan = z_thermo + sum(entries[k][0] - base[k][0] for k in keys)
-    bill_dark = float(_tariff_cost(co, z_dark).sum())
-    bill_thermo = float(_meter_cost(co, z_thermo).sum())
-    bill_plan = float(_meter_cost(co, z_plan).sum())
+    # the bill: baseline with no PV, thermostats with PV, the plan
+    dark = replace(fc, solar=np.zeros_like(fc.solar))
+    p_base = {k: base[k][0] for k in keys}
+    p_plan = {k: entries[k][0] for k in keys}
+    bill_dark = float(_slot_cost(co, dark, _draws(co, dark, p_base)).sum())
+    bill_thermo = float(_slot_cost(co, fc, _draws(co, fc, p_base)).sum())
+    bill_plan = float(_slot_cost(co, fc, _draws(co, fc, p_plan)).sum())
 
     # the two orders of arrival
     first_pv, df = _device_shares(co, entries, keys)             # devices after PV
@@ -226,18 +354,25 @@ def ledger(co: DWCoordinator, plan: Mapping[str, PlanEntry],
     # bills before: the baseline bill, split along 0 -> baseline
     x_base = {"household load": fc.load, "solar": np.zeros_like(fc.solar)}
     x_base.update({k: base[k][0] for k in keys})
-    q0 = _path_prices(co, np.zeros_like(z_dark), z_dark, _tariff_cost)
+    if co.cfg.submeters:
+        zero = {b: np.zeros(co.n) for b in _draws(co, dark, {})}
+        qb0 = _bus_prices(co, dark, zero, _draws(co, dark, p_base))
+        q_of = {"household load": qb0[AC], "solar": qb0[AC], **{k: qb0[_bus_of(co, k)] for k in keys}}
+    else:
+        z_dark = fc.load + sum(base[k][0] for k in keys)
+        q0 = _path_prices(co, np.zeros_like(z_dark), z_dark, _tariff_cost)
+        q_of = {j: q0 for j in x_base}
 
     rows = []
     for j, x in x_base.items():
-        before = float(q0 @ x)
+        before = float(q_of[j] @ x)
         after = before - (gain[j] + df[j])       # paid: its gain plus its reimbursement
         rows.append({"player": j, "bill_before": before, "bill_after": after,
                      "bill_change": after - before, "private_cost_change": df[j],
                      "net_gain": gain[j]})
     tot = {c: sum(r[c] for r in rows) for c in ("bill_before", "bill_after", "bill_change",
                                                   "private_cost_change", "net_gain")}
-    _, curtailed = apply_curtailment(z_plan, fc.solar, fc.sell, co.cfg.grid)
+    curtailed = meter_from_draws(co.cfg, fc, *_split(_draws(co, fc, p_plan))).curtail
     tot.update(house_bill_before=bill_dark, house_bill_after=bill_plan, house_bill_with_pv=bill_thermo,
                coordination_saving=bill_thermo - bill_plan - tot["private_cost_change"],
                pv_alone_saving=v_pv, devices_alone_saving=v_dev,

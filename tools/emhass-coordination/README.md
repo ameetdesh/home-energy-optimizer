@@ -16,7 +16,8 @@ same sensors EMHASS always publishes (`sensor.p_batt_forecast`,
 > The coordinated backend is EMHASS PR
 > [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158),
 > not yet in a released EMHASS, so EMHASS is built from that branch. It needs
-> home-energy-optimizer **0.2.2** or later.
+> home-energy-optimizer **0.2.5** or later (or `up --package-src` with a
+> checkout of this repository).
 
 ## What you need
 
@@ -77,6 +78,40 @@ After a `run`, under *Developer tools → States*:
 
 On a demo day the battery charges from the midday PV and covers the evening
 peak, each load runs exactly its configured hours, and the gap is 0.
+
+## A hybrid inverter
+
+[`config_hybrid.json`](config_hybrid.json) is the same house with the PV and
+the battery on one hybrid inverter's DC bus, rated 4 kW AC each way, 97%
+efficient each way, and curtailment on:
+
+```bash
+python tools/emhass-coordination/coordinate.py up --config config_hybrid.json
+python tools/emhass-coordination/coordinate.py run --pv-peak 8000   # 8 kW of PV into a 4 kW inverter
+```
+
+The keys are EMHASS's own (`inverter_is_hybrid`, `inverter_ac_output_max`,
+`inverter_ac_input_max`, `inverter_efficiency_dc_ac`,
+`inverter_efficiency_ac_dc`). It also sets `set_nodischarge_to_grid: false`:
+EMHASS's default is `true`, which with a hybrid inverter forbids the battery to
+discharge while the house exports - a rule on the meter's direction the
+coordinator does not split per device, so it would fall back (and `run` says so). The battery is still planned by
+home-energy-optimizer and the loads by EMHASS; the coordinator holds the
+inverter as a sub-meter, so the battery is priced at the inverter's DC bus,
+where a kWh is worth nothing while PV is being clipped. `run` adds two columns:
+
+| column | meaning |
+|---|---|
+| `inv W` | `P_hybrid_inverter`: the inverter's AC power, + DC to AC (delivering to the house) |
+| `clip W` | `P_PV_curtailment`: PV not used - clipped at the rating, or curtailed |
+
+and a line with the inverter's largest delivery and the PV not used. It never
+exceeds the rating; on the demo day the battery charges from the PV the
+inverter cannot pass.
+
+To try it before home-energy-optimizer 0.2.5 is on PyPI, install it from this
+checkout: `up --config config_hybrid.json --package-src .` (run from the
+repository's root).
 
 ## What the script handles for you
 
@@ -206,7 +241,8 @@ yours, and give them a couple of days of history.
 EMHASS plans with its single MILP, and logs one line naming the option, when
 the configuration uses something the coordinator cannot split per device yet:
 `costfun: self-consumption`, `set_total_pv_sell`, `set_nocharge_from_grid`,
-`set_battery_first_priority`, a hybrid inverter, more than one battery,
+`set_battery_first_priority`, a hybrid inverter with `set_nodischarge_to_grid`
+or `inverter_stress_cost`, more than one battery,
 thermal tanks shared between loads, deferrable load groups, startup penalties,
 capacity charges, or the runtime `soc_target`. A participant that names the
 battery while `set_use_battery` is off falls back too. A plan is always

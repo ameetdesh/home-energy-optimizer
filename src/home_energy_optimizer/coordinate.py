@@ -261,12 +261,13 @@ def baseline_solution(cfg: SiteConfig, fc: Forecasts) -> tuple[np.ndarray, float
     it would flatter the optimiser by an amount that has nothing to do with
     scheduling.
     """
-    net = fc.net_fixed_demand.copy()
+    from .submeter import site_meter            # it imports this module
+    powers = {}
     if cfg.water_heater is not None:
-        net = net + baseline_water_heater(cfg.water_heater, cfg.horizon, fc.hot_water_demand)[1]
+        powers["water_heater"] = baseline_water_heater(cfg.water_heater, cfg.horizon, fc.hot_water_demand)[1]
     if cfg.hvac is not None:
-        net = net + baseline_hvac(cfg.hvac, cfg.horizon, fc.outdoor_temp)[1]
-    net, _ = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
+        powers["hvac"] = baseline_hvac(cfg.hvac, cfg.horizon, fc.outdoor_temp)[1]
+    net = site_meter(cfg, fc, powers).net
     return net, net_cost(net, fc.buy, fc.sell, cfg.horizon.dt)
 
 
@@ -296,33 +297,35 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
 
+    from .submeter import device_bus, site_meter, submeter_penalty      # they import this module
+
     def objective(devices: Mapping[str, DeviceSolution | BatteryStep]
                   ) -> tuple[float, np.ndarray, np.ndarray]:
-        net = fc.net_fixed_demand + sum(devices[k].power for k in dev_keys)
-        net, curtail = apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
+        flows = site_meter(cfg, fc, {k: devices[k].power for k in dev_keys})
+        net, curtail = flows.net, flows.curtail
         soe = {k: devices[k].trajectory for k in dev_keys if k in batt} or None
         obj = total_objective(cfg, net, fc,
                               devices["water_heater"].trajectory if "water_heater" in devices else None,
                               devices["hvac"].trajectory if "hvac" in devices else None, soe)
-        return obj, net, curtail
+        return obj + submeter_penalty(cfg, fc, flows), net, curtail
 
     cur, net, curtail = objective(res.devices)
     changed = False
     for _ in range(max(sweeps, 0)):
         improved = False
         for k in dev_keys:
-            others = fc.net_fixed_demand + sum(res.devices[j].power for j in dev_keys if j != k)
+            bus, others = device_bus(cfg, fc, k, {j: res.devices[j].power for j in dev_keys})
             if k in batt:
                 sol = solve_battery(batt[k], h, buy, sell, dp_load=others, admm_rho=0.0,
-                                    soc_gates=cfg.soc_gates if k == "battery" else (), limits=limits)
+                                    soc_gates=cfg.soc_gates if k == "battery" else (), limits=limits, bus=bus)
             elif k == "water_heater":
                 assert cfg.water_heater is not None
                 sol = solve_water_heater(cfg.water_heater, h, buy, sell, fc.hot_water_demand,
-                                         dp_load=others, limits=limits)
+                                         dp_load=others, limits=limits, bus=bus)
             else:
                 assert cfg.hvac is not None
                 sol = solve_hvac(cfg.hvac, h, buy, sell, fc.outdoor_temp, dp_load=others,
-                                 limits=limits)
+                                 limits=limits, bus=bus)
             trial = dict(res.devices)
             trial[k] = sol
             obj, t_net, t_curtail = objective(trial)
@@ -345,8 +348,8 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
         res.grid_export_excess = float(np.maximum(-net - cfg.grid.max_export_kw, 0.0).max())
     if "battery" in res.devices:
         # the pricing re-solve is conditioned on the others' FINAL plans
-        res.battery_dp_load = fc.net_fixed_demand + sum(
-            res.devices[j].power for j in dev_keys if j != "battery")
+        res.battery_bus, res.battery_dp_load = device_bus(
+            cfg, fc, "battery", {j: res.devices[j].power for j in dev_keys})
     return True
 
 
@@ -364,11 +367,11 @@ def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
     to be, and no more.
     """
     assert cfg.battery is not None, "pricing needs a battery"
-    dp_load = (
-        res.battery_dp_load
-        if res.battery_dp_load is not None
-        else fc.net_fixed_demand
-    )
+    if res.battery_dp_load is not None:
+        dp_load, bus = res.battery_dp_load, res.battery_bus
+    else:
+        from .submeter import device_bus             # it imports this module
+        bus, dp_load = device_bus(cfg, fc, "battery", {})
     return solve_battery(
         cfg.battery,
         cfg.horizon,
@@ -378,6 +381,7 @@ def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
         admm_rho=0.0,
         soc_gates=cfg.soc_gates,
         limits=limits,
+        bus=bus,
     )
 
 
@@ -406,10 +410,9 @@ def _apply_baseline_fallback(
         breached the export cap while grid_export_excess read 0.000, because the
         two were computed from different arrays.
         """
-        net = fc.net_fixed_demand.copy()
-        for k in dev_keys:
-            net = net + overrides.get(k, res.devices[k].power)
-        return apply_curtailment(net, fc.solar, fc.sell, cfg.grid)
+        from .submeter import site_meter             # it imports this module
+        flows = site_meter(cfg, fc, {k: overrides.get(k, res.devices[k].power) for k in dev_keys})
+        return flows.net, flows.curtail
 
     swapped = False
     changed = True

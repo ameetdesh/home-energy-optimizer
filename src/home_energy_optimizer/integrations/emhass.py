@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 import numpy as np
 import numpy.typing as npt
 
-from home_energy_optimizer.coordinate import apply_curtailment
 from home_energy_optimizer.dw.attribution import ledger
 from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, DWResult, RunOptions
 from home_energy_optimizer.interface import Answer, Query
@@ -46,8 +45,11 @@ from home_energy_optimizer.types import (
     Horizon,
     HvacConfig,
     SiteConfig,
+    SubMeter,
     WaterHeaterConfig,
+    hybrid_inverter,
 )
+from home_energy_optimizer.submeter import site_meter
 
 if TYPE_CHECKING:  # pandas arrives with EMHASS; this package does not require it
     import pandas as pd
@@ -154,7 +156,15 @@ def unsupported(optim_conf: dict[str, Any], plant_conf: dict[str, Any], costfun:
     if oc.get("set_battery_first_priority"):
         return "set_battery_first_priority"
     if pc.get("inverter_is_hybrid"):
-        return "a hybrid inverter (ties the battery to PV)"
+        # The PV and the battery on the inverter's DC bus are a sub-meter
+        # (types.hybrid_inverter), which the coordinator models exactly -
+        # except EMHASS's options that tie it to the meter or price it
+        if oc.get("set_nodischarge_to_grid"):
+            return "set_nodischarge_to_grid with a hybrid inverter (no discharge while exporting)"
+        if float(pc.get("inverter_stress_cost", 0) or 0) > 0:
+            return "inverter_stress_cost"
+        if pc.get("inverter_ac_output_max") is None and not isinstance(pc.get("pv_inverter_model"), (int, float)):
+            return "a hybrid inverter rated by pv_inverter_model (set inverter_ac_output_max)"
     if int(pc.get("number_of_batteries", 1)) > 1:
         return "more than one battery"
     if oc.get("heat_topology") or oc.get("shared_thermal_tanks") or oc.get("deferrable_load_groups"):
@@ -233,6 +243,9 @@ class EmhassParticipant:
         pc["maximum_power_from_grid"] = float(reach_w)
         pc["maximum_power_to_grid"] = float(reach_w)
         pc["compute_curtailment"] = False
+        # A hybrid inverter is the coordinator's too (a sub-meter in its master):
+        # the participant's own model plans its devices on the house's AC bus.
+        pc["inverter_is_hybrid"] = False
         self.key, self.battery, self.loads = key, bool(battery), list(loads)
         self.opt: EmhassOptimization = Optimization(
             opt.retrieve_hass_conf, oc, pc, opt.var_load_cost, opt.var_prod_price,
@@ -542,7 +555,21 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     grid = GridLimits(max_import_kw=float(pc.get("maximum_power_from_grid", 9000)) / 1000.0,
                       max_export_kw=float(pc.get("maximum_power_to_grid", 9000)) / 1000.0,
                       allow_curtailment=bool(pc.get("compute_curtailment", False)))
-    site = SiteConfig(horizon=horizon, battery=battery_cfg, water_heater=tank_cfg, hvac=hvac_cfg, grid=grid)
+    submeters: tuple[SubMeter, ...] = ()
+    if pc.get("inverter_is_hybrid"):
+        # its DC bus: the PV and EMHASS's battery, when the coordinator holds it
+        if any(p.battery for p in participants):
+            _decline(opt, "a hybrid inverter with the battery in an EMHASS participant group")
+            return None
+        out_w = pc.get("inverter_ac_output_max")
+        out_w = float(pc["pv_inverter_model"] if out_w is None else out_w)
+        in_w = pc.get("inverter_ac_input_max")
+        submeters = (hybrid_inverter(("battery",) if battery_cfg is not None else (),
+                                     out_w / 1000.0, (out_w if in_w is None else float(in_w)) / 1000.0,
+                                     float(pc.get("inverter_efficiency_dc_ac", 1.0)),
+                                     float(pc.get("inverter_efficiency_ac_dc", 1.0))),)
+    site = SiteConfig(horizon=horizon, battery=battery_cfg, water_heater=tank_cfg, hvac=hvac_cfg, grid=grid,
+                      submeters=submeters)
     ceiling = np.maximum(pv_w - load_w, 0.0) / 1000.0 if oc.get("set_nodischarge_to_grid") else None
     wh = site.water_heater
     tank_in_master = bool(wh is not None and wh.n_duty_levels > 2)
@@ -601,8 +628,8 @@ def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
 
     dt, n = float(opt.time_step), len(data_opt)
     plan = r.plan
-    net = co.d + sum(c.power for c in plan.values())
-    net, curtail = apply_curtailment(net, co.fc.solar, co.fc.sell, co.cfg.grid)
+    flows = site_meter(co.cfg, co.fc, {k: c.power for k, c in plan.items()})
+    net, curtail = flows.net, flows.curtail
     if co.export_ceiling is not None:
         over = np.maximum(-net - co.export_ceiling, 0.0)
         net, curtail = net + over, curtail + over
@@ -612,6 +639,9 @@ def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
     out["P_Load"] = load_w
     if opt.plant_conf.get("compute_curtailment"):
         out["P_PV_curtailment"] = curtail * 1000.0
+    if "inverter" in flows.ac:
+        # EMHASS's sign: + DC to AC (the inverter delivering to the house)
+        out["P_hybrid_inverter"] = flows.ac["inverter"] * 1000.0
     out["P_grid_pos"] = np.maximum(net, 0.0) * 1000.0
     out["P_grid_neg"] = np.minimum(net, 0.0) * 1000.0
     out["P_grid"] = out["P_grid_pos"] + out["P_grid_neg"]

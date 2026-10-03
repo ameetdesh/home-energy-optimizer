@@ -66,3 +66,23 @@ def test_a_plan_is_optimal_only_when_its_gap_is_closed():
     assert plan_status(0.0, -0.0005) == "Optimal"          # absolute below 1
     assert plan_status(0.0, -0.01) == "Optimal_Inaccurate"
     assert plan_status(-200.0, -200.1) == "Optimal"         # a profit: scale by |upper|
+
+
+@pytest.mark.parametrize("extra, oc_extra, blocked", [
+    ({}, {}, None),
+    ({}, {"set_nodischarge_to_grid": True}, "set_nodischarge_to_grid"),
+    ({"inverter_stress_cost": 0.05}, {}, "inverter_stress_cost"),
+    ({"inverter_ac_output_max": None, "pv_inverter_model": "SMA_Sunny_Boy"}, {}, "pv_inverter_model"),
+    ({"inverter_ac_output_max": None, "pv_inverter_model": 4000}, {}, None),
+])
+def test_a_hybrid_inverter_is_planned_unless_an_option_ties_it_down(extra, oc_extra, blocked):
+    """A hybrid inverter is a sub-meter the coordinator models exactly; the
+    options that tie it to the meter's direction, price its stress, or rate
+    it by a CEC model name still fall back, by name."""
+    pc = {**PLANT, "inverter_is_hybrid": True, "inverter_ac_output_max": 5000, **extra}
+    oc = {"set_use_battery": True, "number_of_deferrable_loads": 0, **oc_extra}
+    reason = unsupported(oc, pc, "profit", {})
+    if blocked is None:
+        assert reason is None
+    else:
+        assert reason is not None and blocked in reason
