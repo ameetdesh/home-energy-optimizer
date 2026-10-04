@@ -16,8 +16,8 @@ same sensors EMHASS always publishes (`sensor.p_batt_forecast`,
 > The coordinated backend is EMHASS PR
 > [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158),
 > not yet in a released EMHASS, so EMHASS is built from that branch. It needs
-> home-energy-optimizer **0.2.5** or later (or `up --package-src` with a
-> checkout of this repository).
+> home-energy-optimizer **0.2.5** or later (0.2.6 for shared limits), or
+> `up --package-src` with a checkout of this repository.
 
 ## What you need
 
@@ -75,6 +75,7 @@ After a `run`, under *Developer tools → States*:
 | `sensor.coordination_share_solar`, `…_battery`, `…_deferrable0_deferrable1` | this script | each player's share of the saving over the horizon |
 | `sensor.coordination_meter_price` | this script | the coordinator's price at the meter now, with the whole horizon in its `forecasts` attribute |
 | `sensor.coordination_gap` | this script | how far the plan can be from the best possible one (0: proven optimal) |
+| `sensor.coordination_local_price_<name>` | this script | with shared limits: the price of one more kWh behind each one (`inverter`, a `group_limits` name), with the horizon in `forecasts` |
 
 On a demo day the battery charges from the midday PV and covers the evening
 peak, each load runs exactly its configured hours, and the gap is 0.
@@ -112,6 +113,28 @@ inverter cannot pass.
 To try it before home-energy-optimizer 0.2.5 is on PyPI, install it from this
 checkout: `up --config config_hybrid.json --package-src .` (run from the
 repository's root).
+
+## Four DERs, two solvers, three limits
+
+[`config_four_der.json`](config_four_der.json) adds a hot water tank and a heat
+pump, planned by home-energy-optimizer, to the hybrid house above, and two
+shared limits: the tank and the heat pump on a 3.5 kW garage breaker
+(`group_limits`), and the two loads on a 3 kW budget (EMHASS's own
+`deferrable_load_groups`, which the loads' EMHASS participant holds itself):
+
+```bash
+python tools/emhass-coordination/coordinate.py up --config config_four_der.json
+python tools/emhass-coordination/coordinate.py run --pv-peak 8000
+```
+
+`run` adds `tank W` and `hp W` columns, and a line per limit the coordinator
+holds with its local price over the horizon: the inverter's falls to 0 while PV
+is clipped; a breaker's is the meter's while it has headroom, and above it where
+the limit binds. Each
+is published as `sensor.coordination_local_price_<name>`, with the horizon in its
+`forecasts` attribute. The demo day passes an outdoor temperature (5-15 °C) for
+the heat pump. Shared limits need home-energy-optimizer 0.2.6 (or
+`up --package-src`).
 
 ## What the script handles for you
 

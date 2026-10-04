@@ -226,3 +226,16 @@ def test_validation():
         DWCoordinator(replace(_site(False), submeters=(group_limit("a", ("ev",), max_kw=1.0),)), FC)
     with pytest.raises(ValueError, match="force the members"):
         group_limit("a", ("battery",), min_kw=1.0)
+
+
+@pytest.mark.parametrize("min_kw", [-1.0, 0.0])
+def test_a_group_limits_export_holds_a_battery_behind_it(min_kw):
+    """min_kw <= 0 is how much a group may push back to the house: a battery
+    behind a -1 kW limit discharges at most 1 kW; behind 0, not at all (no
+    backfeed). The plan meets its bound, as an LP must."""
+    fc = demo_forecasts(H, tariff="day_night")
+    site = SiteConfig(horizon=H, battery=BatteryConfig(), water_heater=None, hvac=None,
+                      submeters=(group_limit("panel", ("battery",), min_kw=min_kw),))
+    r = DWCoordinator(site, fc).run()
+    assert r.plan["battery"].power.min() >= min_kw - 1e-6
+    assert r.upper == pytest.approx(r.lower, abs=1e-6)

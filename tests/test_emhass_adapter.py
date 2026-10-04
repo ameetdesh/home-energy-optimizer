@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pytest
 
-from home_energy_optimizer.integrations.emhass import _battery, optimize, plan_status, unsupported
+from home_energy_optimizer.integrations.emhass import Limit, _battery, _limits, optimize, plan_status, unsupported
 
 PLANT = {"battery_nominal_energy_capacity": 10000, "battery_minimum_state_of_charge": 0.3,
          "battery_maximum_state_of_charge": 0.9, "battery_charge_power_max": 5000,
@@ -86,3 +86,64 @@ def test_a_hybrid_inverter_is_planned_unless_an_option_ties_it_down(extra, oc_ex
         assert reason is None
     else:
         assert reason is not None and blocked in reason
+
+
+# ---------------------------------------------------------------- shared limits
+EMHASS_EACH = [{"devices": ["battery"], "solver": "emhass"}, {"devices": ["deferrable0"], "solver": "emhass"},
+               {"devices": ["deferrable1"], "solver": "emhass"}]
+GROUPED = [{"devices": ["battery"], "solver": "home_energy_optimizer"},
+           {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"},
+           {"devices": ["water_heater", "hvac"], "solver": "home_energy_optimizer"}]
+
+
+def test_a_load_group_inside_one_participant_stays_in_its_model():
+    """EMHASS's own deferrable_load_groups, all its loads in one participant:
+    that participant's EMHASS model holds it (mutual exclusion too); the
+    coordinator holds nothing."""
+    oc = {"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "mutual_exclusion": True}]}
+    held, own, reason = _limits(oc, GROUPED, False)
+    assert reason is None and held == []
+    assert own == {"deferrable0+deferrable1": oc["deferrable_load_groups"]}
+
+
+def test_a_load_group_across_participants_is_a_group_limit():
+    """Across participants, a shared max_power (W) is the coordinator's
+    group limit (kW), named after its loads."""
+    oc = {"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "max_power": 3000}]}
+    held, own, reason = _limits(oc, EMHASS_EACH, False)
+    assert reason is None and own == {}
+    assert held == [Limit("deferrable0+deferrable1", ("deferrable0", "deferrable1"), None, 3.0)]
+
+
+def test_group_limits_name_the_package_devices():
+    """group_limits: devices EMHASS does not model, in W, min_power <= 0."""
+    oc = {"group_limits": [{"name": "garage", "devices": ["water_heater", "hvac"], "max_power": 3000,
+                            "min_power": 0}]}
+    held, _, reason = _limits(oc, GROUPED, False)
+    assert reason is None
+    assert held == [Limit("garage", ("hvac", "water_heater"), 0.0, 3.0)]
+
+
+@pytest.mark.parametrize("oc, hybrid, problem", [
+    ({"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "mutual_exclusion": True}]},
+     False, "mutual exclusion across participants"),
+    ({"group_limits": [{"name": "g", "devices": ["deferrable0", "water_heater"], "max_power": 3000}]},
+     False, "splits the participant"),
+    ({"group_limits": [{"name": "g", "devices": ["ev"], "max_power": 3000}]}, False, "nothing plans"),
+    ({"group_limits": [{"name": "g", "devices": ["battery"], "max_power": 3000}]}, True, "hybrid inverter"),
+    ({"group_limits": [{"name": "g", "devices": ["hvac"], "min_power": 500}]}, False, "min_power must be <= 0"),
+    ({"group_limits": [{"name": "a", "devices": ["hvac"], "max_power": 1000},
+                       {"name": "b", "devices": ["hvac", "water_heater"], "max_power": 3000}]},
+     False, "under two limits"),
+])
+def test_a_limit_the_coordinator_cannot_hold_is_refused_by_name(oc, hybrid, problem):
+    """Each refusal names its reason, and EMHASS's own solver plans instead."""
+    groups = EMHASS_EACH if "mutual" in problem else GROUPED
+    _, _, reason = _limits(oc, groups, hybrid)
+    assert reason is not None and problem in reason
+
+
+def test_deferrable_load_groups_no_longer_falls_back_by_itself():
+    oc = {"set_use_battery": False, "number_of_deferrable_loads": 2,
+          "deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "max_power": 3000}]}
+    assert unsupported(oc, {}, "profit", {}) is None
