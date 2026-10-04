@@ -390,7 +390,11 @@ Its README walks through each step, and where EMHASS's configuration is changed.
 ### A four-DER house
 
 Solar, a battery, two deferrable loads, a hot water tank and a heat pump — split
-across both solvers. Add to EMHASS's configuration:
+across both solvers, and behind three shared limits: the PV and the battery on a
+4 kW hybrid inverter, the tank and the heat pump on a 3.5 kW garage breaker, and
+the two loads on a 3 kW budget. This is
+[`tools/emhass-coordination/config_four_der.json`](tools/emhass-coordination/config_four_der.json);
+the coordination's own keys are:
 
 ```json
 {
@@ -399,7 +403,7 @@ across both solvers. Add to EMHASS's configuration:
 
   "set_use_battery": true,
   "number_of_deferrable_loads": 2,
-  "nominal_power_of_deferrable_loads": [2500, 1000],
+  "nominal_power_of_deferrable_loads": [3000, 750],
 
   "participants": [
     {"devices": ["battery"], "solver": "emhass"},
@@ -414,9 +418,44 @@ across both solvers. Add to EMHASS's configuration:
      "config": {"power_kw": 1.5, "cop": 3.5, "c_room_kwh_per_k": 2.5,
                 "r_wall_k_per_kw": 5.0,
                 "t_comfort_low": 21.0, "t_comfort_high": 25.0}}
+  ],
+
+  "inverter_is_hybrid": true,
+  "inverter_ac_output_max": 4000, "inverter_ac_input_max": 4000,
+  "inverter_efficiency_dc_ac": 0.97, "inverter_efficiency_ac_dc": 0.97,
+  "set_nodischarge_to_grid": false,
+
+  "group_limits": [
+    {"name": "garage", "devices": ["water_heater", "hvac"], "max_power": 3500}
+  ],
+  "deferrable_load_groups": [
+    {"names": ["deferrable0", "deferrable1"], "max_power": 3000}
   ]
 }
 ```
+
+Run it next to Home Assistant with `coordinate.py up --config config_four_der.json`
+then `run --pv-peak 8000` (`tools/emhass-coordination/`). On its demo day the
+inverter never passes more than 4 kW and the battery stores the PV it clips, the
+tank and the heat pump never run together (their 4.5 kW would trip the garage's
+3.5 kW), and the loads keep within 3 kW.
+
+**How the limits enter.** There is no `submeters` key: every limit is said in
+EMHASS's own vocabulary where EMHASS has one, and the adapter builds the
+package's sub-meters (`types.SubMeter`) from it.
+
+| what you write | becomes | its price |
+|---|---|---|
+| `inverter_is_hybrid` + `inverter_ac_*`, `inverter_efficiency_*` (EMHASS's keys) | `hybrid_inverter(("battery",), ...)`: the PV and the battery on its DC bus | `fed_local_price_inverter` |
+| `group_limits` (name, devices, `max_power` / `min_power` in W) | `group_limit(name, devices, ...)` | `fed_local_price_<name>` |
+| `deferrable_load_groups` (EMHASS's key), all its loads in one participant | kept in that participant's own EMHASS model, exactly as EMHASS holds it | — |
+| `deferrable_load_groups`, its loads across participants | `group_limit(...)` over those participants (`max_power` only) | `fed_local_price_deferrable0+deferrable1` |
+
+`group_limits` is for devices EMHASS does not model, or a mix; `min_power` (W,
+at most 0) is what the devices may push back to the house. A device sits under
+one limit at most, an EMHASS participant group is wholly inside a limit or
+wholly outside it (the coordinator sees only its total), and there is one
+hybrid inverter: the PV is one forecast, on one bus.
 
 Keep whatever other EMHASS options those deferrable loads already use; they are
 passed through to EMHASS's own model untouched. The battery is read from
@@ -473,6 +512,7 @@ so existing automations and charts keep working. Plus:
 | `fed_lower_bound`, `fed_gap` | how far this plan can be, at most, from the best possible one |
 | `fed_stop_reason`, `fed_iterations` | why the coordinator stopped (`converged`, `stalled`, `no new proposals`, `iteration cap`) and after how many rounds |
 | `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
+| `fed_local_price_<name>` | the price of one more kWh behind a limit the coordinator holds (above), per slot |
 
 `optim_status` is `Optimal` only when the plan is proven within 0.1% of its
 lower bound; otherwise `Optimal_Inaccurate` — a runnable plan, which EMHASS
@@ -495,7 +535,9 @@ lets EMHASS run its default solver — logging the option responsible — rather
 than raising. `unsupported()` lists the cases: a `costfun` other than `profit` or
 `cost`, `set_total_pv_sell`, `set_nocharge_from_grid` with a battery,
 `set_battery_first_priority`, more than one battery,
-`heat_topology`, shared thermal tanks, deferrable load groups,
+`heat_topology`, shared thermal tanks, `deferrable_load_groups` with
+`mutual_exclusion` across participants, a limit that splits an EMHASS
+participant group,
 `cost_forecast_per_deferrable_load`, `set_deferrable_startup_penalty`,
 `deferrable_load_max_cost`, capacity charges, and the `soc_target` family of
 runtime arguments. An export price above the import price in some slot, or a

@@ -11,6 +11,10 @@ Home Assistant.
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_hybrid.json
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 
+    # four DERs on two solvers, behind the inverter and a shared 3.5 kW breaker:
+    HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_four_der.json
+    HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
+
 `up` builds EMHASS from the branch of davidusb-geek/emhass#1158 (the
 coordinated backend is not in a released EMHASS yet), adds
 home-energy-optimizer, writes EMHASS's secrets from Home Assistant's own
@@ -178,7 +182,8 @@ def down(_args: argparse.Namespace) -> None:
 def demo_forecasts(start: datetime, pv_peak: float = 5000.0) -> dict[str, list[float]]:
     """A plausible day from `start`, one value per step, by local hour: PV up
     to `pv_peak` W at noon, a morning and an evening load, a day/night tariff
-    with an evening peak, a flat export price."""
+    with an evening peak, a flat export price, and a cool day outside (5-15 C,
+    for a heat pump planned by home-energy-optimizer)."""
     hrs = [(start + timedelta(minutes=STEP_MIN * i)) for i in range(HORIZON)]
     hod = [t.hour + t.minute / 60 for t in hrs]
     return {
@@ -188,6 +193,7 @@ def demo_forecasts(start: datetime, pv_peak: float = 5000.0) -> dict[str, list[f
                                       + 300 * math.exp(-((h - 7.5) / 1) ** 2)) for h in hod],
         "load_cost_forecast": [0.30 if 17 <= h < 21 else 0.12 if (h < 6 or h >= 23) else 0.20 for h in hod],
         "prod_price_forecast": [0.05] * HORIZON,
+        "outdoor_temperature_forecast": [round(10 + 5 * math.sin(math.pi * (h - 9) / 12), 1) for h in hod],
     }
 
 
@@ -225,15 +231,18 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
     shares = {k[len("fed_share_"):]: float(v) for k, v in first.items() if k.startswith("fed_share_")}
     local = lambda ts: datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(tz)  # noqa: E731
     hybrid = "P_hybrid_inverter" in first
+    thermal = [(c, label) for c, label in (("P_water_heater", "tank W"), ("P_hvac", "hp W")) if c in first]
     print(f"\nplan for {len(plan)} steps from {local(first['timestamp']):%a %H:%M %Z}  ({secs:.1f} s); "
           f"{first.get('optim_status', '?')}"
           + (f", the coordinator {first['fed_stop_reason']} after {first['fed_iterations']} rounds"
              if "fed_stop_reason" in first else ""))
     print(f"{'time':>6} {'PV W':>6} {'load W':>7} {'batt W':>7} {'SoC':>5} {'def0 W':>7} {'def1 W':>7} "
+          + "".join(f"{label:>6} " for _, label in thermal)
           + (f"{'inv W':>6} {'clip W':>6} " if hybrid else "") + f"{'grid W':>7} {'buy':>5} {'meter':>6}")
     for r in plan[:: max(1, len(plan) // 12)]:
         print(f"{local(r['timestamp']):%H:%M}".rjust(6) + f" {r['P_PV']:>6.0f} {r['P_Load']:>7.0f} {r['P_batt']:>7.0f} "
               f"{100 * r['SOC_opt']:>4.0f}% {r.get('P_deferrable0', 0):>7.0f} {r.get('P_deferrable1', 0):>7.0f} "
+              + "".join(f"{r[c]:>6.0f} " for c, _ in thermal)
               + (f"{r['P_hybrid_inverter']:>6.0f} {r.get('P_PV_curtailment', 0):>6.0f} " if hybrid else "")
               + f"{r['P_grid']:>7.0f} {r['unit_load_cost']:>5.2f} {r.get('fed_meter_price', float('nan')):>6.3f}")
     if hybrid:
@@ -241,6 +250,14 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
         clipped = sum(r.get("P_PV_curtailment", 0) for r in plan) * dt / 1000
         print(f"\nhybrid inverter: at most {max(r['P_hybrid_inverter'] for r in plan):.0f} W to the house "
               f"(inv W: + DC to AC), {clipped:.1f} kWh of PV not used")
+    local_cols = {k[len("fed_local_price_"):]: k for k in first if k.startswith("fed_local_price_")}
+    if local_cols:
+        print("\nlocal prices (currency/kWh), behind each limit the coordinator holds; the meter's for comparison:")
+        meter = [float(r["fed_meter_price"]) for r in plan]
+        print(f"  {'meter':<28} {min(meter):>6.3f} .. {max(meter):.3f}")
+        for name, col in local_cols.items():
+            vals = [float(r[col]) for r in plan]
+            print(f"  {name:<28} {min(vals):>6.3f} .. {max(vals):.3f}")
     if shares:
         print("\nshare of the saving over the horizon (currency):")
         for player, v in shares.items():
@@ -264,9 +281,16 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
             "state": round(float(first["fed_gap"]), 4), "attributes": {
                 "friendly_name": "Coordination gap (cost above the lower bound)",
                 "unit_of_measurement": unit}})
+    for name, col in local_cols.items():
+        slug = name.replace("+", "_")
+        http("POST", f"{ha}/api/states/sensor.coordination_local_price_{slug}", token=token, body={
+            "state": round(float(first[col]), 4), "attributes": {
+                "friendly_name": f"Local price: {name}", "unit_of_measurement": f"{unit}/kWh",
+                "forecasts": [{"date": r["timestamp"], "price": round(float(r[col]), 4)} for r in plan]}})
     print(f"\npublished to {ha}: EMHASS's sensor.p_batt_forecast, sensor.p_deferrable0/1, "
           f"sensor.soc_batt_forecast, ...; and sensor.coordination_share_*, "
-          f"sensor.coordination_meter_price, sensor.coordination_gap")
+          f"sensor.coordination_meter_price, sensor.coordination_gap"
+          + "".join(f", sensor.coordination_local_price_{n.replace('+', '_')}" for n in local_cols))
 
 
 def run(args: argparse.Namespace) -> None:

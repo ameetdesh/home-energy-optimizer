@@ -30,7 +30,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, replace
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -47,6 +47,7 @@ from home_energy_optimizer.types import (
     SiteConfig,
     SubMeter,
     WaterHeaterConfig,
+    group_limit,
     hybrid_inverter,
 )
 from home_energy_optimizer.submeter import site_meter
@@ -167,8 +168,8 @@ def unsupported(optim_conf: dict[str, Any], plant_conf: dict[str, Any], costfun:
             return "a hybrid inverter rated by pv_inverter_model (set inverter_ac_output_max)"
     if int(pc.get("number_of_batteries", 1)) > 1:
         return "more than one battery"
-    if oc.get("heat_topology") or oc.get("shared_thermal_tanks") or oc.get("deferrable_load_groups"):
-        return "heat_topology, shared thermal tanks or deferrable load groups"
+    if oc.get("heat_topology") or oc.get("shared_thermal_tanks"):
+        return "heat_topology or shared thermal tanks"
     if any(v is not None for v in (oc.get("cost_forecast_per_deferrable_load") or [])):
         return "cost_forecast_per_deferrable_load"
     if any(float(v or 0) > 0 for v in (oc.get("set_deferrable_startup_penalty") or [])):
@@ -219,7 +220,8 @@ class EmhassParticipant:
 
     def __init__(self, opt: EmhassOptimization, key: str, battery: bool, loads: list[int],
                  data_opt: pd.DataFrame, soc_init: float | None, soc_final: float | None,
-                 runtime: dict[str, Any], buy: np.ndarray, reach_w: float = 1e5) -> None:
+                 runtime: dict[str, Any], buy: np.ndarray, reach_w: float = 1e5,
+                 load_groups: list[dict[str, Any]] | None = None) -> None:
         """Build the participant's own EMHASS model: a copy of `opt`'s
         configuration with only this participant's devices enabled (the
         parameters are described on the class). Solves nothing yet; sets
@@ -237,6 +239,11 @@ class EmhassParticipant:
         for name in _per_load_keys():
             if isinstance(oc.get(name), list):
                 oc[name] = [oc[name][k] for k in loads if k < len(oc[name])]
+        # deferrable_load_groups whose loads are all this participant's,
+        # renumbered to its own loads (`_limits`); the others the coordinator holds
+        oc["deferrable_load_groups"] = [
+            {**g, "names": [f"deferrable{loads.index(int(nm[len('deferrable'):]))}" for nm in g["names"]]}
+            for g in (load_groups or [])]
         # The coordinator holds the meter, so the view's own limits must never
         # bind: `reach_w` exceeds every flow the house can make. Not 'infinite':
         # EMHASS uses these as big-M bounds, and a huge one breaks HiGHS.
@@ -273,7 +280,7 @@ class EmhassParticipant:
         # count or single block, and no battery (EMHASS's battery has a charge or
         # discharge binary per slot). A mix of such plans runs as it is, so the
         # coordinator may keep one (see blend).
-        self.modulating = not battery and all(
+        self.modulating = not battery and not any(g.get("mutual_exclusion") for g in oc["deferrable_load_groups"]) and all(
             not oc["treat_deferrable_load_as_semi_cont"][k] and not oc["set_deferrable_load_single_constant"][k]
             and not oc["def_minimum_on_time"][k] and not oc["def_minimum_off_time"][k]
             and not oc["set_deferrable_max_startups"][k]
@@ -396,6 +403,90 @@ def _groups(optim_conf: dict[str, Any], devices: list[str]) -> list[dict[str, An
     return out
 
 
+class Limit(NamedTuple):
+    """A shared limit the coordinator holds (types.group_limit): its name, the
+    coordinator keys behind it, and its bounds on their total draw, kW."""
+    name: str
+    members: tuple[str, ...]
+    min_kw: float | None
+    max_kw: float | None
+
+
+def _limits(optim_conf: dict[str, Any], groups: list[dict[str, Any]], hybrid_battery: bool
+            ) -> tuple[list[Limit], dict[str, list[dict[str, Any]]], str | None]:
+    """Where each shared limit on devices goes.
+
+    Two sources: EMHASS's own `deferrable_load_groups` (names, max_power in
+    W, mutual_exclusion), and `group_limits` (name, devices, max_power and
+    min_power in W, min_power <= 0) for devices EMHASS does not model. A
+    deferrable-load group whose loads are all in one EMHASS participant goes
+    to that participant's own model, which holds it exactly (mutual
+    exclusion included). Any other limit is the coordinator's: a group limit
+    (a lossless sub-meter) over the participants and devices it names - each
+    EMHASS participant wholly inside it or wholly outside, since the
+    coordinator sees only a participant's total.
+
+    `groups`: the participant groups (`_groups`). `hybrid_battery`: the
+    battery is already behind the hybrid inverter. Returns (the coordinator's
+    limits, participant key -> its own deferrable_load_groups, a reason it
+    cannot be planned or None).
+    """
+    key_of: dict[str, str] = {}
+    whole: dict[str, set[str]] = {}               # a participant key -> all its devices
+    for g in groups:
+        if g["solver"] == "emhass":
+            key = "+".join(g["devices"])
+            whole[key] = set(g["devices"])
+            key_of.update({d: key for d in g["devices"]})
+        else:                                     # the package's devices are separate
+            key_of.update({d: d for d in g["devices"]})
+    held: list[Limit] = []
+    own: dict[str, list[dict[str, Any]]] = {}
+
+    def members(devices: list[str], what: str) -> tuple[tuple[str, ...] | None, str | None]:
+        missing = [d for d in devices if d not in key_of]
+        if missing:
+            return None, f"{what} names {missing}, which nothing plans"
+        keys = {key_of[d] for d in devices}
+        split = sorted(k for k in keys if k in whole and not whole[k] <= set(devices))
+        if split:
+            return None, f"{what} splits the participant {split[0]!r} (it must hold all of its devices or none)"
+        if hybrid_battery and "battery" in devices:
+            return None, f"{what} names the battery, which is behind the hybrid inverter"
+        return tuple(sorted(keys)), None
+
+    for g in optim_conf.get("deferrable_load_groups") or []:
+        names = list(g.get("names") or [])
+        inside = [k for k, devs in whole.items() if set(names) <= devs]
+        if inside and names:
+            own.setdefault(inside[0], []).append(g)
+            continue
+        if g.get("mutual_exclusion"):
+            return [], {}, "deferrable_load_groups: mutual exclusion across participants"
+        keys, reason = members(names, f"deferrable_load_groups {names}")
+        if reason or keys is None:
+            return [], {}, reason
+        if g.get("max_power") is not None:
+            held.append(Limit("+".join(names), keys, None, float(g["max_power"]) / 1000.0))
+    for g in optim_conf.get("group_limits") or []:
+        name = str(g.get("name", ""))
+        if g.get("min_power") is not None and float(g["min_power"]) > 0:
+            return [], {}, f"group_limits {name!r}: min_power must be <= 0 (W of export allowed)"
+        keys, reason = members(list(g.get("devices") or []), f"group_limits {name!r}")
+        if reason or keys is None:
+            return [], {}, reason
+        held.append(Limit(name, keys,
+                          None if g.get("min_power") is None else float(g["min_power"]) / 1000.0,
+                          None if g.get("max_power") is None else float(g["max_power"]) / 1000.0))
+    seen: dict[str, str] = {}
+    for lim in held:
+        for k in lim.members:
+            if k in seen:
+                return [], {}, f"{k!r} is under two limits ({seen[k]!r} and {lim.name!r})"
+            seen[k] = lim.name
+    return held, own, None
+
+
 def _config(cls: type[_CfgT], overrides: dict[str, Any]) -> _CfgT:
     """An instance of the config dataclass `cls` (e.g. WaterHeaterConfig) from
     `overrides`, ignoring keys it has no field for; the rest keep defaults."""
@@ -506,7 +597,12 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     battery_cfg: BatteryConfig | None = None
     tank_cfg: WaterHeaterConfig | None = None
     hvac_cfg: HvacConfig | None = None
-    for g in _groups(oc, devices):
+    groups = _groups(oc, devices)
+    limits, own_groups, reason = _limits(oc, groups, bool(pc.get("inverter_is_hybrid")))
+    if reason:
+        _decline(opt, reason)
+        return None
+    for g in groups:
         if g["solver"] == "emhass" and g["devices"] == ["battery"] and _linear_battery(oc, pc):
             # EMHASS's battery, as its linear model in the master: the same
             # constraints from the same parameters, held exactly
@@ -528,7 +624,8 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
                 return None
             key = "+".join(g["devices"])
             participants.append(EmhassParticipant(opt, key, "battery" in g["devices"], loads, data_opt,
-                                                  soc_init, soc_final, runtime, buy, reach_w))
+                                                  soc_init, soc_final, runtime, buy, reach_w,
+                                                  load_groups=own_groups.get(key)))
         elif g["solver"] == PACKAGE:
             for d in g["devices"]:
                 if d == "battery":
@@ -568,6 +665,8 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
                                      out_w / 1000.0, (out_w if in_w is None else float(in_w)) / 1000.0,
                                      float(pc.get("inverter_efficiency_dc_ac", 1.0)),
                                      float(pc.get("inverter_efficiency_ac_dc", 1.0))),)
+    # the shared limits the coordinator holds: each a lossless sub-meter
+    submeters += tuple(group_limit(lim.name, lim.members, lim.min_kw, lim.max_kw) for lim in limits)
     site = SiteConfig(horizon=horizon, battery=battery_cfg, water_heater=tank_cfg, hvac=hvac_cfg, grid=grid,
                       submeters=submeters)
     ceiling = np.maximum(pv_w - load_w, 0.0) / 1000.0 if oc.get("set_nodischarge_to_grid") else None
@@ -697,6 +796,10 @@ def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
     out["fed_meter_price"] = r.prices
     out["fed_lower_bound"] = float(r.lower)
     out["fed_gap"] = float(r.upper - r.lower)
+    for name, price in r.local_prices.items():
+        # each sub-meter's own price (its balance row's dual): what the devices
+        # behind it - the hybrid inverter's battery, a group limit's - are paid
+        out[f"fed_local_price_{name}"] = price
     out["fed_stop_reason"] = r.stop_reason or "converged"
     out["fed_iterations"] = int(r.iterations)
     return out
