@@ -6,7 +6,8 @@ import logging
 import numpy as np
 import pytest
 
-from home_energy_optimizer.integrations.emhass import Limit, _battery, _limits, optimize, plan_status, unsupported
+from home_energy_optimizer.integrations.emhass import _battery, _tree, optimize, plan_status, unsupported
+from home_energy_optimizer.types import SetLimit
 
 PLANT = {"battery_nominal_energy_capacity": 10000, "battery_minimum_state_of_charge": 0.3,
          "battery_maximum_state_of_charge": 0.9, "battery_charge_power_max": 5000,
@@ -88,12 +89,37 @@ def test_a_hybrid_inverter_is_planned_unless_an_option_ties_it_down(extra, oc_ex
         assert reason is not None and blocked in reason
 
 
-# ---------------------------------------------------------------- shared limits
+# ---------------------------------------------------------------- the tree
 EMHASS_EACH = [{"devices": ["battery"], "solver": "emhass"}, {"devices": ["deferrable0"], "solver": "emhass"},
                {"devices": ["deferrable1"], "solver": "emhass"}]
 GROUPED = [{"devices": ["battery"], "solver": "home_energy_optimizer"},
            {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"},
-           {"devices": ["water_heater", "hvac"], "solver": "home_energy_optimizer"}]
+           {"devices": ["water_heater"], "solver": "home_energy_optimizer"},
+           {"devices": ["hvac"], "solver": "home_energy_optimizer"}]
+FOUR_DER = {
+    "nodes": [
+        {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+         "efficiency_from_parent": 0.97, "efficiency_to_parent": 0.97},
+        {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+        {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
+    ],
+    "devices": {"pv": "inverter", "battery": "inverter", "water_heater": "heat", "hvac": "heat",
+                "deferrable0": "garage", "deferrable1": "garage"},
+    "constraints": [{"name": "l1", "devices": ["battery", "hvac"], "max_import": 5000}],
+}
+
+
+def test_the_topology_becomes_nodes_and_set_limits():
+    """electrical_topology: nested nodes (W to kW, efficiencies each way), the
+    devices and the PV placed on them (an EMHASS participant as its key), the
+    hybrid inverter named, and a constraint as a set limit."""
+    tree, reason = _tree({"electrical_topology": FOUR_DER}, {}, GROUPED)
+    assert reason is None and tree.inverter == "inverter"
+    inv, garage, heat = tree.submeters
+    assert inv.keys == ("battery", "pv") and inv.max_export_kw == 4.0 and inv.eta_export == 0.97
+    assert garage.members == ("deferrable0+deferrable1",) and garage.max_export_kw == 0.0
+    assert heat.parent == "garage" and set(heat.members) == {"water_heater", "hvac"} and heat.max_import_kw == 3.5
+    assert tree.set_limits == (SetLimit("l1", ("battery", "hvac"), max_import_kw=5.0),)
 
 
 def test_a_load_group_inside_one_participant_stays_in_its_model():
@@ -101,45 +127,43 @@ def test_a_load_group_inside_one_participant_stays_in_its_model():
     that participant's EMHASS model holds it (mutual exclusion too); the
     coordinator holds nothing."""
     oc = {"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "mutual_exclusion": True}]}
-    held, own, reason = _limits(oc, GROUPED, False)
-    assert reason is None and held == []
-    assert own == {"deferrable0+deferrable1": oc["deferrable_load_groups"]}
+    tree, reason = _tree(oc, {}, GROUPED)
+    assert reason is None and tree.set_limits == ()
+    assert tree.own_groups == {"deferrable0+deferrable1": oc["deferrable_load_groups"]}
 
 
-def test_a_load_group_across_participants_is_a_group_limit():
-    """Across participants, a shared max_power (W) is the coordinator's
-    group limit (kW), named after its loads."""
+def test_a_load_group_across_participants_is_a_set_limit():
+    """Across participants, a shared max_power (W) is a set limit (kW), named after its loads."""
     oc = {"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "max_power": 3000}]}
-    held, own, reason = _limits(oc, EMHASS_EACH, False)
-    assert reason is None and own == {}
-    assert held == [Limit("deferrable0+deferrable1", ("deferrable0", "deferrable1"), None, 3.0)]
+    tree, reason = _tree(oc, {}, EMHASS_EACH)
+    assert reason is None and tree.own_groups == {}
+    assert tree.set_limits == (SetLimit("deferrable0+deferrable1", ("deferrable0", "deferrable1"), 3.0),)
 
 
-def test_group_limits_name_the_package_devices():
-    """group_limits: devices EMHASS does not model, in W, min_power <= 0."""
-    oc = {"group_limits": [{"name": "garage", "devices": ["water_heater", "hvac"], "max_power": 3000,
-                            "min_power": 0}]}
-    held, _, reason = _limits(oc, GROUPED, False)
-    assert reason is None
-    assert held == [Limit("garage", ("hvac", "water_heater"), 0.0, 3.0)]
+def test_without_a_topology_the_inverter_keys_still_describe_it():
+    pc = {"inverter_is_hybrid": True, "inverter_ac_output_max": 5000, "inverter_efficiency_dc_ac": 0.96}
+    tree, reason = _tree({}, pc, GROUPED)
+    assert reason is None and tree.inverter == "inverter"
+    (inv,) = tree.submeters
+    assert inv.keys == ("battery", "pv") and inv.max_import_kw == 5.0 and inv.eta_export == 0.96
 
 
-@pytest.mark.parametrize("oc, hybrid, problem", [
+@pytest.mark.parametrize("oc, groups, problem", [
     ({"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "mutual_exclusion": True}]},
-     False, "mutual exclusion across participants"),
-    ({"group_limits": [{"name": "g", "devices": ["deferrable0", "water_heater"], "max_power": 3000}]},
-     False, "splits the participant"),
-    ({"group_limits": [{"name": "g", "devices": ["ev"], "max_power": 3000}]}, False, "nothing plans"),
-    ({"group_limits": [{"name": "g", "devices": ["battery"], "max_power": 3000}]}, True, "hybrid inverter"),
-    ({"group_limits": [{"name": "g", "devices": ["hvac"], "min_power": 500}]}, False, "min_power must be <= 0"),
-    ({"group_limits": [{"name": "a", "devices": ["hvac"], "max_power": 1000},
-                       {"name": "b", "devices": ["hvac", "water_heater"], "max_power": 3000}]},
-     False, "under two limits"),
+     EMHASS_EACH, "mutual exclusion across participants"),
+    ({"electrical_topology": {"nodes": [{"id": "a"}], "devices": {"deferrable0": "a"}}},
+     GROUPED, "splits the participant"),
+    ({"electrical_topology": {"nodes": [{"id": "a"}], "devices": {"ev": "a"}}}, GROUPED, "nothing plans"),
+    ({"electrical_topology": {"nodes": [{"id": "a"}], "devices": {"hvac": "b"}}}, GROUPED, "which is no node"),
+    ({"electrical_topology": {"constraints": [{"name": "c", "devices": ["deferrable1"], "max_import": 1}]}},
+     GROUPED, "splits the participant"),
+    ({"electrical_topology": {"constraints": [{"name": "c", "devices": ["hvac"], "max_import": 1},
+                                              {"name": "c", "devices": ["battery"], "max_import": 1}]}},
+     GROUPED, "two limits are named"),
 ])
-def test_a_limit_the_coordinator_cannot_hold_is_refused_by_name(oc, hybrid, problem):
+def test_a_tree_the_coordinator_cannot_hold_is_refused_by_name(oc, groups, problem):
     """Each refusal names its reason, and EMHASS's own solver plans instead."""
-    groups = EMHASS_EACH if "mutual" in problem else GROUPED
-    _, _, reason = _limits(oc, groups, hybrid)
+    _, reason = _tree(oc, {}, groups)
     assert reason is not None and problem in reason
 
 
@@ -147,3 +171,17 @@ def test_deferrable_load_groups_no_longer_falls_back_by_itself():
     oc = {"set_use_battery": False, "number_of_deferrable_loads": 2,
           "deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "max_power": 3000}]}
     assert unsupported(oc, {}, "profit", {}) is None
+
+
+def test_a_battery_and_pv_on_one_node_cannot_take_nodischarge_to_grid():
+    oc = {"set_nodischarge_to_grid": True, "electrical_topology": FOUR_DER}
+    reason = unsupported(oc, {}, "profit", {})
+    assert reason is not None and "set_nodischarge_to_grid" in reason
+
+
+def test_group_limits_from_an_earlier_draft_fall_back_by_name():
+    """0.2.6 read group_limits; planning without them would drop the limits."""
+    oc = {"set_use_battery": False, "group_limits": [{"name": "garage", "devices": ["deferrable0"],
+                                                      "max_power": 3000}]}
+    reason = unsupported(oc, {}, "profit", {})
+    assert reason is not None and "electrical_topology" in reason

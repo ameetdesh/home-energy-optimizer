@@ -13,6 +13,8 @@ from home_energy_optimizer import BatteryConfig, Horizon, SiteConfig, WaterHeate
 from home_energy_optimizer.dp_thermal import baseline_water_heater, solve_water_heater, wh_discomfort
 from home_energy_optimizer.dw.coordinator import DWCoordinator, thermal_terminal
 from home_energy_optimizer.interface import (
+    KINDS,
+    SCHEMA_VERSION,
     Answer,
     Query,
     answer_from_dict,
@@ -155,3 +157,22 @@ def test_a_participant_gets_the_same_share_as_the_same_device_built_in(day):
     for col in ("bill_before", "bill_after", "private_cost_change", "net_gain"):
         assert via["water_heater"][col] == pytest.approx(native["water_heater"][col], abs=1e-6)
         assert via["battery"][col] == pytest.approx(native["battery"][col], abs=1e-6)
+
+
+def test_the_remote_participant_api_is_the_interface_over_http():
+    """schemas/participant-api.v1.json (draft): an OpenAPI 3.1 document whose
+    query and answer bodies are the packaged device schemas, every operation
+    secured, and a description that says what the coordinator needs."""
+    api = schema("participant-api")
+    assert api["openapi"].startswith("3.1") and api["info"]["x-status"] == "draft"
+    ops = {(path, verb): op for path, item in api["paths"].items() for verb, op in item.items()}
+    assert set(path for path, _ in ops) == {"/v1/describe", "/v1/baseline", "/v1/query", "/v1/blend", "/v1/commit"}
+    query = ops[("/v1/query", "post")]
+    assert query["requestBody"]["content"]["application/json"]["schema"]["$ref"] == "device-query.v1.json"
+    assert query["responses"]["200"]["content"]["application/json"]["schema"]["$ref"] == "device-answer.v1.json"
+    for ref in ("device-query", "device-answer"):
+        assert schema(ref)["$id"].endswith(f"{ref}.v{SCHEMA_VERSION}.json")      # what the refs resolve to
+    assert api["security"] and set(api["components"]["securitySchemes"]) == {"mutualTLS", "bearer"}
+    desc = api["components"]["schemas"]["Description"]
+    assert {"key", "max_power_kw", "modulating", "kinds"} <= set(desc["required"])
+    assert set(desc["properties"]["kinds"]["items"]["enum"]) == set(KINDS)

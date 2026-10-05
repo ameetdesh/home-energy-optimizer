@@ -11,7 +11,8 @@ Home Assistant.
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_hybrid.json
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 
-    # four DERs on two solvers, behind the inverter and a shared 3.5 kW breaker:
+    # four DERs on two solvers, on an electrical topology (an inverter, a garage
+    # panel with no backfeed, a 3.5 kW breaker under it):
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_four_der.json
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 
@@ -54,7 +55,7 @@ HERE = Path(__file__).resolve().parent
 BUILD, RUN = HERE / ".build", HERE / ".run"
 EMHASS_REPO = "https://github.com/ameetdesh/emhass.git"
 EMHASS_BRANCH = "federated-all"            # davidusb-geek/emhass#1158
-PACKAGE = "home-energy-optimizer>=0.2.5"
+PACKAGE = "home-energy-optimizer>=0.2.7"
 IMAGE, CONTAINER = "emhass-coordinated", "emhass-coordinated"
 # EMHASS listens on 5000 inside the container. On the host, 5000 is taken by
 # macOS (AirPlay Receiver), so it is published on 5050 by default.
@@ -251,13 +252,23 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
         print(f"\nhybrid inverter: at most {max(r['P_hybrid_inverter'] for r in plan):.0f} W to the house "
               f"(inv W: + DC to AC), {clipped:.1f} kWh of PV not used")
     local_cols = {k[len("fed_local_price_"):]: k for k in first if k.startswith("fed_local_price_")}
-    if local_cols:
-        print("\nlocal prices (currency/kWh), behind each limit the coordinator holds; the meter's for comparison:")
+    limit_cols = {k[len("fed_limit_price_"):]: k for k in first if k.startswith("fed_limit_price_")}
+    node_cols = {k[len("fed_node_power_"):]: k for k in first if k.startswith("fed_node_power_")}
+    if node_cols:
+        print("\nnodes of the topology: power to the parent (W, + = up the tree), over the horizon")
+        for name, col in node_cols.items():
+            vals = [float(r[col]) for r in plan]
+            print(f"  {name:<28} {min(vals):>8.0f} .. {max(vals):.0f}")
+    if local_cols or limit_cols:
+        print("\nlocal prices (currency/kWh) on each node the coordinator holds; the meter's for comparison:")
         meter = [float(r["fed_meter_price"]) for r in plan]
         print(f"  {'meter':<28} {min(meter):>6.3f} .. {max(meter):.3f}")
         for name, col in local_cols.items():
             vals = [float(r[col]) for r in plan]
             print(f"  {name:<28} {min(vals):>6.3f} .. {max(vals):.3f}")
+        for name, col in limit_cols.items():
+            vals = [float(r[col]) for r in plan]
+            print(f"  {name + ' (premium)':<28} {min(vals):>6.3f} .. {max(vals):.3f}")
     if shares:
         print("\nshare of the saving over the horizon (currency):")
         for player, v in shares.items():
@@ -281,16 +292,18 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
             "state": round(float(first["fed_gap"]), 4), "attributes": {
                 "friendly_name": "Coordination gap (cost above the lower bound)",
                 "unit_of_measurement": unit}})
-    for name, col in local_cols.items():
-        slug = name.replace("+", "_")
-        http("POST", f"{ha}/api/states/sensor.coordination_local_price_{slug}", token=token, body={
-            "state": round(float(first[col]), 4), "attributes": {
-                "friendly_name": f"Local price: {name}", "unit_of_measurement": f"{unit}/kWh",
-                "forecasts": [{"date": r["timestamp"], "price": round(float(r[col]), 4)} for r in plan]}})
+    for kind, cols, title in (("local_price", local_cols, "Local price"), ("limit_price", limit_cols, "Limit premium")):
+        for name, col in cols.items():
+            slug = name.replace("+", "_")
+            http("POST", f"{ha}/api/states/sensor.coordination_{kind}_{slug}", token=token, body={
+                "state": round(float(first[col]), 4), "attributes": {
+                    "friendly_name": f"{title}: {name}", "unit_of_measurement": f"{unit}/kWh",
+                    "forecasts": [{"date": r["timestamp"], "price": round(float(r[col]), 4)} for r in plan]}})
     print(f"\npublished to {ha}: EMHASS's sensor.p_batt_forecast, sensor.p_deferrable0/1, "
           f"sensor.soc_batt_forecast, ...; and sensor.coordination_share_*, "
           f"sensor.coordination_meter_price, sensor.coordination_gap"
-          + "".join(f", sensor.coordination_local_price_{n.replace('+', '_')}" for n in local_cols))
+          + "".join(f", sensor.coordination_local_price_{n.replace('+', '_')}" for n in local_cols)
+          + "".join(f", sensor.coordination_limit_price_{n.replace('+', '_')}" for n in limit_cols))
 
 
 def run(args: argparse.Namespace) -> None:

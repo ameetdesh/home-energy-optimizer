@@ -16,7 +16,7 @@ same sensors EMHASS always publishes (`sensor.p_batt_forecast`,
 > The coordinated backend is EMHASS PR
 > [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158),
 > not yet in a released EMHASS, so EMHASS is built from that branch. It needs
-> home-energy-optimizer **0.2.5** or later (0.2.6 for shared limits), or
+> home-energy-optimizer **0.2.7** or later (`electrical_topology`), or
 > `up --package-src` with a checkout of this repository.
 
 ## What you need
@@ -75,7 +75,8 @@ After a `run`, under *Developer tools → States*:
 | `sensor.coordination_share_solar`, `…_battery`, `…_deferrable0_deferrable1` | this script | each player's share of the saving over the horizon |
 | `sensor.coordination_meter_price` | this script | the coordinator's price at the meter now, with the whole horizon in its `forecasts` attribute |
 | `sensor.coordination_gap` | this script | how far the plan can be from the best possible one (0: proven optimal) |
-| `sensor.coordination_local_price_<name>` | this script | with shared limits: the price of one more kWh behind each one (`inverter`, a `group_limits` name), with the horizon in `forecasts` |
+| `sensor.coordination_local_price_<id>` | this script | with an electrical topology: the price of one more kWh on each node (`inverter`, `garage`, ...), with the horizon in `forecasts` |
+| `sensor.coordination_limit_price_<name>` | this script | a constraint's premium while it binds (or a `deferrable_load_groups` budget the coordinator holds) |
 
 On a demo day the battery charges from the midday PV and covers the evening
 peak, each load runs exactly its configured hours, and the gap is 0.
@@ -110,31 +111,59 @@ and a line with the inverter's largest delivery and the PV not used. It never
 exceeds the rating; on the demo day the battery charges from the PV the
 inverter cannot pass.
 
-To try it before home-energy-optimizer 0.2.5 is on PyPI, install it from this
-checkout: `up --config config_hybrid.json --package-src .` (run from the
+To try a version of home-energy-optimizer not yet on PyPI, install it from
+this checkout: `up --config config_hybrid.json --package-src .` (run from the
 repository's root).
 
-## Four DERs, two solvers, three limits
+## Four DERs, two solvers, an electrical topology
 
 [`config_four_der.json`](config_four_der.json) adds a hot water tank and a heat
-pump, planned by home-energy-optimizer, to the hybrid house above, and two
-shared limits: the tank and the heat pump on a 3.5 kW garage breaker
-(`group_limits`), and the two loads on a 3 kW budget (EMHASS's own
-`deferrable_load_groups`, which the loads' EMHASS participant holds itself):
+pump, planned by home-energy-optimizer, to the hybrid house above, and describes
+how they are wired with `electrical_topology`:
+
+```json
+"electrical_topology": {
+  "nodes": [
+    {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+     "efficiency_from_parent": 0.97, "efficiency_to_parent": 0.97},
+    {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500}
+  ],
+  "devices": {"pv": "inverter", "battery": "inverter",
+              "deferrable0": "garage", "deferrable1": "garage",
+              "water_heater": "heat", "hvac": "heat"}
+}
+```
+
+- the PV and the battery on the 4 kW **hybrid inverter** (its numbers live here
+  now; EMHASS fills its own `inverter_*` keys from this node, so its own solver
+  plans the same inverter);
+- the two loads on a **garage panel**, 7.4 kW in and no backfeed
+  (`max_export: 0`), and, on the same panel, a 3.5 kW **breaker** with the tank
+  and the heat pump - a node under a node;
+- plus EMHASS's own `deferrable_load_groups`: the two loads on a 3 kW budget,
+  which their EMHASS participant holds itself.
 
 ```bash
 python tools/emhass-coordination/coordinate.py up --config config_four_der.json
 python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 ```
 
-`run` adds `tank W` and `hp W` columns, and a line per limit the coordinator
-holds with its local price over the horizon: the inverter's falls to 0 while PV
-is clipped; a breaker's is the meter's while it has headroom, and above it where
-the limit binds. Each
-is published as `sensor.coordination_local_price_<name>`, with the horizon in its
-`forecasts` attribute. The demo day passes an outdoor temperature (5-15 °C) for
-the heat pump. Shared limits need home-energy-optimizer 0.2.6 (or
+`run` adds `tank W` and `hp W` columns, each node's power over the horizon, and
+each node's local price beside the meter's: the inverter's falls to 0 while PV
+is clipped; a panel's or breaker's is its parent's while it has headroom, and
+apart from it where its limit binds. Each is published as
+`sensor.coordination_local_price_<id>` (and a constraint's premium as
+`sensor.coordination_limit_price_<name>`), with the horizon in its `forecasts`
+attribute. The demo day passes an outdoor temperature (5-15 °C) for the heat
+pump. `electrical_topology` needs home-energy-optimizer 0.2.7 (or
 `up --package-src`).
+
+A device not listed under `devices` is on the main meter (`grid`).
+`constraints` (a limit on a set of devices wherever they are, such as a phase)
+and deeper nesting work the same way; EMHASS's
+[`coordinated_backend.md`](https://github.com/ameetdesh/emhass/blob/federated-all/docs/coordinated_backend.md)
+has the full schema.
 
 ## What the script handles for you
 

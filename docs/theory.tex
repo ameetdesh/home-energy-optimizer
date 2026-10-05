@@ -1096,7 +1096,29 @@ with $g^b_t$ the PV on the bus (zero for a sub-panel), and the meter row
 $z_t = d'_t + \chi_t + \sum_{k \notin \cup_b \mathcal K_b} p_{k,t}
 + \sum_b (y^b_t/\eta^b_{\mathrm i} - \eta^b_{\mathrm o} x^b_t)$, with $d'_t$ the
 load minus the PV left on the AC bus. A shared breaker is the same with
-$\eta = 1$ and no PV (\texttt{types.group\_limit}). Everything that scores a plan
+$\eta = 1$ and no PV (\texttt{types.group\_limit}).
+
+\paragraph{The tree.} A node's parent may be another node, so nodes nest: a
+breaker behind a panel, a second hybrid inverter on the first one's backup
+port. The link variables of node $b$ then enter its parent's balance row
+instead of the meter's, with the same coefficients, and \eqref{eq:bus} holds at
+every node. Further grid connections (a heat-pump meter) are roots of their
+own: each has a balance row of the form \eqref{eq:meter} with its own tariff
+and limits, and its own meter variables in the objective. PV arrays are fixed
+supplies on the bus they sit on, each clippable there.
+
+\paragraph{Set limits.} A limit on what a set $S$ of devices draws together,
+wherever they sit --- a phase, a shared cable --- is one more row per slot,
+\[
+  \textstyle\sum_{k \in S} p_{k,t} = u^+_t - u^-_t,\qquad 0 \le u^+_t \le \bar u^{\mathrm{imp}},\ 0 \le u^-_t \le \bar u^{\mathrm{exp}}
+  \qquad [\text{dual } \dt\,\nu^S_t],
+\]
+with breach variables beyond the bounds at $\cbr$, as before. Sets may overlap
+each other and the tree. A device is now priced at its bus's price plus the
+duals of the sets it belongs to, $\mu^{b(k)}_t + \sum_{S \ni k} \nu^S_t$:
+$\nu^S$ is zero while the limit has headroom and a premium while it binds.
+
+Everything that scores a plan
 --- both coordinators, the fast tier, the saving split --- computes the meter
 from the devices' powers through one function (\texttt{submeter.site\_meter}),
 which makes the connection's best use slot by slot exactly as these rows do.
@@ -1104,8 +1126,8 @@ which makes the connection's best use slot by slot exactly as these rows do.
 \subsection{Local prices}
 
 The dual $\mu^b_t$ of \eqref{eq:bus} is what one more kWh drawn on the bus costs
-the house: the bus's \emph{local price}. A device on the bus is priced at it
-instead of at $\pi_t$ --- its reduced cost \eqref{eq:reduced} reads
+the house: the bus's \emph{local price}. A device on the bus is priced at it (plus
+its set limits' premiums) instead of at $\pi_t$ --- its reduced cost \eqref{eq:reduced} reads
 $f + \dt\,\mu^{b\top} p - \sigma_k$ --- and the bound \eqref{eq:bound} gains,
 per bus, $-\dt\,\mu^{b\top} g^b$ and the connection's own terms
 $\min_{x,y,\kappa}$ over its boxes, closed form like the meter's. Nothing else
@@ -1129,12 +1151,39 @@ export price, so it stores the PV that would otherwise be clipped even when
 exporting would pay. These are nodal prices in the sense of spot pricing
 \cite{schweppe1988}, with the inverter as a lossy, rated line.
 
+\paragraph{Which dual.} While a connection carries nothing, its bus's price is not
+unique, and the band can be far wider than the one above: behind a panel that
+may not feed back (a sending rating of $0$), with nothing on it drawing, any
+$\mu^b_t$ from $\eta_{\mathrm o}\pi_t - \cbr$ up to $\pi_t/\eta_{\mathrm i}$ is
+optimal for the restricted master. A solver returns one end; at the bottom, the
+loads there are priced far below the meter, bid plans for slots they will
+never get, and the loop chases that price slot by slot --- forty iterations
+without closing the gap on a house like the EMHASS example's, six with the
+fix. So after each master solve the duals are also moved, within the set
+of optimal ones, to the point nearest the pass-through prices: each node's
+$\mu^b_t$ clipped to $[\eta_{\mathrm o}\pi^{a}_t, \pi^{a}_t/\eta_{\mathrm i}]$ for
+its parent's price $\pi^a_t$, each set limit's $\nu^S_t$ toward $0$. A node moves
+together with every node below it whose connection is tight, scaled by that
+connection's efficiency, and only as far as every reduced cost keeps its sign
+(a variable strictly inside its bounds pins the price): the vector stays an
+optimal dual. The loop prices at it as well as at the solver's own (any
+point gives valid columns and a valid bound, and the best bound is kept; an
+interior point's duals, near the centre of the optimal set, are often the
+better guide elsewhere), and reports it as the local prices: it is the price a
+load behind the panel actually faces, what one more kWh drawn there costs.
+
 \paragraph{One relaxation.} Sending and taking at once loses energy, and never
 pays while energy has a non-negative value; with curtailment allowed, clipping
 dominates it anyway. The LP does not forbid it --- EMHASS uses a binary
 per slot --- just as it does not forbid a battery charging and discharging at
-once. Where prices are negative and curtailment is off, the master can use it to
-burn energy; the scored plan cannot, since \texttt{site\_meter} nets the two.
+once. Where energy at a node has no outlet --- prices negative and curtailment off,
+or a battery on a converter under a panel that may not feed back - the master
+can use it to burn energy, and its plan would not be one a converter can run.
+Recovery therefore checks the plan it returns: wherever a link both sends and
+takes in a slot, that slot's direction is fixed to the net flow and the plan
+recovered again. The bound is untouched (the master stays a relaxation); on the
+test sites the fixed plan cost the same as the relaxed one, the loop having
+been one of several optima.
 
 \subsection{In ADMM and in the fast tier}
 
@@ -1143,7 +1192,10 @@ a net with its own price and average, its members' terminals and the PV's on it,
 and the connection is a device with one terminal on each net, $(s, -\eta_{\mathrm o}s)$
 for $s \ge 0$ and $(s, -s/\eta_{\mathrm i})$ for $s < 0$. Its proximal step
 minimises over four pieces of $s$, each a quadratic with a closed-form minimiser,
-clipped to the piece. A device DP behind a bus (\texttt{meter.Bus}) scores each
+clipped to the piece. A set limit is a net too: its limit is a terminal free
+within the bounds and at $\cbr$ beyond them, and each member device has a
+second terminal on it, tied to its first, so the device's step pulls toward the
+mean of its terminals' targets with $\rho$ per terminal. A device DP behind a bus (\texttt{meter.Bus}) scores each
 action through the connection, so the fast tier's $\lambda$ and its actions
 respect the rating.
 
@@ -1151,15 +1203,17 @@ respect the rating.
 
 Section~\ref{sec:ledger} priced each kWh a device shifts at the average slope of
 the meter cost along the path from the baseline to the plan. With sub-meters the
-bill in slot $t$ is a function $C_t(u)$ of several totals --- what the AC bus draws
-and what each sub-meter's bus draws --- and Aumann--Shapley prices a device's kWh at
+bill in slot $t$ is a function $C_t(u)$ of several totals --- what each bus draws
+(the main meter's, each node's, each further connection's) and each set limit's
+members' total --- and Aumann--Shapley prices a device's kWh at
 the average, along the same straight path $u(s) = u^0 + s\,(u^1 - u^0)$, of the
 bill's slope in \emph{its} bus's total:
 \[
   \hat c^b_t = \frac1\dt\int_0^1 \frac{\partial C_t}{\partial u_b}\big(u(s)\big)\,ds,
   \qquad
-  \text{gain}_k = -\dt\textstyle\sum_t \hat c^{b(k)}_t\,\big(p_{k,t} - p^0_{k,t}\big) - \Delta f_k .
+  \text{gain}_k = -\dt\textstyle\sum_t \big(\hat c^{b(k)}_t + \sum_{S \ni k} \hat c^S_t\big)\big(p_{k,t} - p^0_{k,t}\big) - \Delta f_k ,
 \]
+a device counting in its bus's total and in each of its set limits'.
 Since $\sum_b \dt\,\hat c^b_t\,(u^1_b - u^0_b) = C_t(u^1) - C_t(u^0)$ by the
 fundamental theorem of calculus along the path, the gains still add up to the
 devices' saving exactly. With one bus this is the secant of
@@ -1167,7 +1221,8 @@ Section~\ref{sec:ledger}. $C_t$ is piecewise linear, so its gradient is constant
 between kinks; the code (\texttt{dw.attribution.\_bus\_prices}) cuts each slot's
 path into cells, adds a cell's gradient times its length where the gradient is
 the same at both ends, and halves the others, so the integral is exact up to
-rounding. The Owen value between solar and the devices is unchanged.
+rounding (each cell's contribution is corrected to its exact change in the
+bill). The Owen value between solar and the devices is unchanged.
 
 The effect is the one the local prices suggest. Table~\ref{tab:hybrid} sweeps
 the inverter's rating on the demo site (9~kW of PV, a 10~kWh battery and an

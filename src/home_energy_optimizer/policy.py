@@ -27,9 +27,23 @@ from dataclasses import dataclass
 import numpy as np
 
 from .dp_battery import rollout_battery
-from .meter import Bus, bus_cost
+from .meter import Bus, BusLevel, bus_cost
 from .interp import interp_grid
 from .types import BatteryConfig, CoordinationResult, DeviceSolution, Forecasts, Horizon, SiteConfig
+
+
+def _load_bus(z: Any) -> Bus | None:
+    """A saved snapshot's bus chain (see PolicySnapshot.save), or None. A
+    0.2.5/0.2.6 snapshot saved one level, flat."""
+    if "bus_others" not in z:
+        return None
+    others, clip, sc = np.asarray(z["bus_others"]), np.asarray(z["bus_clip_cap"]), np.asarray(z["bus_scalars"])
+    if others.ndim == 1:                                   # one level, the earlier layout
+        return Bus((BusLevel(others, float(sc[0]), float(sc[1]), float(sc[2]), float(sc[3]), clip),),
+                   float(sc[4]))
+    levels = tuple(BusLevel(others[i], float(sc[i][0]), float(sc[i][1]), float(sc[i][2]), float(sc[i][3]), clip[i])
+                   for i in range(len(others)))
+    return Bus(levels, float(z["bus_breach_price"]))
 
 
 @dataclass(frozen=True)
@@ -52,8 +66,9 @@ class PolicySnapshot:
     admm_target: np.ndarray | None = None
     admm_rho: float = 0.0
     generated_at: float = 0.0
-    # The battery's bus, when it sits behind a sub-meter (a hybrid inverter):
-    # actions are then bus-side, and reach the meter through it.
+    # The battery's chain of nodes, when it sits behind a sub-meter (a hybrid
+    # inverter, a panel): actions are then bus-side, and reach the meter
+    # through every level of it.
     bus: Bus | None = None
 
     @classmethod
@@ -78,8 +93,8 @@ class PolicySnapshot:
             policy=sol.policy,
             states=sol.states,
             actions=sol.actions,
-            buy=fc.buy.copy(),
-            sell=fc.sell.copy(),
+            buy=(fc.buy if res.battery_tariff is None else res.battery_tariff[0]).copy(),
+            sell=(fc.sell if res.battery_tariff is None else res.battery_tariff[1]).copy(),
             dp_load=(
                 res.battery_dp_load.copy()
                 if res.battery_dp_load is not None
@@ -93,9 +108,11 @@ class PolicySnapshot:
 
     def save(self, path: str) -> None:
         extra: dict[str, Any] = {} if self.bus is None else {
-            "bus_others": self.bus.others, "bus_clip_cap": self.bus.clip_cap,
-            "bus_scalars": np.array([self.bus.eta_export, self.bus.eta_import, self.bus.export_cap,
-                                     self.bus.import_cap, self.bus.breach_price])}
+            "bus_others": np.array([lv.others for lv in self.bus.levels]),
+            "bus_clip_cap": np.array([lv.clip_cap for lv in self.bus.levels]),
+            "bus_scalars": np.array([[lv.eta_export, lv.eta_import, lv.export_cap, lv.import_cap]
+                                     for lv in self.bus.levels]),
+            "bus_breach_price": self.bus.breach_price}
         np.savez_compressed(
             path,
             **extra,
@@ -152,9 +169,7 @@ class PolicySnapshot:
             admm_target=(target if target.size else None),
             admm_rho=float(z["admm_rho"]),
             generated_at=float(z["generated_at"]),
-            bus=(Bus(z["bus_others"], float(z["bus_scalars"][0]), float(z["bus_scalars"][1]),
-                     float(z["bus_scalars"][2]), float(z["bus_scalars"][3]), z["bus_clip_cap"],
-                     float(z["bus_scalars"][4])) if "bus_others" in z else None),
+            bus=_load_bus(z),
         )
 
     # -- helpers ------------------------------------------------------------

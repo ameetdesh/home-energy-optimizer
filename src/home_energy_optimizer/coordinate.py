@@ -14,7 +14,7 @@ certifies its plans (docs/theory.tex).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -297,7 +297,7 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
     h, dt = cfg.horizon, cfg.horizon.dt
     batt = {SiteConfig.battery_key(i): b for i, b in enumerate(cfg.battery_list)}
 
-    from .submeter import device_bus, site_meter, submeter_penalty      # they import this module
+    from .submeter import MAIN, beyond_main, device_bus, site_meter      # they import this module
 
     def objective(devices: Mapping[str, DeviceSolution | BatteryStep]
                   ) -> tuple[float, np.ndarray, np.ndarray]:
@@ -307,25 +307,29 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
         obj = total_objective(cfg, net, fc,
                               devices["water_heater"].trajectory if "water_heater" in devices else None,
                               devices["hvac"].trajectory if "hvac" in devices else None, soe)
-        return obj + submeter_penalty(cfg, fc, flows), net, curtail
+        return obj + beyond_main(cfg, fc, flows), net, curtail
 
     cur, net, curtail = objective(res.devices)
     changed = False
     for _ in range(max(sweeps, 0)):
         improved = False
         for k in dev_keys:
-            bus, others = device_bus(cfg, fc, k, {j: res.devices[j].power for j in dev_keys})
+            view = device_bus(cfg, fc, k, {j: res.devices[j].power for j in dev_keys})
+            bus, others = view.bus, view.dp_load
+            # on a further grid connection: its own tariff and limits
+            k_buy, k_sell, k_lim = ((buy, sell, limits) if view.root == MAIN
+                                    else device_terms(view.buy, view.sell, view.grid))
             if k in batt:
-                sol = solve_battery(batt[k], h, buy, sell, dp_load=others, admm_rho=0.0,
-                                    soc_gates=cfg.soc_gates if k == "battery" else (), limits=limits, bus=bus)
+                sol = solve_battery(batt[k], h, k_buy, k_sell, dp_load=others, admm_rho=0.0,
+                                    soc_gates=cfg.soc_gates if k == "battery" else (), limits=k_lim, bus=bus)
             elif k == "water_heater":
                 assert cfg.water_heater is not None
-                sol = solve_water_heater(cfg.water_heater, h, buy, sell, fc.hot_water_demand,
-                                         dp_load=others, limits=limits, bus=bus)
+                sol = solve_water_heater(cfg.water_heater, h, k_buy, k_sell, fc.hot_water_demand,
+                                         dp_load=others, limits=k_lim, bus=bus)
             else:
                 assert cfg.hvac is not None
-                sol = solve_hvac(cfg.hvac, h, buy, sell, fc.outdoor_temp, dp_load=others,
-                                 limits=limits, bus=bus)
+                sol = solve_hvac(cfg.hvac, h, k_buy, k_sell, fc.outdoor_temp, dp_load=others,
+                                 limits=k_lim, bus=bus)
             trial = dict(res.devices)
             trial[k] = sol
             obj, t_net, t_curtail = objective(trial)
@@ -348,9 +352,26 @@ def _polish(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult, dev_keys: l
         res.grid_export_excess = float(np.maximum(-net - cfg.grid.max_export_kw, 0.0).max())
     if "battery" in res.devices:
         # the pricing re-solve is conditioned on the others' FINAL plans
-        res.battery_bus, res.battery_dp_load = device_bus(
-            cfg, fc, "battery", {j: res.devices[j].power for j in dev_keys})
+        set_battery_view(res, device_bus(cfg, fc, "battery", {j: res.devices[j].power for j in dev_keys}))
     return True
+
+
+def device_terms(buy: np.ndarray, sell: np.ndarray, grid: GridLimits
+                 ) -> tuple[np.ndarray, np.ndarray, Limits | None]:
+    """What a device DP is priced at on a grid connection with tariff
+    (buy, sell) and limits `grid`: buy, the export price a device should
+    optimise against, and the limits as the DP prices them."""
+    lim = (Limits(grid.max_import_kw, grid.max_export_kw, breach_price(grid, buy, sell), grid.allow_curtailment)
+           if grid.active else None)
+    return buy, device_sell_price(sell, grid), lim
+
+
+def set_battery_view(res: CoordinationResult, view: Any) -> None:
+    """Record what battery 0 meets (submeter.DeviceView) on `res`, for the
+    pricing re-solve and the policy snapshot."""
+    from .submeter import MAIN              # it imports this module
+    res.battery_bus, res.battery_dp_load = view.bus, view.dp_load
+    res.battery_tariff = None if view.root == MAIN else (view.buy, view.sell)
 
 
 def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
@@ -367,16 +388,23 @@ def _pricing_resolve(cfg: SiteConfig, fc: Forecasts, res: CoordinationResult,
     to be, and no more.
     """
     assert cfg.battery is not None, "pricing needs a battery"
-    if res.battery_dp_load is not None:
-        dp_load, bus = res.battery_dp_load, res.battery_bus
-    else:
+    if res.battery_dp_load is None:
         from .submeter import device_bus             # it imports this module
-        bus, dp_load = device_bus(cfg, fc, "battery", {})
+        set_battery_view(res, device_bus(cfg, fc, "battery", {}))
+    assert res.battery_dp_load is not None
+    dp_load, bus = res.battery_dp_load, res.battery_bus
+    buy, sell = (fc.buy, fc.sell) if res.battery_tariff is None else res.battery_tariff
+    if res.battery_tariff is not None:
+        from .submeter import root_grid, topology  # it imports this module
+        grid = root_grid(cfg, topology(cfg, fc).root_of[cfg.bus_of("battery")])
+        _, sell_dev, limits = device_terms(buy, sell, grid)
+    else:
+        sell_dev = device_sell_price(sell, cfg.grid)
     return solve_battery(
         cfg.battery,
         cfg.horizon,
-        fc.buy,
-        device_sell_price(fc.sell, cfg.grid),
+        buy,
+        sell_dev,
         dp_load=dp_load,
         admm_rho=0.0,
         soc_gates=cfg.soc_gates,

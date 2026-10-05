@@ -62,6 +62,8 @@ from home_energy_optimizer.coordinate import (
     _polish,
     _pricing_resolve,
     baseline_solution,
+    device_terms,
+    set_battery_view,
     breach_energy,
     breach_price,
     device_sell_price,
@@ -71,7 +73,7 @@ from home_energy_optimizer.coordinate import (
 from home_energy_optimizer.dp_battery import solve_battery, terminal_price
 from home_energy_optimizer.dp_thermal import hvac_discomfort, solve_hvac, solve_water_heater
 from home_energy_optimizer.meter import Limits
-from home_energy_optimizer.submeter import device_bus, site_meter, submeter_penalty
+from home_energy_optimizer.submeter import MAIN, beyond_main, device_bus, pv_on, root_grid, site_meter, tariff, topology
 from home_energy_optimizer.types import (
     BatteryConfig,
     CoordinationResult,
@@ -330,26 +332,62 @@ class ExchangeRun:
         self.relaxed_cfg = replace(cfg, water_heater=wh, hvac=hv)
         self.relaxed_keys = [k for k in ("water_heater", "hvac")
                              if k in keys and getattr(cfg, k) is not getattr(self.relaxed_cfg, k)]
-        # The nets: 0 the house's AC bus, 1 + s sub-meter s's bus. Rows of p:
-        # load, PV, grid, the devices, then each connection's two terminals.
-        subs = cfg.submeters
-        self.links = [_Link(sm, dt, breach_price(g, fc.buy, fc.sell)) for sm in subs]
-        pv_sub = next((i for i, sm in enumerate(subs) if sm.pv), None)
-        net_of = [0, 0 if pv_sub is None else 1 + pv_sub, 0]
-        net_of += [0 if cfg.submeter_of(kk) is None else 1 + int(cfg.submeter_of(kk) or 0) for kk in keys]
-        for si in range(len(subs)):
-            net_of += [1 + si, 0]
+        # The nets: every bus of the site's tree - the main meter's (0), each
+        # further grid connection's, each node's. Rows of p: the load, one
+        # per PV array, one grid terminal per connection, the devices, then
+        # each node's link: two terminals, its own net and its parent's.
+        topo = topology(cfg, fc)
+        net = {b: i for i, b in enumerate(topo.buses)}
+        self.pv_rows = [(1 + i, key) for i, key in enumerate(fc.pv_keys)]
+        g0 = 1 + len(self.pv_rows)
+        self.grid_rows: list[tuple[int, _Grid]] = []
+        for i, root in enumerate(topo.roots):
+            if root == MAIN:
+                self.grid_rows.append((g0 + i, self.grid))
+            else:
+                rg = root_grid(cfg, root)
+                buy_r, sell_r = tariff(cfg, fc, root)
+                self.grid_rows.append((g0 + i, _Grid(buy_r, sell_r, dt, rg.max_import_kw, rg.max_export_kw,
+                                                     breach_price(rg, buy_r, sell_r) if rg.active else 0.0,
+                                                     cc.kink_smoothing)))
+        self.dev0 = g0 + len(topo.roots)
+        self.links = [_Link(topo.sm[x], dt, breach_price(g, fc.buy, fc.sell)) for x in topo.nodes]
+        net_of = [net[MAIN]] + [net[cfg.bus_of(key)] for _, key in self.pv_rows] + [net[r] for r in topo.roots]
+        net_of += [net[cfg.bus_of(kk)] for kk in keys]
+        for x in topo.nodes:
+            net_of += [net[x], net[topo.parent[x]]]
+        # Each set limit is a net of its own: its limit is a terminal there
+        # (free within it, the breach price beyond), and each member device
+        # has a second terminal on it, tied to its first - so its step pulls
+        # toward the mean of its terminals' targets, at rho per terminal.
+        nb = len(topo.buses)
+        self.limit_rows: list[tuple[int, _Grid]] = []
+        for i, lim in enumerate(cfg.set_limits):
+            self.limit_rows.append((len(net_of), _Grid(zero, zero, dt, lim.max_import_kw, lim.max_export_kw,
+                                                       breach_price(g, fc.buy, fc.sell), 0.0)))
+            net_of.append(nb + i)
+        self.member_rows: dict[int, list[int]] = {}
+        for j, kk in enumerate(keys):
+            for i, lim in enumerate(cfg.set_limits):
+                if kk in lim.members:
+                    self.member_rows.setdefault(j, []).append(len(net_of))
+                    net_of.append(nb + i)
         self.net_of = np.array(net_of)
-        self.n_nets = 1 + len(subs)
+        self.n_nets = nb + len(cfg.set_limits)
         self.count = np.bincount(self.net_of, minlength=self.n_nets).astype(float)
-        # PV the PV terminal may leave unused: any of it if curtailment is
-        # allowed; behind a sub-meter, otherwise, what its rating forces.
-        if g.allow_curtailment:
-            self.pv_spare = fc.solar.copy()
-        elif pv_sub is not None:
-            self.pv_spare = np.maximum(fc.solar - subs[pv_sub].export_cap_dc, 0.0)
-        else:
-            self.pv_spare = np.zeros(n)
+        # PV each PV terminal may leave unused: any of it if curtailment is
+        # allowed; on a node, otherwise, what its rating forces.
+        self.pv_spare = {}
+        for _, key in self.pv_rows:
+            where = cfg.bus_of(key)
+            pv = fc.pv(key)
+            if g.allow_curtailment:
+                self.pv_spare[key] = pv.copy()
+            elif where in topo.sm:
+                share = pv / np.maximum(pv_on(fc, topo, where), 1e-12)      # its share of what the rating forces
+                self.pv_spare[key] = share * np.maximum(pv_on(fc, topo, where) - topo.sm[where].export_cap_dc, 0.0)
+            else:
+                self.pv_spare[key] = np.zeros(n)
         self.N = len(net_of)
 
         # ---- iteration state ------------------------------------------------
@@ -392,7 +430,7 @@ class ExchangeRun:
     def _meter(self, sols: Mapping[str, BatteryStep | DeviceSolution]) -> tuple[np.ndarray, np.ndarray, float]:
         """(meter flow, curtailment, sub-meter breach cost) of the devices' plans."""
         flows = site_meter(self.cfg, self.fc, {kk: sols[kk].power for kk in self.keys if kk in sols})
-        return flows.net, flows.curtail, submeter_penalty(self.cfg, self.fc, flows)
+        return flows.net, flows.curtail, beyond_main(self.cfg, self.fc, flows)
 
     def _battery_lp(self, key: str, b: BatteryConfig, v: np.ndarray, rho: float) -> BatteryStep:
         """A battery's exact LP step, started from its previous solution."""
@@ -410,14 +448,16 @@ class ExchangeRun:
     def _as_itself(self, key: str, powers: Mapping[str, np.ndarray]) -> DeviceSolution:
         """The real (on/off, three-way) device's plan against the others' `powers`."""
         cfg, h, fc = self.cfg, self.h, self.fc
-        bus, others = device_bus(cfg, fc, key, powers)
+        view = device_bus(cfg, fc, key, powers)
+        bus, others = view.bus, view.dp_load
+        buy, sell, lim = ((fc.buy, self.sell_dev, self.limits) if view.root == MAIN
+                          else device_terms(view.buy, view.sell, view.grid))
         if key == "water_heater":
             assert cfg.water_heater is not None
-            return solve_water_heater(cfg.water_heater, h, fc.buy, self.sell_dev, fc.hot_water_demand,
-                                      dp_load=others, limits=self.limits, bus=bus)
+            return solve_water_heater(cfg.water_heater, h, buy, sell, fc.hot_water_demand,
+                                      dp_load=others, limits=lim, bus=bus)
         assert cfg.hvac is not None
-        return solve_hvac(cfg.hvac, h, fc.buy, self.sell_dev, fc.outdoor_temp, dp_load=others, limits=self.limits,
-                          bus=bus)
+        return solve_hvac(cfg.hvac, h, buy, sell, fc.outdoor_temp, dp_load=others, limits=lim, bus=bus)
 
     def step(self, n_iter: int | None = None) -> bool:
         """Run up to `n_iter` more iterations (all that remain if None)."""
@@ -437,15 +477,22 @@ class ExchangeRun:
             v = (self.z_hat - self.u_hat[at]) if cc.exchange_momentum else (p - pbar[at] - u[at])
             new = np.empty_like(p)
             new[0] = fc.load
-            new[1] = np.clip(v[1], -fc.solar, -fc.solar + self.pv_spare)
-            new[2] = self.grid.prox(v[2], self.rho)
+            for row, key in self.pv_rows:
+                pv = fc.pv(key)
+                new[row] = np.clip(v[row], -pv, -pv + self.pv_spare[key])
+            for row, grid in self.grid_rows:
+                new[row] = grid.prox(v[row], self.rho)
             dev_ms = {}
             for j, (key, stepf) in enumerate(zip(keys, self.steps)):
-                sols[key] = stepf(v[3 + j], self.rho)
-                new[3 + j] = sols[key].power
+                rows = [self.dev0 + j] + self.member_rows.get(j, [])
+                # one plan for all its terminals: the mean target, rho per terminal
+                sols[key] = stepf(v[rows].mean(axis=0) if len(rows) > 1 else v[rows[0]], self.rho * len(rows))
+                new[rows] = sols[key].power
                 dev_ms[key] = sols[key].solve_ms
+            for row, limit in self.limit_rows:
+                new[row] = limit.prox(v[row], self.rho)
             for li, link in enumerate(self.links):
-                r0 = 3 + len(keys) + 2 * li
+                r0 = self.dev0 + len(keys) + 2 * li
                 new[r0], new[r0 + 1] = link.prox(v[r0], v[r0 + 1], self.rho)
             p = new
             pbar = self._means(p)
@@ -492,7 +539,7 @@ class ExchangeRun:
                                if g.max_export_kw is not None else 0.0),
                 primal_res=r_res, dual_res=s_res, rho=self.rho,
                 round_ms=(time.perf_counter() - t_round) * 1000.0, device_ms=dev_ms,
-                battery_dp_load=(device_bus(cfg, fc, "battery", {jj: run[jj].power for jj in keys})[1]
+                battery_dp_load=(device_bus(cfg, fc, "battery", {jj: run[jj].power for jj in keys}).dp_load
                                  if "battery" in run else None),
                 relaxed_objective=relaxed_obj))
             if not np.isfinite(self.best_obj) or obj < self.best_obj - cc.converge_tol * abs(self.best_obj):
@@ -557,8 +604,7 @@ class ExchangeRun:
         if cc.polish:
             _polish(cfg, fc, res, keys, fc.buy, self.sell_dev, cc.polish_sweeps, self.limits)
         if "battery" in res.devices:
-            res.battery_bus, res.battery_dp_load = device_bus(cfg, fc, "battery",
-                                                              {j: res.devices[j].power for j in keys})
+            set_battery_view(res, device_bus(cfg, fc, "battery", {j: res.devices[j].power for j in keys}))
             res.battery_pricing = _pricing_resolve(cfg, fc, res, self.limits)
         res.baseline_cost = baseline_solution(cfg, fc)[1]
         return res
