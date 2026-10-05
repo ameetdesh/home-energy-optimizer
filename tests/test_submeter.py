@@ -192,8 +192,9 @@ def test_the_fast_tier_acts_through_the_inverter():
     assert snap.bus is not None
     t = int(np.argmax(FC.solar))
     a = action(snap, t, 5.0)
-    flow, _, over, _ = bus_flow(a + snap.bus.others[t], snap.bus.clip_cap[t], snap.bus.eta_export,
-                                snap.bus.eta_import, snap.bus.export_cap, snap.bus.import_cap)
+    lv = snap.bus.levels[0]
+    flow, _, over, _ = bus_flow(a + lv.others[t], lv.clip_cap[t], lv.eta_export, lv.eta_import,
+                                lv.export_cap, lv.import_cap)
     assert float(flow) <= 2.5 + 1e-6 and float(over) == 0.0
 
 
@@ -203,8 +204,9 @@ def test_a_snapshot_with_a_bus_round_trips(tmp_path):
     path = tmp_path / "snap.npz"
     snap.save(str(path))
     back = PolicySnapshot.load(str(path))
-    assert back.bus is not None and np.array_equal(back.bus.others, snap.bus.others)
-    assert back.bus.export_cap == snap.bus.export_cap
+    assert back.bus is not None and len(back.bus.levels) == len(snap.bus.levels) == 1
+    assert np.array_equal(back.bus.levels[0].others, snap.bus.levels[0].others)
+    assert back.bus.levels[0].export_cap == snap.bus.levels[0].export_cap
     t = int(np.argmax(FC.solar))
     assert action(back, t, 5.0) == action(snap, t, 5.0)
 

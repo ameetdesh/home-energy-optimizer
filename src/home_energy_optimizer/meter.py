@@ -14,17 +14,24 @@ from typing import NamedTuple
 import numpy as np
 
 
-class Bus(NamedTuple):
-    """A device's own bus, when it sits behind a sub-meter (types.SubMeter,
-    e.g. a battery on a hybrid inverter's DC side). Per slot, the bus's draw is
-    the device's plus `others` (the other members' draw, minus the PV on the
-    bus); the house sees what `bus_flow` says. Ratings are bus-side kW."""
+class BusLevel(NamedTuple):
+    """One node on a device's way to its grid connection (types.SubMeter):
+    per slot, the node's draw is what comes up from below plus `others` (its
+    other devices' draw, minus its PV, minus what its other child nodes send
+    up); its parent sees what `bus_flow` says. Ratings are bus-side kW."""
     others: np.ndarray
     eta_export: float
     eta_import: float
     export_cap: float            # inf: no limit
     import_cap: float
-    clip_cap: np.ndarray         # PV the bus may clip, per slot (kW)
+    clip_cap: np.ndarray         # PV the node may clip, per slot (kW)
+
+
+class Bus(NamedTuple):
+    """A device's chain of nodes up to its grid connection, nearest first
+    (a battery on a hybrid inverter's DC side: one level; behind a panel
+    behind a breaker: three). submeter.device_bus builds it."""
+    levels: tuple[BusLevel, ...]
     breach_price: float          # currency per kWh beyond a rating
 
 
@@ -51,11 +58,17 @@ def bus_flow(draw: np.ndarray | float, clip_cap: np.ndarray | float, eta_export:
 
 
 def bus_cost(a: np.ndarray, t: int, bus: Bus) -> tuple[np.ndarray, np.ndarray]:
-    """For device actions `a` (kW, + = drawing) at slot t on `bus`: (the
-    house's draw through the connection, kW; the breach cost per kW-slot)."""
-    flow, _, over, _ = bus_flow(a + bus.others[t], bus.clip_cap[t], bus.eta_export, bus.eta_import,
-                                bus.export_cap, bus.import_cap)
-    return -flow, bus.breach_price * over
+    """For device actions `a` (kW, + = drawing) at slot t on `bus`: (what the
+    grid connection's meter draws through the chain, kW; the breach cost per
+    kW-slot, every level's)."""
+    x = np.asarray(a, dtype=float)
+    over_all = np.zeros_like(x)
+    for lv in bus.levels:
+        flow, _, over, _ = bus_flow(x + lv.others[t], lv.clip_cap[t], lv.eta_export, lv.eta_import,
+                                    lv.export_cap, lv.import_cap)
+        over_all = over_all + over
+        x = -flow                    # what this node draws from its parent
+    return x, bus.breach_price * over_all
 
 
 class Limits(NamedTuple):

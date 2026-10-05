@@ -390,8 +390,9 @@ Its README walks through each step, and where EMHASS's configuration is changed.
 ### A four-DER house
 
 Solar, a battery, two deferrable loads, a hot water tank and a heat pump — split
-across both solvers, and behind three shared limits: the PV and the battery on a
-4 kW hybrid inverter, the tank and the heat pump on a 3.5 kW garage breaker, and
+across both solvers, and wired as they are in the house: the PV and the battery
+on a 4 kW hybrid inverter; the two loads on a garage panel (7.4 kW, no
+backfeed); on that panel, a 3.5 kW breaker with the tank and the heat pump; and
 the two loads on a 3 kW budget. This is
 [`tools/emhass-coordination/config_four_der.json`](tools/emhass-coordination/config_four_der.json);
 the coordination's own keys are:
@@ -420,14 +421,19 @@ the coordination's own keys are:
                 "t_comfort_low": 21.0, "t_comfort_high": 25.0}}
   ],
 
-  "inverter_is_hybrid": true,
-  "inverter_ac_output_max": 4000, "inverter_ac_input_max": 4000,
-  "inverter_efficiency_dc_ac": 0.97, "inverter_efficiency_ac_dc": 0.97,
+  "electrical_topology": {
+    "nodes": [
+      {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+       "efficiency_from_parent": 0.97, "efficiency_to_parent": 0.97},
+      {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+      {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500}
+    ],
+    "devices": {"pv": "inverter", "battery": "inverter",
+                "deferrable0": "garage", "deferrable1": "garage",
+                "water_heater": "heat", "hvac": "heat"}
+  },
   "set_nodischarge_to_grid": false,
 
-  "group_limits": [
-    {"name": "garage", "devices": ["water_heater", "hvac"], "max_power": 3500}
-  ],
   "deferrable_load_groups": [
     {"names": ["deferrable0", "deferrable1"], "max_power": 3000}
   ]
@@ -437,25 +443,36 @@ the coordination's own keys are:
 Run it next to Home Assistant with `coordinate.py up --config config_four_der.json`
 then `run --pv-peak 8000` (`tools/emhass-coordination/`). On its demo day the
 inverter never passes more than 4 kW and the battery stores the PV it clips, the
-tank and the heat pump never run together (their 4.5 kW would trip the garage's
-3.5 kW), and the loads keep within 3 kW.
+garage never feeds back, the tank and the heat pump never run together (their
+4.5 kW would trip the 3.5 kW breaker), and the loads keep within 3 kW.
 
-**How the limits enter.** There is no `submeters` key: every limit is said in
-EMHASS's own vocabulary where EMHASS has one, and the adapter builds the
-package's sub-meters (`types.SubMeter`) from it.
+**How the tree enters.** `electrical_topology` is the whole tree, in W:
+
+- `nodes`: connection points behind the main meter (`grid`) — a hybrid inverter,
+  a panel, a breaker — each with a `parent` (another node, or `grid` by
+  default), so they nest; `max_import` / `max_export` on its connection to the
+  parent (`max_export: 0` is no backfeed); `efficiency_from_parent` /
+  `efficiency_to_parent` for a converter.
+- `devices`: each device (`battery`, `water_heater`, `hvac`, `deferrableN`) and
+  the PV (`pv`) on a node; the rest are on `grid`.
+- `constraints`: limits on a set of devices wherever they are (a phase, a
+  shared cable), `max_import` / `max_export`.
+
+The adapter builds the package's tree (`types.SubMeter`, `SetLimit`) from it:
 
 | what you write | becomes | its price |
 |---|---|---|
-| `inverter_is_hybrid` + `inverter_ac_*`, `inverter_efficiency_*` (EMHASS's keys) | `hybrid_inverter(("battery",), ...)`: the PV and the battery on its DC bus | `fed_local_price_inverter` |
-| `group_limits` (name, devices, `max_power` / `min_power` in W) | `group_limit(name, devices, ...)` | `fed_local_price_<name>` |
+| a node | `SubMeter(id, members, parent=...)`: a bus of its own in the master | `fed_local_price_<id>` |
+| a node of type `hybrid_inverter` on `grid` holding the PV and the battery | the same, and EMHASS fills its own `inverter_*` keys from it, so its own solver plans the same inverter | `fed_local_price_<id>`, and `P_hybrid_inverter` |
+| a constraint | `SetLimit(name, members, ...)`: a row of its own | `fed_limit_price_<name>` (a premium) |
 | `deferrable_load_groups` (EMHASS's key), all its loads in one participant | kept in that participant's own EMHASS model, exactly as EMHASS holds it | — |
-| `deferrable_load_groups`, its loads across participants | `group_limit(...)` over those participants (`max_power` only) | `fed_local_price_deferrable0+deferrable1` |
+| `deferrable_load_groups`, its loads across participants | a `SetLimit` over those participants (`max_power`) | `fed_limit_price_deferrable0+deferrable1` |
 
-`group_limits` is for devices EMHASS does not model, or a mix; `min_power` (W,
-at most 0) is what the devices may push back to the house. A device sits under
-one limit at most, an EMHASS participant group is wholly inside a limit or
-wholly outside it (the coordinator sees only its total), and there is one
-hybrid inverter: the PV is one forecast, on one bus.
+An EMHASS participant group sits on one node, and a constraint holds all of its
+devices or none (the coordinator sees only its total). Without
+`electrical_topology`, EMHASS's own inverter keys still describe one hybrid
+inverter. EMHASS has one PV forecast and one meter, so through EMHASS the PV is
+one array on one node; the library itself takes several (below).
 
 Keep whatever other EMHASS options those deferrable loads already use; they are
 passed through to EMHASS's own model untouched. The battery is read from
@@ -512,6 +529,8 @@ so existing automations and charts keep working. Plus:
 | `fed_lower_bound`, `fed_gap` | how far this plan can be, at most, from the best possible one |
 | `fed_stop_reason`, `fed_iterations` | why the coordinator stopped (`converged`, `stalled`, `no new proposals`, `iteration cap`) and after how many rounds |
 | `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
+| `fed_local_price_<id>`, `fed_node_power_<id>` | each node's own price per slot, and its power to its parent (W, + = up the tree) |
+| `fed_limit_price_<name>` | each constraint's premium per slot while it binds |
 | `fed_local_price_<name>` | the price of one more kWh behind a limit the coordinator holds (above), per slot |
 
 `optim_status` is `Optimal` only when the plan is proven within 0.1% of its
@@ -536,49 +555,81 @@ than raising. `unsupported()` lists the cases: a `costfun` other than `profit` o
 `cost`, `set_total_pv_sell`, `set_nocharge_from_grid` with a battery,
 `set_battery_first_priority`, more than one battery,
 `heat_topology`, shared thermal tanks, `deferrable_load_groups` with
-`mutual_exclusion` across participants, a limit that splits an EMHASS
-participant group,
+`mutual_exclusion` across participants, a node or constraint that splits an
+EMHASS participant group, `group_limits` (read by 0.2.6 from a draft of
+EMHASS's backend; now a node or a constraint of `electrical_topology`),
 `cost_forecast_per_deferrable_load`, `set_deferrable_startup_penalty`,
 `deferrable_load_max_cost`, capacity charges, and the `soc_target` family of
 runtime arguments. An export price above the import price in some slot, or a
 coordinator failure, falls back the same way.
 
-A **hybrid inverter** (`inverter_is_hybrid`) is planned: the PV and EMHASS's
-battery on its DC bus become a sub-meter (below), with EMHASS's
-`inverter_ac_output_max`, `inverter_ac_input_max` and both efficiencies, and the
-plan carries `P_hybrid_inverter` with EMHASS's meaning (+ DC to AC). It still
-falls back with `set_nodischarge_to_grid` (EMHASS ties the battery to the
-meter's direction then), `inverter_stress_cost`, an inverter rated only by
-`pv_inverter_model` name, or the battery inside an EMHASS participant group.
+A **hybrid inverter** is planned — a `hybrid_inverter` node of
+`electrical_topology`, or EMHASS's own `inverter_is_hybrid` keys without one —
+and the plan carries `P_hybrid_inverter` with EMHASS's meaning (+ DC to AC). It
+still falls back with `set_nodischarge_to_grid` (EMHASS ties the battery to the
+meter's direction then; likewise the battery and the PV on one node),
+`inverter_stress_cost`, an inverter rated only by `pv_inverter_model` name, or
+the battery inside an EMHASS participant group.
 
 ---
 
-## Sub-meters: a hybrid inverter, a shared breaker
+## The electrical tree: inverters, panels, breakers, several meters
 
 Some devices reach the meter through their own connection: the PV and batteries
-on a hybrid inverter's DC bus, or a heat pump and an EV charger behind one
-breaker. Each is a `SubMeter` on the site:
+on a hybrid inverter's DC bus, a heat pump and an EV charger behind one breaker,
+a sub-panel behind another, a second hybrid inverter on the first one's backup
+port, a heat pump on a meter of its own with its own tariff. The site carries
+that tree:
 
 ```python
-from home_energy_optimizer import SiteConfig, group_limit, hybrid_inverter
+from dataclasses import replace
+from home_energy_optimizer import (BatteryConfig, HvacConfig, Horizon, SiteConfig, SubMeter,
+                                   WaterHeaterConfig, demo_forecasts, group_limit, hybrid_inverter)
+from home_energy_optimizer.dw.integrate import dw_plan
+from home_energy_optimizer.types import GridConnection, SetLimit
 
-site = SiteConfig(..., submeters=(
-    hybrid_inverter(("battery",), max_output_kw=5.0, eta_dc_ac=0.97, eta_ac_dc=0.97),
-    group_limit("garage", ("water_heater", "hvac"), max_kw=3.0),
-))
+h = Horizon(dt=0.5, hours=24)
+site = SiteConfig(horizon=h, battery=BatteryConfig(), batteries=(BatteryConfig(capacity_kwh=6.0),),
+    water_heater=WaterHeaterConfig(), hvac=HvacConfig(),
+    submeters=(
+        hybrid_inverter(("battery",), max_output_kw=5.0, eta_dc_ac=0.97, eta_ac_dc=0.97),
+        group_limit("garage", (), max_kw=7.4, min_kw=0.0),               # a panel, no backfeed
+        group_limit("heat", ("water_heater",), max_kw=3.5, parent="garage"),
+        SubMeter("inv2", ("battery1", "carport"), max_export_kw=3.0, max_import_kw=3.0,
+                 eta_export=0.96, eta_import=0.96, parent="garage"),      # a second inverter
+    ),
+    connections=(GridConnection("hp_meter", members=("hvac",)),),        # its own meter and tariff
+    set_limits=(SetLimit("L1", ("battery", "water_heater"), max_import_kw=5.0),),  # a phase
+)
+fc = demo_forecasts(h, solar_peak_kw=8.0)                                # its solar is "pv"
+fc = replace(fc, pv_arrays={"carport": 0.4 * fc.solar},
+             tariffs={"hp_meter": (0.8 * fc.buy, 0.0 * fc.sell)})
+res = dw_plan(site, fc)                    # or coordinate(site, fc): ADMM
 ```
 
-Dantzig–Wolfe models each as a balance row of its own in the master, so a device
-behind it is priced at **its bus's price** (`DWResult.local_prices`) rather than
-the meter's: equal to the meter price through the inverter's efficiency while
-the connection has headroom, and 0 while PV is being clipped at the inverter's
-rating — so a battery there stores PV that would otherwise be lost. ADMM treats
-each bus as a net of its own, the battery DP and the fast tier score each action
-through the connection, and the saving split prices each device's kWh at its
-bus's price. `docs/theory.tex`, "Sub-meters and local prices";
-`bench/hybrid_inverter.py` sweeps an inverter's rating. The DW page (Advanced →
-Site) has a **Hybrid inverter** switch and an **Inverter limit** slider, and
-draws the bus price μ on the Prices chart.
+- **Nodes** (`SubMeter`) nest to any depth through `parent`; each connection
+  has ratings each way and a conversion efficiency each way (1: a panel).
+- **Grid connections** (`GridConnection`) are further meters, each with its own
+  tariff (`Forecasts.tariffs`) and limits; the main one is `"grid"`.
+- **Set limits** (`SetLimit`) bound what a set of devices draw together, wherever
+  they are, and may overlap each other and the tree.
+- **PV arrays**: `Forecasts.solar` is `"pv"`; further arrays are
+  `Forecasts.pv_arrays`, each placed by naming it in a node's members.
+
+Every planner holds it. Dantzig–Wolfe gives each node and connection a balance
+row and each set limit a row of its own, so a device is priced at **its bus's
+price** (`DWResult.local_prices`) plus its set limits' premiums
+(`DWResult.limit_prices`): its parent's price through the connection's
+efficiency while the connection has headroom, apart from it at a rating — 0
+while PV is being clipped, so a battery there stores PV that would otherwise be
+lost. ADMM makes each bus and each set limit a net of its own, so its iterations
+steer by them; the device DPs and the fast tier score each action up their chain
+of nodes to their meter, at that meter's tariff; and the saving split prices
+each device's kWh at its own local price. On battery-only sites the plan matches
+an independent LP of the same tree exactly (`tests/test_topology.py`).
+`docs/theory.tex`, "Sub-meters and local prices"; `bench/hybrid_inverter.py`
+sweeps an inverter's rating. The DW page (Advanced → Site) has a **Hybrid
+inverter** switch and an **Inverter limit** slider, and draws the bus price μ.
 
 ---
 
@@ -624,6 +675,91 @@ first forecast slot to what was just measured and decaying back over four slots.
 
 ---
 
+## Roadmap
+
+### Remote participants: black-box solvers over the network
+
+Today every participant runs in the coordinator's process, as Python
+(`interface.Participant`: EMHASS's model, this package's DPs). Next, a solver
+in another process, container or device — a vendor's EV-charging optimiser, a
+heat pump's controller, EMHASS in its own container — should join without
+sharing its model. The contract is the one the coordinator already speaks:
+
+- **JSON Schemas** (stable, packaged): `schemas/device-query.v1.json` (a
+  price response, a best response, or ADMM's proximal step: prices per slot,
+  the horizon) and `schemas/device-answer.v1.json` (the plan in kW per slot, its
+  private cost, its state trajectory, a status). `interface.query_to_dict` /
+  `answer_from_dict` convert.
+- **OpenAPI 3.1** (draft): `schemas/participant-api.v1.json` puts them on HTTP —
+  `GET /v1/describe` (its key, its devices, its most power, whether it
+  modulates or is on/off, which query kinds it answers, its slot lengths),
+  `POST /v1/baseline` (a plan with no price), `POST /v1/query` (one what-if
+  question), optional `POST /v1/blend` (a weighted mix of its plans, for a
+  modulating participant) and `POST /v1/commit` (the plan chosen: the only call
+  with an effect). `interface.schema("participant-api")` loads it.
+
+What a remote solver must promise:
+
+- **Queries are what-ifs.** Answering never changes what the device does; only
+  a commit does. EMHASS's `dry_run` is this for EMHASS.
+- **Always answer.** If its solve fails it answers with a plan it can run and
+  status `fallback`; the coordinator uses the plan but proves no bound from it.
+  A timeout is treated the same way, with its last good plan.
+- **Answer price responses quickly** — a plan takes a few dozen of them — and
+  the same question the same way.
+- **Report its private cost honestly** (comfort, wear, energy left in store, a
+  missed goal), in currency; the coordinator's bound and the saving split rely
+  on it.
+
+And what the coordinator promises it: prices only. A third-party participant
+is never sent `best_response` (it carries the rest of the house's load); the
+transport is local (mutual TLS on the LAN, or a paired token), and the
+coordinator keeps no more than its answers.
+
+### Which standards make sense to connect, and how
+
+None of these is implemented yet; this is where the coordinator would meet
+each, and why. The coordinator's question (a price response) and its answer
+(a plan with its private cost) stay the same throughout; a standard is a
+transport for it, or a source of the tree and its limits.
+
+| standard | why it makes sense | what it would carry |
+|---|---|---|
+| [Matter](https://csa-iot.org/all-solutions/matter/) 1.3+ energy management | local only, mutually authenticated, and already in Home Assistant; devices ship it (EVSE, heat pumps, batteries, solar, water heaters in 1.4) | **the device edge**: the committed plan to the device; a node's local price handed to a device as its tariff, its forecast read back as its plan (a price response without a private cost, so no certificate); Power Topology (which endpoints a measurement covers) to seed the tree |
+| [S2](https://s2standard.org) (EN 50491-12-2) | built for exactly this split - an energy manager and per-device resource managers, locally - and device-agnostic | **a participant per S2 resource manager**: its flexibility model (fill rate, operation modes, power envelopes) answers the coordinator's price responses on the coordinator's side |
+| [EEBus](https://www.eebus.org) (SHIP/SPINE) | heat pumps and wallboxes in Germany speak it, and §14a obliges the limits | **§14a limits** (LPC/LPP) as connection limits; an incentive table out and a charging plan back is a price response |
+| [OpenADR 3](https://www.openadr.org/openadr-3-0) | how utilities and aggregators send prices and capacity limits to a site | **into the root**: tariffs into `Forecasts`, `IMPORT_CAPACITY_LIMIT` / `EXPORT_CAPACITY_LIMIT` into the meter's limits; later, the house answering as one participant of a neighbourhood |
+| [IEEE 2030.5](https://standards.ieee.org/ieee/2030.5/11216/) / CSIP-AUS | mandated for DER in California and Australia; carries dynamic operating envelopes | **into the root**: the site's `opModImpLimW` / `opModExpLimW` as the main connection's limits, per slot |
+
+The site's tree can also be read rather than typed: evcc's `circuits` (parent,
+`maxPower`) map one-to-one onto nodes, and an attested connection - the [IES
+ElectricityCredential](https://india-energy-stack.gitbook.io/docs/schemas/electricitycredential/v1.2)
+(sanctioned import and export, meters, registered DERs and their parents), or a
+utility's CIM model - gives the root's limits and a starting tree.
+
+Not planned: building-automation and charger protocols such as KNX and OCPP.
+They execute a plan on one device, which Home Assistant's own integrations
+already do; they do not carry the coordinator's question.
+
+### Further
+
+- **The tree through EMHASS**: several PV arrays and several meters (the
+  library has them; EMHASS carries one PV forecast and one meter).
+- **Phases**: a phase per device and per-phase limits at each node.
+- **Mutual exclusion across participants**: an on/off constraint in the
+  recovery step.
+- **Network-side feeds**: a meter fed from either of two transformers (an open
+  ring: the parent switches), and meshed feeds as constraints with sensitivity
+  factors (PTDF) — the path from one house to a neighbourhood coordinator in
+  which each house is a participant.
+- **ADMM in EMHASS**: a proximal step in EMHASS's model (`docs/coordinated_backend.md`).
+- **ADMM on deep trees**: its runnable-plan recovery is weak where a
+  no-backfeed panel holds both storage and an on/off load (the relaxed plan is
+  close to Dantzig-Wolfe's; the recovered one is not). Dantzig-Wolfe, the
+  default, recovers jointly and is unaffected.
+
+---
+
 ## Layout
 
 ```
@@ -633,7 +769,8 @@ src/home_energy_optimizer/     the package (import home_energy_optimizer)
   dp_thermal.py    hot-water and HVAC DPs, and their thermostat baselines
   coordinate.py    plan scoring shared by both coordinators; coordinate() runs ADMM
   meter.py         a device's view of the meter: grid limits, and its bus behind a sub-meter
-  submeter.py      the meter from every device's power, through sub-meters (hybrid inverter, breaker)
+  submeter.py      the electrical tree: the meters from every device's power, through every node
+  schemas/         the device query and answer (JSON Schema), the remote participant API (OpenAPI, draft)
   planner.py       plan(): Dantzig-Wolfe (default) or ADMM, one result type
   policy.py        value function -> actions, prices, counterfactuals
   feeds.py         real forecast inputs

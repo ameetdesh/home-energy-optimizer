@@ -149,8 +149,9 @@ def answer_from_dict(d: dict[str, Any]) -> Answer:
 def schema(name: str) -> dict[str, Any]:
     """The packaged JSON Schema as a dict.
 
-    `name`: "device-query" or "device-answer". Raises FileNotFoundError for
-    any other name.
+    `name`: "device-query", "device-answer", or "participant-api" (the
+    draft OpenAPI 3.1 document for a participant over HTTP, whose bodies are
+    the other two). Raises FileNotFoundError for any other name.
     """
     text = resources.files("home_energy_optimizer").joinpath(f"schemas/{name}.v{SCHEMA_VERSION}.json").read_text()
     parsed: dict[str, Any] = json.loads(text)

@@ -18,7 +18,7 @@ from dataclasses import replace
 import numpy as np
 import numpy.typing as npt
 
-from home_energy_optimizer.dw.attribution import ledger
+from home_energy_optimizer.dw.attribution import dark, ledger
 from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, baseline_objective
 from home_energy_optimizer.coordinate import baseline_solution, net_cost
 from home_energy_optimizer.profiles import demo_forecasts
@@ -30,7 +30,7 @@ from home_energy_optimizer.admm.webapi import build_site
 def _dark(fc: Forecasts) -> Forecasts:
     """The same forecasts with no PV: the devices' plan before solar arrives,
     which the ledger needs (src/home_energy_optimizer/dw/attribution.py)."""
-    return replace(fc, solar=np.zeros_like(fc.solar))
+    return dark(fc)
 
 
 # Who saves what for the last solve, computed when the page asks for it: it

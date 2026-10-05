@@ -68,7 +68,18 @@ from home_energy_optimizer.dp_thermal import (
 )
 from home_energy_optimizer.interface import Participant, Query
 from home_energy_optimizer.meter import Bus
-from home_energy_optimizer.submeter import device_bus, fixed_demand, site_meter, submeter_penalty
+from home_energy_optimizer.submeter import (
+    MAIN,
+    beyond_main,
+    device_bus,
+    extra_bills,
+    fixed_demand,
+    pv_on,
+    root_grid,
+    site_meter,
+    tariff,
+    topology,
+)
 from home_energy_optimizer.types import (
     BatteryConfig,
     DeviceSolution,
@@ -293,9 +304,13 @@ class DWResult:
     incumbent_used: bool = False      # the returned plan came from an earlier iteration
     admm_value: float | None = None   # ADMM's objective, when the pool was seeded from it
     columns: dict | None = None       # device key -> list of Column (the pool)
-    # sub-meter name -> its bus's price, currency/kWh (the dual of its balance
-    # row): what its member devices were priced at. Empty with no sub-meter.
+    # node or further grid connection -> its bus's price, currency/kWh (the
+    # dual of its balance row): what the devices on it were priced at. Empty
+    # with no tree.
     local_prices: dict[str, np.ndarray] = field(default_factory=dict)
+    # set limit -> its premium, currency/kWh (its row's dual): what its
+    # members paid on top of their bus's price while it bound.
+    limit_prices: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 class DWCoordinator:
@@ -316,15 +331,17 @@ class DWCoordinator:
             raise ValueError("solver must be 'numpy' or 'highs'")
         self.solver = solver
         self.n, self.dt = cfg.horizon.steps, cfg.horizon.dt
-        # The meter's inflexible part. PV behind a sub-meter (a hybrid
+        # The main meter's inflexible part. PV behind a node (a hybrid
         # inverter) is not in it: it reaches the meter through its bus.
         self.d = fixed_demand(cfg, fc).astype(float)
-        self.subs = cfg.submeters
+        self.topo = topology(cfg, fc)
         self.ref = float(np.mean(fc.buy))
-        if np.any(fc.sell > fc.buy + 1e-12):
-            # The meter cost is then non-convex (buy low, sell high in the same
-            # slot) and the master LP would import and export at once.
-            raise ValueError("DW master needs sell <= buy in every slot")
+        for root in self.topo.roots:
+            buy, sell = tariff(cfg, fc, root)
+            if np.any(sell > buy + 1e-12):
+                # The meter cost is then non-convex (buy low, sell high in the same
+                # slot) and the master LP would import and export at once.
+                raise ValueError("DW master needs sell <= buy in every slot")
 
         self.devices: list[Device] = []
         # Batteries the master models directly as LP variables (the "hybrid
@@ -368,10 +385,18 @@ class DWCoordinator:
         keys = {d.key for d in self.devices} | {k for k, _ in self.lp_batts}
         if self.lp_tank is not None:
             keys.add("water_heater")
-        for sm in self.subs:
-            unknown = set(sm.members) - keys
+        pv_keys = set(fc.pv_keys)
+        for name, members in ([(sm.name, sm.members) for sm in cfg.submeters]
+                              + [(c.name, c.members) for c in cfg.connections]
+                              + [(lim.name, lim.members) for lim in cfg.set_limits]):
+            unknown = set(members) - keys - pv_keys
             if unknown:
-                raise ValueError(f"sub-meter {sm.name!r}: no device {sorted(unknown)}")
+                raise ValueError(f"{name!r}: no device {sorted(unknown)}")
+        # The master's coupling rows, n each: every bus (the roots, then the
+        # nodes), then every set limit. A device is in its bus's row and in
+        # each of its set limits' rows; its price is the sum of their duals.
+        self.rows = list(self.topo.buses) + [f"set:{lim.name}" for lim in cfg.set_limits]
+        self._row = {name: i for i, name in enumerate(self.rows)}
 
         self._build_meter_block()
         # Running minimum of (cost + price . power) per device at every price
@@ -384,21 +409,44 @@ class DWCoordinator:
             dev.on_add = self._note
 
     # ----------------------------------------------------------- local prices
+    def _rows_of(self, key: str) -> list[int]:
+        """The coupling rows device `key` is in: its bus's, then each of its set limits'."""
+        rows = [self._row[self.cfg.bus_of(key)]]
+        rows += [self._row[f"set:{lim.name}"] for lim in self.cfg.set_limits if key in lim.members]
+        return rows
+
     def _bus(self, key: str) -> int:
-        """Which balance row device `key` is in: 0 the meter, 1 + s sub-meter s."""
-        s = self.cfg.submeter_of(key)
-        return 0 if s is None else 1 + s
+        """The row of the bus device `key` is on (0: the main meter's)."""
+        return self._row[self.cfg.bus_of(key)]
 
     def price_of(self, y: np.ndarray, dev: Device | str) -> np.ndarray:
-        """The price device `dev` sees in the dual vector `y` (the meter's
-        duals, then each sub-meter's, n each): its own bus's. Per kW-slot,
-        like `y`."""
-        b = self._bus(dev if isinstance(dev, str) else dev.key)
-        return y[b * self.n : (b + 1) * self.n]
+        """The price device `dev` sees in the dual vector `y` (n per coupling
+        row, `self.rows`): its bus's, plus each of its set limits'. Per
+        kW-slot, like `y`."""
+        n = self.n
+        rows = self._rows_of(dev if isinstance(dev, str) else dev.key)
+        if len(rows) == 1:
+            return y[rows[0] * n : (rows[0] + 1) * n]
+        return sum((y[r * n : (r + 1) * n] for r in rows), np.zeros(n))
+
+    def _shown(self, pi: np.ndarray) -> np.ndarray:
+        """The duals to report for the master's last solve, `pi`: the ones
+        nearest the pass-through prices, if they are of the same solve."""
+        raw, centered = getattr(self, "_centered", (None, pi))
+        return centered if raw is pi else pi
 
     def local_prices(self, y: np.ndarray) -> dict[str, np.ndarray]:
-        """Each sub-meter's bus price in `y`, currency/kWh."""
-        return {sm.name: y[(1 + s) * self.n : (2 + s) * self.n] / self.dt for s, sm in enumerate(self.subs)}
+        """Each bus's price in `y` but the main meter's - a node's, a further
+        grid connection's - currency/kWh."""
+        n = self.n
+        return {b: y[self._row[b] * n : (self._row[b] + 1) * n] / self.dt for b in self.topo.buses if b != MAIN}
+
+    def limit_prices(self, y: np.ndarray) -> dict[str, np.ndarray]:
+        """Each set limit's premium in `y` (its dual), currency/kWh: what its
+        members pay on top of their bus's price while it binds."""
+        n = self.n
+        return {lim.name: y[self._row[f"set:{lim.name}"] * n : (self._row[f"set:{lim.name}"] + 1) * n] / self.dt
+                for lim in self.cfg.set_limits}
 
     # ------------------------------------------------------------------ costs
     def private_cost(self, dev: Device, traj: np.ndarray) -> float:
@@ -483,11 +531,12 @@ class DWCoordinator:
         the others (a battery's bus-side power reaches the meter through its
         inverter), and a device behind one meets its bus as well (meter.Bus).
         """
-        bus, residual = device_bus(self.cfg, self.fc, dev.key, others)
-        buy = np.maximum(self.fc.buy, price_kwh)
-        sell = np.minimum(self.fc.sell, price_kwh)
+        view = device_bus(self.cfg, self.fc, dev.key, others)
+        bus, residual = view.bus, view.dp_load
+        buy = np.maximum(view.buy, price_kwh)          # its grid connection's tariff
+        sell = np.minimum(view.sell, price_kwh)
         if dev.kind == "participant":
-            if bus is not None:
+            if bus is not None or view.root != MAIN:
                 # a participant answers a residual at the meter, not a bus:
                 # its bus's price (price_kwh, from price_of) says it all
                 return replace(self.price_oracle(dev, price_kwh), source="load_aware")
@@ -577,68 +626,101 @@ class DWCoordinator:
 
     # ---------------------------------------------------------------- master
     def _build_meter_block(self) -> None:
-        """Per-slot meter variables, in the order the balance row uses them.
+        """The master's own variables, as families of n (one per slot), each
+        with its coefficient in one or two coupling rows, its cost per slot
+        and its upper bound: `self.blocks`, a list of ([(row, coef)], cost,
+        upper). And the coupling rows' right-hand sides, `self.rhs_bal`.
 
-        z = d + sum(p) + curtail, split into import within/over the limit and
-        export within/over the limit. Breach is priced exactly as
-        grid_penalty prices it, so the master minimises total_objective.
+        At each grid connection (a root): import within / over its limit,
+        export within / over it, and curtailment of the PV on it. Breach is
+        priced exactly as grid_penalty prices it, so the master minimises
+        total_objective. At each node: its link to its parent - sending x
+        (bus-side) puts eta_export * x in the parent's row, taking x draws
+        x / eta_import from it - within its ratings and, beyond them, at the
+        breach price; and the PV clipped on it. At each set limit: its
+        members' total within the limit, and beyond it at the breach price.
         """
         g, fc, dt = self.cfg.grid, self.fc, self.dt
-        # breach: a constant price per kWh beyond a limit, as grid_penalty
-        B = breach_price(g, fc.buy, fc.sell) if g.active else 0.0
-        # No meter flow can exceed everything the house could draw or push at
+        cfg, topo, n = self.cfg, self.topo, self.n
+        # No flow can exceed everything the house could draw or push at
         # once. Using that instead of +inf changes no solution, but it matters
         # when export pays exactly the import price: "import one more kWh and
         # export it again" then costs nothing, the optimal set is unbounded,
         # and an interior-point method drifts along it until it stalls.
-        cfg = self.cfg
-        reach = (np.abs(fc.load) + np.abs(fc.solar)
+        reach = (np.abs(fc.load) + np.abs(fc.total_solar)
                  + sum(max(b.p_charge_max_kw, b.p_discharge_max_kw) for b in cfg.battery_list)
                  + (cfg.water_heater.power_kw if cfg.water_heater is not None else 0.0)
                  + (cfg.hvac.power_kw if cfg.hvac is not None else 0.0)
                  + sum(float(d.participant.max_power_kw) for d in self.devices if d.kind == "participant"))
         inf = 2.0 * reach + 1.0
-        imp_cap = np.minimum(g.max_import_kw, inf) if g.max_import_kw is not None else inf
-        exp_cap = np.minimum(g.max_export_kw, inf) if g.max_export_kw is not None else inf
-        if self.export_ceiling is not None:
-            # a hard cap: no over-cap block below lets the master buy past it
-            exp_cap = np.minimum(exp_cap, self.export_ceiling)
-        curtail_ok = g is not None and g.allow_curtailment
+        full = lambda v: np.broadcast_to(v, (n,)).astype(float)      # noqa: E731
+        zero = np.zeros(n)
+        blocks: list[tuple[list[tuple[int, float]], np.ndarray, np.ndarray]] = []
+        rhs = np.zeros(len(self.rows) * n)
 
-        blocks = []  # (coef in balance row, cost per slot, upper bound per slot)
-        full = lambda v: np.broadcast_to(v, (self.n,)).astype(float)      # noqa: E731
-        blocks.append((+1.0, fc.buy * dt, full(imp_cap)))                       # import
-        if g.max_import_kw is not None:
-            blocks.append((+1.0, (fc.buy + B) * dt, full(inf)))                 # over import cap
-        blocks.append((-1.0, -fc.sell * dt, full(exp_cap)))                     # export
-        if g.max_export_kw is not None:
-            blocks.append((-1.0, (B - fc.sell) * dt, full(inf)))                # over export cap
-        if curtail_ok and self.cfg.pv_submeter is None:
-            blocks.append((-1.0, np.zeros(self.n), fc.solar.copy()))            # curtail
-        self.meter_blocks = blocks
+        for root in topo.roots:
+            r = self._row[root]
+            rg = root_grid(cfg, root)
+            buy, sell = tariff(cfg, fc, root)
+            # breach: a constant price per kWh beyond a limit, as grid_penalty
+            B = breach_price(rg, buy, sell) if rg.active else 0.0
+            imp_cap = np.minimum(rg.max_import_kw, inf) if rg.max_import_kw is not None else inf
+            exp_cap = np.minimum(rg.max_export_kw, inf) if rg.max_export_kw is not None else inf
+            if root == MAIN and self.export_ceiling is not None:
+                # a hard cap: no over-cap block below lets the master buy past it
+                exp_cap = np.minimum(exp_cap, self.export_ceiling)
+            blocks.append(([(r, +1.0)], buy * dt, full(imp_cap)))                     # import
+            if rg.max_import_kw is not None:
+                blocks.append(([(r, +1.0)], (buy + B) * dt, full(inf)))               # over import cap
+            blocks.append(([(r, -1.0)], -sell * dt, full(exp_cap)))                   # export
+            if rg.max_export_kw is not None:
+                blocks.append(([(r, -1.0)], (B - sell) * dt, full(inf)))              # over export cap
+            pv = pv_on(fc, topo, root)
+            if rg.allow_curtailment and np.any(pv > 0):
+                blocks.append(([(r, -1.0)], zero, pv.copy()))                        # curtail
+            rhs[r * n : (r + 1) * n] = self.d if root == MAIN else -pv
 
-        # Each sub-meter's connection, as variables between its bus row and
-        # the meter row: (meter coef, bus coef, cost per slot, upper bound).
-        # Sending x (bus-side) puts eta_export * x on the house; taking x
-        # draws x / eta_import from it. Beyond a rating: the breach price.
-        self.node_blocks: list[list[tuple[float, float, np.ndarray, np.ndarray]]] = []
         Bn = breach_price(g, fc.buy, fc.sell)    # a rating is a limit even with no grid limit
-        for sm in self.subs:
-            nb = []
+        # node -> the block indices of its link: (send within / past, take within / past)
+        self.link_blocks: dict[str, tuple[list[int], list[int]]] = {}
+        for node in topo.nodes:
+            sm = topo.sm[node]
+            r, up = self._row[node], self._row[topo.parent[node]]
             out_cap, in_cap = sm.export_cap_dc, sm.import_cap_dc
-            zero = np.zeros(self.n)
-            nb.append((sm.eta_export, -1.0, zero, np.minimum(out_cap, inf)))            # send
+            sends, takes = [len(blocks)], []
+            blocks.append(([(up, sm.eta_export), (r, -1.0)], zero, np.minimum(full(out_cap), inf)))     # send
             if np.isfinite(out_cap):
-                nb.append((sm.eta_export, -1.0, full(Bn * dt), full(inf)))            # send past it
-            nb.append((-1.0 / sm.eta_import, 1.0, zero, np.minimum(in_cap, inf)))      # take
+                sends.append(len(blocks))
+                blocks.append(([(up, sm.eta_export), (r, -1.0)], full(Bn * dt), full(inf)))           # past it
+            takes.append(len(blocks))
+            blocks.append(([(up, -1.0 / sm.eta_import), (r, 1.0)], zero, np.minimum(full(in_cap), inf)))  # take
             if np.isfinite(in_cap):
-                nb.append((-1.0 / sm.eta_import, 1.0, full(Bn * dt), full(inf)))     # take past it
-            if sm.pv:
+                takes.append(len(blocks))
+                blocks.append(([(up, -1.0 / sm.eta_import), (r, 1.0)], full(Bn * dt), full(inf)))    # past it
+            self.link_blocks[node] = (sends, takes)
+            pv = pv_on(fc, topo, node)
+            if np.any(pv > 0):
                 # PV clipped on the bus: free; only what the rating forces,
                 # unless curtailment is allowed (then any of it)
-                clip = fc.solar.copy() if curtail_ok else np.maximum(fc.solar - out_cap, 0.0)
-                nb.append((0.0, -1.0, zero, clip))
-            self.node_blocks.append(nb)
+                clip = pv.copy() if g.allow_curtailment else np.maximum(pv - out_cap, 0.0)
+                blocks.append(([(r, -1.0)], zero, clip))
+            rhs[r * n : (r + 1) * n] = -pv
+
+        for lim in cfg.set_limits:
+            # its row: imp - exp (+ over imp - over exp) = its members' total
+            r = self._row[f"set:{lim.name}"]
+            imp_cap = full(inf if lim.max_import_kw is None else np.minimum(lim.max_import_kw, inf))
+            exp_cap = full(inf if lim.max_export_kw is None else np.minimum(lim.max_export_kw, inf))
+            blocks.append(([(r, +1.0)], zero, imp_cap))
+            if lim.max_import_kw is not None:
+                blocks.append(([(r, +1.0)], full(Bn * dt), full(inf)))
+            blocks.append(([(r, -1.0)], zero, exp_cap))
+            if lim.max_export_kw is not None:
+                blocks.append(([(r, -1.0)], full(Bn * dt), full(inf)))
+        self.blocks = blocks
+        self.rhs_bal = rhs
+        # the main meter's own, as earlier releases exposed them: (coef, cost, upper)
+        self.meter_blocks = [(rc[0][1], cost, up) for rc, cost, up in blocks if rc[0][0] == 0 and len(rc) == 1]
 
     # ---------------------------------------------------------------- solvers
     def _lp(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
@@ -682,7 +764,7 @@ class DWCoordinator:
         return res.x, res.fun
 
     def _tank_block(self, A: Triplets, c: np.ndarray, lb: np.ndarray, ub: np.ndarray,
-                    rhs: np.ndarray, j0: int, row0: int, meter: bool = True, bal_row: int = 0
+                    rhs: np.ndarray, j0: int, row0: int, meter: bool = True, bal_rows: Sequence[int] = (0,)
                     ) -> tuple[int, int, Callable[[np.ndarray], Column]]:
         """Write the tank's LP into (A, c, bounds, rhs) at column j0, row row0.
 
@@ -714,7 +796,8 @@ class DWCoordinator:
         c[S:S + n] = price_k * dt
         c[ST] = C * self.ref
         if meter:
-            A[bal_row + t, D + t] = -P           # its balance row (the meter's): minus consumption
+            for bal_row in bal_rows:             # its coupling rows: minus consumption
+                A[bal_row + t, D + t] = -P
         dyn = row0 + t
         A[dyn, T + t] = 1.0
         A[dyn[1:], T + t[:-1]] = -(1.0 - r[1:] * dt)
@@ -750,12 +833,11 @@ class DWCoordinator:
             float, np.ndarray, np.ndarray | None, np.ndarray | None, dict[str, Column]]:
         """Returns (value, column weights, meter duals, convexity duals, battery plans)."""
         n, devs, dt = self.n, self.devices, self.dt
-        S = len(self.subs)
-        # Rows: the meter (n), each sub-meter's bus (n each), the convexity
-        # rows, then the batteries' and the tank's own rows. The first three
-        # are the border that couples the rest.
-        n_bal = n * (1 + S)
-        n_meter = (len(self.meter_blocks) + sum(len(nb_) for nb_ in self.node_blocks)) * n
+        # Rows: the coupling rows (every bus, then every set limit; n each),
+        # the convexity rows, then the batteries' and the tank's own rows.
+        # The first two are the border that couples the rest.
+        n_bal = n * len(self.rows)
+        n_meter = len(self.blocks) * n
         n_cols = sum(len(d.columns) for d in devs)
         nb = len(self.lp_batts)
         # per LP battery: charge c[n], discharge e[n], soe s[1..n]
@@ -771,30 +853,24 @@ class DWCoordinator:
         # columns, which dense would put at ~100 MB.
         A = Triplets((n_rows, nv))
         rhs = np.zeros(n_rows)
-        rhs[:n] = self.d
-        for si, sm in enumerate(self.subs):
-            if sm.pv:
-                rhs[(1 + si) * n : (2 + si) * n] = -self.fc.solar
+        rhs[:n_bal] = self.rhs_bal
         rhs[n_bal : n_bal + len(devs)] = 1.0
         t_all = np.arange(n)
-        for mb, (coef, cost, upper) in enumerate(self.meter_blocks):
-            c[mb * n : (mb + 1) * n] = cost
-            ub[mb * n : (mb + 1) * n] = upper
-            A[t_all, np.arange(mb * n, (mb + 1) * n)] = coef
-        j = len(self.meter_blocks) * n
-        for si, blocks in enumerate(self.node_blocks):
-            for mcoef, bcoef, cost, upper in blocks:
-                c[j : j + n] = cost
-                ub[j : j + n] = upper
-                if mcoef:
-                    A[t_all, j + t_all] = mcoef
-                A[(1 + si) * n + t_all, j + t_all] = bcoef
-                j += n
+        j = 0
+        for coefs, cost, upper in self.blocks:
+            c[j : j + n] = cost
+            ub[j : j + n] = upper
+            for row, coef in coefs:
+                A[row * n + t_all, j + t_all] = coef
+            j += n
+        for b, shut in getattr(self, "link_fix", {}).items():
+            ub[b * n : (b + 1) * n][shut] = 0.0            # a link's direction, fixed for recovery
         for di, dev in enumerate(devs):
-            r0 = self._bus(dev.key) * n
+            rows = self._rows_of(dev.key)
             for col in dev.columns:
                 c[j] = col.cost
-                A[r0 : r0 + n, j] = -col.power.reshape(-1, 1)
+                for row in rows:
+                    A[row * n : (row + 1) * n, j] = -col.power.reshape(-1, 1)
                 A[n_bal + di, j] = 1.0
                 # An aggregate an on/off device cannot run is fine for the LP
                 # (it is a point of the convex hull) but not for recovery.
@@ -813,9 +889,9 @@ class DWCoordinator:
             if key in self.soe_targets:
                 lb[S0 + n - 1] = ub[S0 + n - 1] = self.soe_targets[key]
             t = np.arange(n)
-            r0 = self._bus(key) * n      # its balance row: the meter's, or its bus's
-            A[r0 + t, C0 + t] = -1.0     # minus consumption
-            A[r0 + t, E0 + t] = +1.0
+            for row in self._rows_of(key):  # its bus's row, and its set limits'
+                A[row * n + t, C0 + t] = -1.0     # minus consumption
+                A[row * n + t, E0 + t] = +1.0
             r = base_row + bi * n + t    # s[t+1] - s[t] - dt*eta_c*c + dt*e/eta_d = 0
             A[r, S0 + t] = 1.0
             A[r[1:], S0 + t[:-1]] = -1.0
@@ -829,7 +905,7 @@ class DWCoordinator:
         tank_decode = None
         if self.lp_tank is not None:
             _, _, tank_decode = self._tank_block(A, c, lb, ub, rhs, j, base_row + n * nb,
-                                                 bal_row=self._bus("water_heater") * n)
+                                                 bal_rows=[r * n for r in self._rows_of("water_heater")])
         const = sum(_pinned_price(b) * b.capacity_kwh * b.soc_initial_frac
                     for _, b in self.lp_batts)
         lam_sl = slice(n_meter, n_meter + n_cols)
@@ -854,19 +930,120 @@ class DWCoordinator:
             # the meter + convexity rows are the border that couples the
             # batteries' and the tank's otherwise independent row blocks
             x, fun = self._choose(c, A, rhs, lb, ub, groups, time_limit, node_limit, base_row)
+            self._note_links(x)
             return fun + const, x[lam_sl], None, None, batt_plans(x)
 
         x, fun, duals = self._lp(c, A, rhs, lb, ub, border=base_row)
+        self._note_links(x)
         # d(cost)/d(d_t), currency per kW-slot: the meter's, then each bus's.
         # Every price this class hands around is this whole vector; price_of
         # picks a device's own.
         pi = duals[:n_bal]
+        # the same optimum's duals nearest the pass-through prices: a second
+        # point to price at, and the local prices shown (_shown)
+        self._centered = (pi, self._center_duals(c, A, lb, ub, x, duals)[:n_bal]
+                          if self.topo.nodes or self.cfg.set_limits else pi)
         sigma = duals[n_bal : n_bal + len(devs)]
         self.batt_lambda = {     # SoE-balance duals: the exact LP costate
             key: duals[base_row + bi * n : base_row + (bi + 1) * n]
             for bi, (key, *_rest) in enumerate(batt_cols)
         }
         return fun + const, x[lam_sl], pi, sigma, batt_plans(x)
+
+    def _center_duals(self, c: np.ndarray, A: Triplets, lb: np.ndarray, ub: np.ndarray,
+                      x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Among the master's optimal duals, the one nearest the pass-through
+        prices: each node's price within its connection's band of its
+        parent's, [eta_export, 1/eta_import] times it, and each set limit's
+        premium at 0 - as far as staying optimal allows.
+
+        A node's price is not unique while its connection carries nothing:
+        behind a panel that cannot export, with nothing there drawing, any
+        price from the parent's minus the breach price up to the parent's is
+        optimal. A solver picks one end, the devices there are then priced
+        far below the meter, and the loop chases that price for dozens of
+        iterations without closing the gap. The loop prices at this point as
+        well as at the solver's (the solver's own, an interior point's near
+        the centre of the optimal set, is often the better guide elsewhere),
+        and reports it as the local prices.
+
+        Parents before children, a slot at a time, a node moves with every
+        node below it whose link is tight (a link variable at zero reduced
+        cost - flowing, or about to), each scaled by its link's efficiency
+        so those links stay tight; otherwise raising a panel would make its
+        breaker's idle link worth using. The step keeps every reduced cost's
+        sign (a variable strictly between its bounds pins it), so the vector
+        stays dual-feasible and complementary to x.
+        """
+        n, topo = self.n, self.topo
+        rows, cols, vals = A.coo()
+        y = y.copy()
+        red = c - np.bincount(cols, weights=vals * y[rows], minlength=len(c))
+        order = np.argsort(rows, kind="stable")
+        rows, cols, vals = rows[order], cols[order], vals[order]
+        start = np.searchsorted(rows, np.arange(A.shape[0] + 1))
+        tol_r = 1e-7
+        tol_x = 1e-6 * (1.0 + np.minimum(np.abs(np.where(np.isfinite(lb), lb, 0.0)),
+                                          np.abs(np.where(np.isfinite(ub), ub, 0.0))))
+        free = ub - lb > tol_x
+        # +1: holds at its lower bound (keep red >= 0), -1: at its upper
+        # (keep red <= 0), 0: strictly between (pins every row it is in)
+        side = np.where(red > tol_r, 1, np.where(red < -tol_r, -1,
+                        np.where(x - lb <= tol_x, 1, np.where(ub - x <= tol_x, -1, 0))))
+
+        def tight(node: str, t: int) -> float:
+            """The factor a tight link scales its node's step by, or 0."""
+            sends, takes = self.link_blocks[node]
+            sm = topo.sm[node]
+            if any(abs(red[b * n + t]) <= tol_r for b in sends):
+                return sm.eta_export
+            if any(abs(red[b * n + t]) <= tol_r for b in takes):
+                return 1.0 / sm.eta_import
+            return 0.0
+
+        def move(at: list[tuple[int, float]], target: float) -> None:
+            """Shift y[i] by f * d for each (i, f): d toward target - y[at[0]]."""
+            k = np.concatenate([np.arange(start[i], start[i + 1]) for i, _ in at])
+            f = np.concatenate([np.full(start[i + 1] - start[i], fi) for i, fi in at])
+            J, inv = np.unique(cols[k], return_inverse=True)
+            a = np.bincount(inv, weights=vals[k] * f, minlength=len(J))
+            on = free[J] & (np.abs(a) > 1e-12)
+            J, a = J[on], a[on]
+            s = side[J]
+            if np.any(s == 0):
+                return
+            r = red[J]
+            # red_j - a_j * d keeps its sign: a bound on d from each
+            bound = np.where(s > 0, np.maximum(r, 0.0), np.minimum(r, 0.0)) / a
+            upper = (s > 0) == (a > 0)
+            hi = float(np.min(bound[upper], initial=np.inf))
+            lo = float(np.max(bound[~upper], initial=-np.inf))
+            d = min(max(target - y[at[0][0]], min(lo, 0.0)), max(hi, 0.0))
+            if d != 0.0:
+                for i, fi in at:
+                    y[i] += fi * d
+                red[J] -= a * d
+
+        for node in reversed(topo.order):                 # parents first
+            sm = topo.sm[node]
+            me, up = self._row[node] * n, self._row[topo.parent[node]] * n
+            for t in range(n):
+                at, stack = [(me + t, 1.0)], [(node, 1.0)]
+                while stack:
+                    b, fb = stack.pop()
+                    for ch in topo.children[b]:
+                        f_ch = tight(ch, t) * fb
+                        if f_ch:
+                            at.append((self._row[ch] * n + t, f_ch))
+                            stack.append((ch, f_ch))
+                p = y[up + t]
+                band = sorted((sm.eta_export * p, p / sm.eta_import))
+                move(at, min(max(y[me + t], band[0]), band[1]))
+        for lim in self.cfg.set_limits:
+            me = self._row[f"set:{lim.name}"] * n
+            for t in range(n):
+                move([(me + t, 1.0)], 0.0)
+        return y
 
     def split_weights(self, lam: np.ndarray) -> dict[str, np.ndarray]:
         out, j = {}, 0
@@ -892,7 +1069,8 @@ class DWCoordinator:
             powers[key], trajs[key] = col.power, col.trajectory
         # lambda on s[t+1]: an extra kWh on the right of SoE row t lowers cost.
         lam = {k: -v for k, v in getattr(self, "batt_lambda", {}).items()}
-        return {"price": pi[: self.n] / self.dt, "local_prices": self.local_prices(pi),
+        return {"price": pi[: self.n] / self.dt, "local_prices": self.local_prices(self._shown(pi)),
+                "limit_prices": self.limit_prices(self._shown(pi)),
                 "powers": powers, "trajectories": trajs, "active": active, "lambda": lam}
 
     def blend_plan(self, dev: Device, w: np.ndarray) -> Column:
@@ -957,18 +1135,14 @@ class DWCoordinator:
         smoothed price produce a bound too. -inf outside the dual box.
         """
         n = self.n
-        meter = pi[:n]
-        total = float(meter @ self.d)
-        for si, sm in enumerate(self.subs):
-            if sm.pv:                                   # the bus row's right-hand side: -PV
-                total -= float(pi[(1 + si) * n : (2 + si) * n] @ self.fc.solar)
+        total = float(pi[: len(self.rows) * n] @ self.rhs_bal)
         for dev in self.devices:
             col = best[dev.key]
             total += col.cost + float(self.price_of(pi, dev) @ col.power)
-        boxes = [(cost - meter * coef, upper) for coef, cost, upper in self.meter_blocks]
-        for si, blocks in enumerate(self.node_blocks):
-            mu = pi[(1 + si) * n : (2 + si) * n]
-            boxes += [(cost - meter * mcoef - mu * bcoef, upper) for mcoef, bcoef, cost, upper in blocks]
+        boxes = []
+        for coefs, cost, upper in self.blocks:
+            red = cost - sum((pi[r * n : (r + 1) * n] * coef for r, coef in coefs), np.zeros(n))
+            boxes.append((red, upper))
         for red, upper in boxes:
             if np.any((red < -1e-12) & ~np.isfinite(upper)):
                 return -np.inf
@@ -1030,7 +1204,7 @@ class DWCoordinator:
                 if not (self.cfg.grid.allow_curtailment and np.all(over <= self.fc.solar - curtail + 1e-6)):
                     return np.inf
                 net = net + over
-        return extended_objective(self.cfg, self.fc, net, trajs) + submeter_penalty(self.cfg, self.fc, flows)
+        return extended_objective(self.cfg, self.fc, net, trajs) + beyond_main(self.cfg, self.fc, flows)
 
     def participants_cost(self, plan: dict[str, Column]) -> float:
         """The sum of the participants' private costs (currency) in `plan`
@@ -1045,6 +1219,36 @@ class DWCoordinator:
         ceiling and cannot curtail its way under it."""
         return (self.evaluate({k: c.power for k, c in plan.items()}, {k: c.trajectory for k, c in plan.items()})
                 + self.participants_cost(plan))
+
+    def _note_links(self, x: np.ndarray) -> None:
+        """Record each node's link flows in master solution `x`: node ->
+        (sent, taken), bus-side kW per slot."""
+        n = self.n
+        self.link_flows = {
+            node: (sum((x[b * n : (b + 1) * n] for b in sends), np.zeros(n)),
+                   sum((x[b * n : (b + 1) * n] for b in takes), np.zeros(n)))
+            for node, (sends, takes) in self.link_blocks.items()}
+
+    def _fix_directions(self) -> bool:
+        """Where the last master solve both sent and took on a lossy link in
+        one slot - burning energy in conversion losses, which the LP allows
+        (theory, "One relaxation") but no converter can do - fix that slot's
+        direction to the net flow, for recovery. Returns whether any was fixed."""
+        fixed = False
+        fix: dict[int, np.ndarray] = dict(getattr(self, "link_fix", {}))
+        for node, (sent, taken) in getattr(self, "link_flows", {}).items():
+            loop = np.minimum(sent, taken) > 1e-6
+            if not np.any(loop):
+                continue
+            sends, takes = self.link_blocks[node]
+            shut_take, shut_send = loop & (sent >= taken), loop & (sent < taken)
+            for b in takes:
+                fix[b] = fix.get(b, np.zeros(self.n, dtype=bool)) | shut_take
+            for b in sends:
+                fix[b] = fix.get(b, np.zeros(self.n, dtype=bool)) | shut_send
+            fixed = True
+        self.link_fix = fix
+        return fixed
 
     def recover(self, integer: str, weights: dict[str, np.ndarray] | None = None,
                 bplans: dict[str, Column] | None = None, time_limit: float = 30.0,
@@ -1095,8 +1299,11 @@ class DWCoordinator:
         trajs = {k: c.trajectory for k, c in plan.items()}
         fc, dt = self.fc, self.dt
         bill = float(np.sum(np.maximum(net, 0) * fc.buy * dt) - np.sum(np.maximum(-net, 0) * fc.sell * dt))
+        bill += extra_bills(self.cfg, fc, flows) if self.cfg.connections else 0.0
         comfort = comfort_penalty(self.cfg, trajs.get("water_heater"), trajs.get("hvac"), self.ref)
-        breach = grid_penalty(self.cfg, net, fc.buy, fc.sell) + submeter_penalty(self.cfg, fc, flows)
+        breach = grid_penalty(self.cfg, net, fc.buy, fc.sell)
+        if self.cfg.has_tree:
+            breach += beyond_main(self.cfg, fc, flows) - (extra_bills(self.cfg, fc, flows) if self.cfg.connections else 0.0)
         batt = battery_terminal_penalty(
             self.cfg, {k: v for k, v in trajs.items() if k.startswith("battery")} or None, fc.buy)
         goal = site_battery_extras(self.cfg, trajs)   # SoC goals / gates (EVs)
@@ -1308,6 +1515,8 @@ class DWCoordinator:
             # Price at the master's dual, and (Wentges) at a point pulled toward
             # the best-bound centre. Both give valid columns AND valid bounds.
             points = [pi]
+            if np.max(np.abs(self._shown(pi) - pi), initial=0.0) > 1e-9:
+                points.append(self._shown(pi))
             if center is not None and smooth > 0:
                 points.append(smooth * center + (1 - smooth) * pi)
             points.extend(self.extra_price_points(pi, center, it))
@@ -1385,6 +1594,7 @@ class DWCoordinator:
         if progress is not None:
             progress(-1, max_iter)
         relaxed, lam, pi, _, bplans = self.solve_master()
+        shown = self._shown(pi)          # before recovery solves the master again
 
         # Re-state the bound against the FINAL pool. Columns added after a
         # point was priced (heuristic ones especially) can undercut the DP's
@@ -1411,6 +1621,14 @@ class DWCoordinator:
         for dev in self.devices:
             dev.stamp = -1          # anything added from here on is polish's
         plan = self.recover(integer, weights, bplans)
+        # A lossy link used both ways in a slot is no plan a converter can run:
+        # fix those directions and recover again (the bound is unaffected).
+        for _ in range(5):
+            if not self._fix_directions():
+                break
+            _, lam_f, _, _, bplans_f = self.solve_master()
+            plan = self.recover(integer, self.split_weights(lam_f), bplans_f)
+        self.link_fix = {}
         upper = self.score(plan)
         if polish:
             plan, upper = self.polish(plan)
@@ -1434,7 +1652,8 @@ class DWCoordinator:
             incumbent_used=incumbent_used,
             admm_value=getattr(self, "admm_value", None),
             columns={d.key: d.columns for d in self.devices},
-            local_prices=self.local_prices(pi),
+            local_prices=self.local_prices(shown),
+            limit_prices=self.limit_prices(shown),
         )
 
 
@@ -1475,7 +1694,7 @@ def baseline_objective(cfg: SiteConfig, fc: Forecasts) -> float:
     if cfg.hvac is not None:
         trajs["hvac"], powers["hvac"] = baseline_hvac(cfg.hvac, h, fc.outdoor_temp)
     flows = site_meter(cfg, fc, powers)
-    return extended_objective(cfg, fc, flows.net, trajs) + submeter_penalty(cfg, fc, flows)
+    return extended_objective(cfg, fc, flows.net, trajs) + beyond_main(cfg, fc, flows)
 
 
 def dw_coordinate(cfg: SiteConfig, fc: Forecasts, battery_in_master: bool = True,

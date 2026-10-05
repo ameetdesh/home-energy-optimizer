@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "home-energy-optimizer"
-version = "0.2.6"
+version = "0.2.7"
 description = "Makes a home's energy devices cooperate: each plans with its own optimiser, Dantzig-Wolfe or ADMM coordinates them, and the saving is shared fairly."
 readme = "README.md"
 license = "MIT"
