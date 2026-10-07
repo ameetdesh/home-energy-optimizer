@@ -1,8 +1,9 @@
 {
   "optimization_backend": "dantzig_wolfe",
-  "participants": [
-    {"devices": ["battery"], "solver": "home_energy_optimizer"},
-    {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"}
+  "site": [
+    {"id": "battery", "solver": "home_energy_optimizer"},
+    {"id": "deferrable0", "group": "loads"},
+    {"id": "deferrable1", "group": "loads"}
   ],
   "costfun": "profit",
   "optimization_time_step": 30,

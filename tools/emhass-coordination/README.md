@@ -16,7 +16,7 @@ same sensors EMHASS always publishes (`sensor.p_batt_forecast`,
 > The coordinated backend is EMHASS PR
 > [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158),
 > not yet in a released EMHASS, so EMHASS is built from that branch. It needs
-> home-energy-optimizer **0.2.7** or later (`electrical_topology`), or
+> home-energy-optimizer **0.2.8** or later (`site`), or
 > `up --package-src` with a checkout of this repository.
 
 ## What you need
@@ -56,7 +56,7 @@ plan for 48 steps from Fri 14:30 PDT  (0.3 s)
 share of the saving over the horizon (currency):
   solar                           4.584
   battery                         1.285
-  deferrable0+deferrable1         0.420
+  loads                           0.420
 ```
 
 If it says **"EMHASS planned WITHOUT the coordinator"** instead, EMHASS fell
@@ -115,34 +115,35 @@ To try a version of home-energy-optimizer not yet on PyPI, install it from
 this checkout: `up --config config_hybrid.json --package-src .` (run from the
 repository's root).
 
-## Four DERs, two solvers, an electrical topology
+## Four DERs, two solvers, one site
 
 [`config_four_der.json`](config_four_der.json) adds a hot water tank and a heat
-pump, planned by home-energy-optimizer, to the hybrid house above, and describes
-how they are wired with `electrical_topology`:
+pump, planned by home-energy-optimizer, to the hybrid house above, and draws how
+everything is wired in its `site` list:
 
 ```json
-"electrical_topology": {
-  "nodes": [
-    {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
-     "efficiency_from_parent": 0.97, "efficiency_to_parent": 0.97},
-    {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
-    {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500}
-  ],
-  "devices": {"pv": "inverter", "battery": "inverter",
-              "deferrable0": "garage", "deferrable1": "garage",
-              "water_heater": "heat", "hvac": "heat"}
-}
+"site": [
+  {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+   "efficiency_import": 0.97, "efficiency_export": 0.97},
+  {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+  {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
+  {"id": "pv", "parent": "inverter"},
+  {"id": "battery", "parent": "inverter"},
+  {"id": "deferrable0", "parent": "garage", "group": "loads"},
+  {"id": "deferrable1", "parent": "garage", "group": "loads"},
+  {"id": "water_heater", "parent": "heat", "solver": "home_energy_optimizer", "config": {...}},
+  {"id": "hvac", "parent": "heat", "solver": "home_energy_optimizer", "config": {...}}
+]
 ```
 
 - the PV and the battery on the 4 kW **hybrid inverter** (its numbers live here
   now; EMHASS fills its own `inverter_*` keys from this node, so its own solver
   plans the same inverter);
-- the two loads on a **garage panel**, 7.4 kW in and no backfeed
-  (`max_export: 0`), and, on the same panel, a 3.5 kW **breaker** with the tank
-  and the heat pump - a node under a node;
+- the two loads, one group planned together by EMHASS, on a **garage panel**,
+  7.4 kW in and no backfeed (`max_export: 0`), and, on the same panel, a 3.5 kW
+  **breaker** with the tank and the heat pump - a node under a node;
 - plus EMHASS's own `deferrable_load_groups`: the two loads on a 3 kW budget,
-  which their EMHASS participant holds itself.
+  which their group's EMHASS model holds itself.
 
 ```bash
 python tools/emhass-coordination/coordinate.py up --config config_four_der.json
@@ -153,15 +154,16 @@ python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 each node's local price beside the meter's: the inverter's falls to 0 while PV
 is clipped; a panel's or breaker's is its parent's while it has headroom, and
 apart from it where its limit binds. Each is published as
-`sensor.coordination_local_price_<id>` (and a constraint's premium as
-`sensor.coordination_limit_price_<name>`), with the horizon in its `forecasts`
+`sensor.coordination_local_price_<id>` (and a limit's premium as
+`sensor.coordination_limit_price_<id>`), with the horizon in its `forecasts`
 attribute. The demo day passes an outdoor temperature (5-15 °C) for the heat
-pump. `electrical_topology` needs home-energy-optimizer 0.2.7 (or
-`up --package-src`).
+pump. `site` needs home-energy-optimizer 0.2.8 (or `up --package-src`).
 
-A device not listed under `devices` is on the main meter (`grid`).
-`constraints` (a limit on a set of devices wherever they are, such as a phase)
-and deeper nesting work the same way; EMHASS's
+A device `site` does not list is planned by EMHASS on its own, on the main
+meter (`grid`). The main meter's limits (`{"id": "grid", "max_import": ...,
+"max_export": ...}`), limits on a set of devices wherever they are, such as a
+phase (`{"id": "l1", "type": "limit", "max_import": 7000}`, joined with a
+device's `"limits": ["l1"]`), and deeper nesting work the same way; EMHASS's
 [`coordinated_backend.md`](https://github.com/ameetdesh/emhass/blob/federated-all/docs/coordinated_backend.md)
 has the full schema.
 
@@ -188,18 +190,19 @@ script, which `up` copies into `.run/config.json` and mounts. Two keys do it:
 
 ```json
 "optimization_backend": "dantzig_wolfe",
-"participants": [
-  {"devices": ["battery"], "solver": "home_energy_optimizer"},
-  {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"}
+"site": [
+  {"id": "battery", "solver": "home_energy_optimizer"},
+  {"id": "deferrable0", "group": "loads"},
+  {"id": "deferrable1", "group": "loads"}
 ]
 ```
 
 - `optimization_backend`: `cvxpy` (EMHASS's default, one MILP) or
   `dantzig_wolfe` (coordinated).
-- `participants`: which solver plans which devices. EMHASS's device names are
-  `battery` and `deferrable0`, `deferrable1`, … (as many as
-  `number_of_deferrable_loads`). A device you leave out is planned by EMHASS on
-  its own.
+- `site`: the house in one list - here, which solver plans each device, and
+  which are planned together (a `group`). EMHASS's device names are `battery`
+  and `deferrable0`, `deferrable1`, … (as many as `number_of_deferrable_loads`).
+  A device you leave out is planned by EMHASS on its own.
 
 The rest of `config.json` is ordinary EMHASS configuration: the battery
 (`battery_nominal_energy_capacity` in Wh, the power limits in W, the SoC

@@ -369,7 +369,7 @@ the plans agree on the meter, and reports what each device is worth.
 
 > **Status.** The EMHASS side is a draft PR —
 > [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158)
-> — which adds the `optimization_backend` dispatch and the `participants` option.
+> — which adds the `optimization_backend` dispatch and the `site` option.
 > Released EMHASS has no `optimization_backend` key, so on stock EMHASS this
 > config does nothing. The adapter in this package is complete and tested
 > (`tests/test_emhass_adapter.py`); it imports EMHASS only when it plans, so it
@@ -406,32 +406,25 @@ the coordination's own keys are:
   "number_of_deferrable_loads": 2,
   "nominal_power_of_deferrable_loads": [3000, 750],
 
-  "participants": [
-    {"devices": ["battery"], "solver": "emhass"},
+  "site": [
+    {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+     "efficiency_import": 0.97, "efficiency_export": 0.97},
+    {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
 
-    {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"},
+    {"id": "pv", "parent": "inverter"},
+    {"id": "battery", "parent": "inverter"},
+    {"id": "deferrable0", "parent": "garage", "group": "loads"},
+    {"id": "deferrable1", "parent": "garage", "group": "loads"},
 
-    {"devices": ["water_heater"], "solver": "home_energy_optimizer",
+    {"id": "water_heater", "parent": "heat", "solver": "home_energy_optimizer",
      "config": {"power_kw": 3.0, "liters": 180.0, "t_comfort": 55.0,
                 "n_duty_levels": 2, "comfort_weight": 10.0}},
-
-    {"devices": ["hvac"], "solver": "home_energy_optimizer",
+    {"id": "hvac", "parent": "heat", "solver": "home_energy_optimizer",
      "config": {"power_kw": 1.5, "cop": 3.5, "c_room_kwh_per_k": 2.5,
                 "r_wall_k_per_kw": 5.0,
                 "t_comfort_low": 21.0, "t_comfort_high": 25.0}}
   ],
-
-  "electrical_topology": {
-    "nodes": [
-      {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
-       "efficiency_from_parent": 0.97, "efficiency_to_parent": 0.97},
-      {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
-      {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500}
-    ],
-    "devices": {"pv": "inverter", "battery": "inverter",
-                "deferrable0": "garage", "deferrable1": "garage",
-                "water_heater": "heat", "hvac": "heat"}
-  },
   "set_nodischarge_to_grid": false,
 
   "deferrable_load_groups": [
@@ -446,17 +439,23 @@ inverter never passes more than 4 kW and the battery stores the PV it clips, the
 garage never feeds back, the tank and the heat pump never run together (their
 4.5 kW would trip the 3.5 kW breaker), and the loads keep within 3 kW.
 
-**How the tree enters.** `electrical_topology` is the whole tree, in W:
+**How the site enters.** `site` is the house in one list. Every element has an
+`id`, and all but the main meter and limits a `parent` (`grid` by default), so
+the list draws the tree; each device carries its wiring, its solver, its group
+and its settings in one entry:
 
-- `nodes`: connection points behind the main meter (`grid`) — a hybrid inverter,
-  a panel, a breaker — each with a `parent` (another node, or `grid` by
-  default), so they nest; `max_import` / `max_export` on its connection to the
-  parent (`max_export: 0` is no backfeed); `efficiency_from_parent` /
-  `efficiency_to_parent` for a converter.
-- `devices`: each device (`battery`, `water_heater`, `hvac`, `deferrableN`) and
-  the PV (`pv`) on a node; the rest are on `grid`.
-- `constraints`: limits on a set of devices wherever they are (a phase, a
-  shared cable), `max_import` / `max_export`.
+- **the main meter**, `id: "grid"`: `max_import` / `max_export` (W).
+- **a node**, any other id — a hybrid inverter, a panel, a breaker, a meter:
+  `max_import` / `max_export` (W) on its connection to its parent
+  (`max_export: 0` is no backfeed), `efficiency_import` / `efficiency_export`
+  for a converter, and a `type`.
+- **a limit**, `type: "limit"`: `max_import` / `max_export` on what the
+  devices tagged with it draw together, wherever they are (a phase, a shared
+  cable); a device joins it with `"limits": ["l1"]`.
+- **a device** — `pv`, `battery`, `deferrableN`, `water_heater`, `hvac`: its
+  `solver` (`emhass`, the default, or `home_energy_optimizer`), its `group`
+  (devices with the same group are planned together by EMHASS's model), its
+  `config` and its `limits`. The PV has a parent and nothing else.
 
 The adapter builds the package's tree (`types.SubMeter`, `SetLimit`) from it:
 
@@ -464,15 +463,18 @@ The adapter builds the package's tree (`types.SubMeter`, `SetLimit`) from it:
 |---|---|---|
 | a node | `SubMeter(id, members, parent=...)`: a bus of its own in the master | `fed_local_price_<id>` |
 | a node of type `hybrid_inverter` on `grid` holding the PV and the battery | the same, and EMHASS fills its own `inverter_*` keys from it, so its own solver plans the same inverter | `fed_local_price_<id>`, and `P_hybrid_inverter` |
-| a constraint | `SetLimit(name, members, ...)`: a row of its own | `fed_limit_price_<name>` (a premium) |
-| `deferrable_load_groups` (EMHASS's key), all its loads in one participant | kept in that participant's own EMHASS model, exactly as EMHASS holds it | — |
-| `deferrable_load_groups`, its loads across participants | a `SetLimit` over those participants (`max_power`) | `fed_limit_price_deferrable0+deferrable1` |
+| the main meter's limits | the coordinator's grid limits, and EMHASS's `maximum_power_from_grid` / `maximum_power_to_grid` | `fed_meter_price` |
+| a limit | `SetLimit(id, members, ...)`: a row of its own | `fed_limit_price_<id>` (a premium) |
+| a `group` | one participant, planned by EMHASS's model with its devices together | its share: `fed_share_<group>` |
+| `deferrable_load_groups` (EMHASS's key), all its loads in one group | kept in that group's own EMHASS model, exactly as EMHASS holds it | — |
+| `deferrable_load_groups`, its loads across groups | a `SetLimit` over those groups (`max_power`) | `fed_limit_price_deferrable0+deferrable1` |
 
-An EMHASS participant group sits on one node, and a constraint holds all of its
-devices or none (the coordinator sees only its total). Without
-`electrical_topology`, EMHASS's own inverter keys still describe one hybrid
-inverter. EMHASS has one PV forecast and one meter, so through EMHASS the PV is
-one array on one node; the library itself takes several (below).
+A group sits on one parent, and a limit holds all of its devices or none (the
+coordinator sees only its total). A device `site` leaves out is planned on its
+own by EMHASS, on the main meter. With no node in `site`, EMHASS's own inverter
+keys still describe one hybrid inverter. EMHASS has one PV forecast and one
+meter, so through EMHASS the PV is one array on one node; the library itself
+takes several (below).
 
 Keep whatever other EMHASS options those deferrable loads already use; they are
 passed through to EMHASS's own model untouched. The battery is read from
@@ -499,21 +501,22 @@ state the battery is in — rather than a plan with λ only along it.
 
 Three details that are easy to get wrong:
 
-- **One `config` per group.** A group's `config` is applied to every device in
-  it, and the two thermal configs share field names (`power_kw`, `t_min`,
-  `n_duty_levels`, …). Grouping `water_heater` and `hvac` together would give the
-  heat pump the tank's `power_kw`. Give each its own participant, as above.
+- **A `config` is one device's.** This package plans each of its devices on its
+  own, so a `home_energy_optimizer` device has no `group`, and its `config` is
+  its own: the two thermal configs share field names (`power_kw`, `t_min`,
+  `n_duty_levels`, …), and grouping them would give the heat pump the tank's
+  `power_kw`. A group of them is refused, by name.
 - **`water_heater` and `hvac` are not EMHASS loads.** They do not come from
   `number_of_deferrable_loads` and have no EMHASS entry; they exist only through
-  a `home_energy_optimizer` participant, configured entirely by its `config`
-  block. Devices this package knows: `battery`, `water_heater`, `hvac`.
+  a `home_energy_optimizer` element of `site`, configured entirely by its
+  `config` block. Devices this package knows: `battery`, `water_heater`, `hvac`.
 - **Thermal devices need thermal forecasts.** The adapter reads
   `outdoor_temperature_forecast` (°C) and `hot_water_demand_kw` (kW) from
   EMHASS's input DataFrame, falling back to a flat 20 °C and no draw. Without
   them the tank and the heat pump plan against constants.
 
-Any EMHASS device you leave out of `participants` becomes its own EMHASS group,
-so a partial list is fine.
+Any EMHASS device you leave out of `site` is planned on its own by EMHASS, on
+the main meter, so a partial list is fine.
 
 ### What comes back
 
@@ -530,8 +533,7 @@ so existing automations and charts keep working. Plus:
 | `fed_stop_reason`, `fed_iterations` | why the coordinator stopped (`converged`, `stalled`, `no new proposals`, `iteration cap`) and after how many rounds |
 | `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
 | `fed_local_price_<id>`, `fed_node_power_<id>` | each node's own price per slot, and its power to its parent (W, + = up the tree) |
-| `fed_limit_price_<name>` | each constraint's premium per slot while it binds |
-| `fed_local_price_<name>` | the price of one more kWh behind a limit the coordinator holds (above), per slot |
+| `fed_limit_price_<id>` | each limit's premium per slot while it binds |
 
 `optim_status` is `Optimal` only when the plan is proven within 0.1% of its
 lower bound; otherwise `Optimal_Inaccurate` — a runnable plan, which EMHASS
@@ -541,8 +543,7 @@ configuration it logs why and sets `fed_fallback_reason` on EMHASS's
 
 The shares are the part no single MILP can give you: `fed_share_solar`,
 `fed_share_battery`, `fed_share_water_heater`, `fed_share_hvac` and
-`fed_share_deferrable0+deferrable1` (a group is one player, named by its
-devices). Each device is first reimbursed what coordination cost it privately,
+`fed_share_loads` (a group is one player, named by its id). Each device is first reimbursed what coordination cost it privately,
 then the surplus is split — an Owen value between solar and the devices,
 Aumann–Shapley among the devices — so the shares and reimbursements add up to the
 saving exactly. `src/home_energy_optimizer/dw/attribution.py` has the derivation.
@@ -555,21 +556,22 @@ than raising. `unsupported()` lists the cases: a `costfun` other than `profit` o
 `cost`, `set_total_pv_sell`, `set_nocharge_from_grid` with a battery,
 `set_battery_first_priority`, more than one battery,
 `heat_topology`, shared thermal tanks, `deferrable_load_groups` with
-`mutual_exclusion` across participants, a node or constraint that splits an
-EMHASS participant group, `group_limits` (read by 0.2.6 from a draft of
-EMHASS's backend; now a node or a constraint of `electrical_topology`),
+`mutual_exclusion` across groups, a group on two parents, a limit that holds
+part of a group, a group of `home_energy_optimizer` devices, a remote solver
+(0.2.9), and `participants`, `electrical_topology` and `group_limits` (read by
+0.2.6 and 0.2.7 from drafts of EMHASS's backend; now said with `site`),
 `cost_forecast_per_deferrable_load`, `set_deferrable_startup_penalty`,
 `deferrable_load_max_cost`, capacity charges, and the `soc_target` family of
 runtime arguments. An export price above the import price in some slot, or a
 coordinator failure, falls back the same way.
 
-A **hybrid inverter** is planned — a `hybrid_inverter` node of
-`electrical_topology`, or EMHASS's own `inverter_is_hybrid` keys without one —
+A **hybrid inverter** is planned — a `hybrid_inverter` node of `site`, or
+EMHASS's own `inverter_is_hybrid` keys without one —
 and the plan carries `P_hybrid_inverter` with EMHASS's meaning (+ DC to AC). It
 still falls back with `set_nodischarge_to_grid` (EMHASS ties the battery to the
 meter's direction then; likewise the battery and the PV on one node),
 `inverter_stress_cost`, an inverter rated only by `pv_inverter_model` name, or
-the battery inside an EMHASS participant group.
+the battery inside an EMHASS group with other devices.
 
 ---
 
