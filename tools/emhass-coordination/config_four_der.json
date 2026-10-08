@@ -1,27 +1,19 @@
 {
   "optimization_backend": "dantzig_wolfe",
-  "participants": [
-    {"devices": ["battery"], "solver": "emhass"},
-    {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"},
-    {
-      "devices": ["water_heater"],
-      "solver": "home_energy_optimizer",
-      "config": {"power_kw": 3.0, "liters": 180.0, "t_comfort": 55.0, "n_duty_levels": 2, "comfort_weight": 10.0}
-    },
-    {
-      "devices": ["hvac"],
-      "solver": "home_energy_optimizer",
-      "config": {"power_kw": 1.5, "cop": 3.5, "c_room_kwh_per_k": 2.5, "r_wall_k_per_kw": 5.0, "t_comfort_low": 21.0, "t_comfort_high": 25.0}
-    }
+  "site": [
+    {"id": "inverter", "parent": "grid", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+     "efficiency_import": 0.97, "efficiency_export": 0.97},
+    {"id": "garage", "parent": "grid", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
+    {"id": "pv", "parent": "inverter"},
+    {"id": "battery", "parent": "inverter"},
+    {"id": "deferrable0", "parent": "garage", "group": "loads"},
+    {"id": "deferrable1", "parent": "garage", "group": "loads"},
+    {"id": "water_heater", "parent": "heat", "solver": "home_energy_optimizer",
+     "config": {"power_kw": 3.0, "liters": 180.0, "t_comfort": 55.0, "n_duty_levels": 2, "comfort_weight": 10.0}},
+    {"id": "hvac", "parent": "heat", "solver": "home_energy_optimizer",
+     "config": {"power_kw": 1.5, "cop": 3.5, "c_room_kwh_per_k": 2.5, "r_wall_k_per_kw": 5.0, "t_comfort_low": 21.0, "t_comfort_high": 25.0}}
   ],
-  "electrical_topology": {
-    "nodes": [
-      {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000, "efficiency_from_parent": 0.97, "efficiency_to_parent": 0.97},
-      {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
-      {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500}
-    ],
-    "devices": {"pv": "inverter", "battery": "inverter", "deferrable0": "garage", "deferrable1": "garage", "water_heater": "heat", "hvac": "heat"}
-  },
   "deferrable_load_groups": [
     {"names": ["deferrable0", "deferrable1"], "max_power": 3000}
   ],

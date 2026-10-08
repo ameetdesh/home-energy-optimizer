@@ -12,11 +12,20 @@ including each player's share of the saving (`fed_share_*`).
 `optimize` returns None, after logging why, whenever the configuration uses
 something it cannot split per device yet; EMHASS then runs its default solver.
 
+`site` is the house in one list: the main meter ("grid"), the nodes behind it
+(an inverter, a panel, a breaker), limits on sets of devices, and the devices,
+each with its parent, its solver, the group it is planned with and its
+settings (`_site`):
+
     "optimization_backend": "dantzig_wolfe",
-    "participants": [
-      {"devices": ["battery"], "solver": "emhass"},
-      {"devices": ["deferrable0", "deferrable1"], "solver": "emhass"},
-      {"devices": ["water_heater"], "solver": "home_energy_optimizer", "config": {...}}
+    "site": [
+      {"id": "inverter", "parent": "grid", "type": "hybrid_inverter",
+       "max_import": 4000, "max_export": 4000},
+      {"id": "pv", "parent": "inverter"},
+      {"id": "battery", "parent": "inverter"},
+      {"id": "deferrable0", "parent": "grid", "group": "loads"},
+      {"id": "deferrable1", "parent": "grid", "group": "loads"},
+      {"id": "water_heater", "parent": "grid", "solver": "home_energy_optimizer", "config": {...}}
     ]
 
 EMHASS works in W, this package in kW; EMHASS's P_batt is + when discharging,
@@ -27,6 +36,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, replace
@@ -149,14 +159,16 @@ def unsupported(optim_conf: dict[str, Any], plant_conf: dict[str, Any], costfun:
         return f"costfun {costfun!r} (supported: profit, cost)"
     if oc.get("set_total_pv_sell"):
         return "set_total_pv_sell"
-    if oc.get("group_limits"):
-        # 0.2.6 read it from a draft of EMHASS's coordinated backend; planning
-        # without its limits would be worse than the default solver
-        return "group_limits (replaced by electrical_topology: a node or a constraint)"
-    named = {d for g in oc.get("participants") or [] for d in g.get("devices", [])}
-    if "battery" in named and not oc.get("set_use_battery"):
+    for old in OLD_KEYS:
+        if oc.get(old):
+            # read by 0.2.6 / 0.2.7 from drafts of EMHASS's coordinated backend;
+            # planning without what they said would be worse than the default solver
+            return f"{old} (replaced by site: one list of the meter, nodes, limits and devices)"
+    elements = [e for e in oc.get("site") or [] if isinstance(e, dict)]
+    homes = {str(e.get("id")): str(e.get("parent", MAIN)) for e in elements if _kind(e) == "device"}
+    if "battery" in homes and not oc.get("set_use_battery"):
         # EMHASS has no battery, so no state of charge or plant_conf to plan one from
-        return "a participant names the battery, but set_use_battery is off"
+        return "site lists the battery, but set_use_battery is off"
     if oc.get("set_use_battery") and oc.get("set_nocharge_from_grid"):
         return "set_nocharge_from_grid (ties the battery to PV)"
     if oc.get("set_battery_first_priority"):
@@ -169,15 +181,12 @@ def unsupported(optim_conf: dict[str, Any], plant_conf: dict[str, Any], costfun:
             return "set_nodischarge_to_grid with a hybrid inverter (no discharge while exporting)"
         if float(pc.get("inverter_stress_cost", 0) or 0) > 0:
             return "inverter_stress_cost"
-        if (not oc.get("electrical_topology") and pc.get("inverter_ac_output_max") is None
+        if (not any(_kind(e) == "node" for e in elements) and pc.get("inverter_ac_output_max") is None
                 and not isinstance(pc.get("pv_inverter_model"), (int, float))):
             return "a hybrid inverter rated by pv_inverter_model (set inverter_ac_output_max)"
-    if oc.get("electrical_topology") and oc.get("set_nodischarge_to_grid"):
+    if oc.get("set_nodischarge_to_grid") and homes.get("pv", MAIN) != MAIN and homes.get("pv") == homes.get("battery"):
         # EMHASS ties a DC-coupled battery to the meter's direction then
-        topo = oc["electrical_topology"]
-        homes = topo.get("devices") or {}
-        if "pv" in homes and any(homes.get(d) == homes["pv"] for d in homes if d.startswith("battery")):
-            return "set_nodischarge_to_grid with the battery and the PV on one node (no discharge while exporting)"
+        return "set_nodischarge_to_grid with the battery and the PV on one node (no discharge while exporting)"
     if int(pc.get("number_of_batteries", 1)) > 1:
         return "more than one battery"
     if oc.get("heat_topology") or oc.get("shared_thermal_tanks"):
@@ -395,162 +404,225 @@ class EmhassParticipant:
 
 
 # ------------------------------------------------------------------ the call
-def _groups(optim_conf: dict[str, Any], devices: list[str]) -> list[dict[str, Any]]:
-    """The participant groups: `optim_conf["participants"]`, with every device
-    in `devices` it leaves out as its own group, solved by EMHASS. With no
-    `participants`, one EMHASS group per device. Each group is a dict with
-    "devices" (names), "solver" and, if given, "config"."""
-    spec = optim_conf.get("participants") or []
-    if not spec:
-        return [{"devices": [d], "solver": "emhass"} for d in devices]
-    seen: set[str] = set()
-    out: list[dict[str, Any]] = []
-    for g in spec:
-        devs = list(g["devices"])
-        seen.update(devs)
-        out.append({"devices": devs, "solver": g.get("solver", "emhass"), "config": g.get("config", {})})
-    for d in devices:                      # a device the spec leaves out stays EMHASS's
-        if d not in seen:
-            out.append({"devices": [d], "solver": "emhass"})
-    return out
+OLD_KEYS = ("participants", "electrical_topology", "group_limits")
+SITE_DEVICE = re.compile(r"^(pv|battery|water_heater|hvac|deferrable[0-9]{1,3})$")
 
 
-TOPOLOGY_KEYS = ("nodes", "devices", "constraints")
+def _kind(element: dict[str, Any]) -> str:
+    """What a `site` element is: "grid" (the main meter), "limit" (a cap on
+    the devices tagged with it), "remote" (a solver on the network), "device"
+    (an EMHASS device name or "pv") or "node" (anything else: an inverter, a
+    panel, a breaker)."""
+    if element.get("id") == MAIN:
+        return "grid"
+    if element.get("type") == "limit":
+        return "limit"
+    if isinstance(element.get("solver"), dict):
+        return "remote"
+    if SITE_DEVICE.match(str(element.get("id", ""))):
+        return "device"
+    return "node"
 
 
-class Tree(NamedTuple):
-    """The site's tree as the coordinator takes it (types.SubMeter, SetLimit),
-    from EMHASS's configuration: `submeters`, `set_limits`; `own_groups`,
-    participant key -> the deferrable_load_groups its own EMHASS model holds;
-    `inverter`, the node EMHASS's inverter keys describe (its AC power is
-    P_hybrid_inverter), or None."""
+class Layout(NamedTuple):
+    """The `site` list as the coordinator takes it. `groups`: the participant
+    groups, each a dict with "key" (its name in the coordinator: the group's
+    id, or the device's), "devices", "solver" and "config". `submeters`,
+    `set_limits`: types.SubMeter / SetLimit over participant keys.
+    `own_groups`: participant key -> the deferrable_load_groups its own EMHASS
+    model holds. `inverter`: the node EMHASS's inverter keys describe (its AC
+    power is P_hybrid_inverter), or None. `grid_w`: the main meter's (import,
+    export) limits in W from `site`, or None (EMHASS's own keys then).
+    `notes`: things worth a warning that do not stop the plan."""
+    groups: list[dict[str, Any]]
     submeters: tuple[SubMeter, ...]
     set_limits: tuple[SetLimit, ...]
     own_groups: dict[str, list[dict[str, Any]]]
     inverter: str | None
+    grid_w: tuple[float | None, float | None] | None
+    notes: tuple[str, ...]
 
 
-def _tree(optim_conf: dict[str, Any], plant_conf: dict[str, Any], groups: list[dict[str, Any]]
-          ) -> tuple[Tree, str | None]:
-    """The site's electrical tree from EMHASS's configuration, and a reason
-    it cannot be planned (or None).
+def _site(optim_conf: dict[str, Any], plant_conf: dict[str, Any], devices: list[str]
+          ) -> tuple[Layout, str | None]:
+    """The house from EMHASS's `site` list, and a reason it cannot be planned
+    (or None).
 
-    `electrical_topology`, when given, is the whole tree: `nodes` (id,
-    parent - another node or "grid", the main meter, by default - type,
-    max_import / max_export in W, efficiency_from_parent /
-    efficiency_to_parent), `devices` (EMHASS device name, or "pv" -> node id)
-    and `constraints` (name, devices, max_import / max_export in W: a limit on
-    what devices draw together, wherever they are). Without it, EMHASS's own
-    inverter keys describe a hybrid inverter, as before. Either way, EMHASS's
-    deferrable_load_groups: a group whose loads are all in one EMHASS
-    participant stays in that participant's own model (mutual exclusion
-    included); otherwise its max_power is a set limit.
+    Each element has an `id` and, but the main meter and limits, a `parent`
+    ("grid", the main meter, or a node's id):
 
-    The coordinator sees an EMHASS participant group only as its total, so a
-    group's devices must sit on one node, and a constraint holds all of them
-    or none.
+    - "grid": the main meter's `max_import` / `max_export` (W).
+    - a node (any other id): `type` (hybrid_inverter, inverter, panel,
+      breaker, meter), `max_import` / `max_export` (W) on its connection to
+      its parent, `efficiency_import` / `efficiency_export`.
+    - a limit (`type: "limit"`): `max_import` / `max_export` (W) on what the
+      devices tagged with it draw together, wherever they are.
+    - a device (`pv`, `battery`, `deferrableN`, `water_heater`, `hvac`):
+      `solver` ("emhass", the default, or "home_energy_optimizer"), `group`
+      (devices with the same group are planned together by EMHASS's model),
+      `config` (home_energy_optimizer's settings) and `limits` (limit ids).
 
-    `groups`: the participant groups (`_groups`).
+    A device `devices` lists that `site` does not is planned alone by EMHASS,
+    on the main meter. With no node in `site`, EMHASS's own inverter keys
+    still describe a hybrid inverter. Either way, EMHASS's
+    deferrable_load_groups: a group whose loads are all in one EMHASS group
+    stays in that group's own model (mutual exclusion included); otherwise
+    its max_power is a set limit.
+
+    The coordinator sees an EMHASS group only as its total, so a group's
+    devices share one parent, and a limit holds all of them or none.
+
+    `devices`: EMHASS's devices (battery, deferrableN).
     """
-    empty = Tree((), (), {}, None)
-    key_of: dict[str, str] = {}
-    whole: dict[str, set[str]] = {}               # a participant key -> all its devices
-    for g in groups:
-        if g["solver"] == "emhass":
-            key = "+".join(g["devices"])
-            whole[key] = set(g["devices"])
-            key_of.update({d: key for d in g["devices"]})
-        else:                                     # the package's devices are separate
-            key_of.update({d: d for d in g["devices"]})
-    own: dict[str, list[dict[str, Any]]] = {}
-    sets: list[SetLimit] = []
-
-    def keys_of(devices: list[str], what: str, everything: bool = True) -> tuple[tuple[str, ...], str | None]:
-        missing = [d for d in devices if d not in key_of]
-        if missing:
-            return (), f"{what} names {missing}, which nothing plans"
-        keys = {key_of[d] for d in devices}
-        if everything:
-            split = sorted(k for k in keys if k in whole and not whole[k] <= set(devices))
-            if split:
-                return (), f"{what} splits the participant {split[0]!r} (it must hold all of its devices or none)"
-        return tuple(sorted(keys)), None
-
-    for g in optim_conf.get("deferrable_load_groups") or []:
-        names = list(g.get("names") or [])
-        inside = [k for k, devs in whole.items() if names and set(names) <= devs]
-        if inside:
-            own.setdefault(inside[0], []).append(g)
-            continue
-        if g.get("mutual_exclusion"):
-            return empty, "deferrable_load_groups: mutual exclusion across participants"
-        if g.get("max_power") is None:
-            continue
-        keys, reason = keys_of(names, f"deferrable_load_groups {names}")
-        if reason:
-            return empty, reason
-        sets.append(SetLimit("+".join(names), keys, max_import_kw=float(g["max_power"]) / 1000.0))
-
-    topo = optim_conf.get("electrical_topology")
-    if not topo:
-        nodes: tuple[SubMeter, ...] = ()
-        if plant_conf.get("inverter_is_hybrid"):
-            # its DC bus: the PV and EMHASS's battery, when the coordinator holds it
-            if "battery" in key_of and key_of["battery"] != "battery":
-                return empty, "a hybrid inverter with the battery in an EMHASS participant group"
-            out_w = plant_conf.get("inverter_ac_output_max")
-            out_w = float(plant_conf["pv_inverter_model"] if out_w is None else out_w)
-            in_w = plant_conf.get("inverter_ac_input_max")
-            nodes = (hybrid_inverter(("battery",) if "battery" in key_of else (),
-                                     out_w / 1000.0, (out_w if in_w is None else float(in_w)) / 1000.0,
-                                     float(plant_conf.get("inverter_efficiency_dc_ac", 1.0)),
-                                     float(plant_conf.get("inverter_efficiency_ac_dc", 1.0))),)
-        return Tree(nodes, tuple(sets), own, "inverter" if nodes else None), None
+    empty = Layout([], (), (), {}, None, None, ())
+    elements = [e for e in optim_conf.get("site") or [] if isinstance(e, dict)]
+    kinds = {k: [e for e in elements if _kind(e) == k] for k in ("grid", "node", "limit", "remote", "device")}
+    if kinds["remote"]:
+        return empty, f"site: {kinds['remote'][0].get('id')!r} is a remote solver, which this version does not plan"
+    for e in kinds["node"] + kinds["device"]:
+        if "parent" not in e:
+            # one tariff, one meter: every row but the meter and the limits
+            # says where it is wired, so the list reads as the tree it is
+            return empty, f"site: {e.get('id')!r} needs a parent ('grid', the main meter, or a node's id)"
 
     def kw(v: Any) -> float | None:
         return None if v is None else float(v) / 1000.0
 
-    ids = [str(nd["id"]) for nd in topo.get("nodes") or []]
-    placed: dict[str, list[str]] = {i: [] for i in ids}
-    for dev, node in (topo.get("devices") or {}).items():
-        if node == MAIN:
+    nodes = {str(e["id"]): e for e in kinds["node"]}
+    limit_ids = [str(e["id"]) for e in kinds["limit"]]
+    notes: list[str] = []
+    parent_of: dict[str, str] = {}               # device -> its parent
+    tags: dict[str, list[str]] = {}              # limit id -> the devices tagged with it
+    groups: dict[str, dict[str, Any]] = {}       # participant key -> its group
+    for e in kinds["device"]:
+        dev = str(e["id"])
+        if dev in parent_of:
+            return empty, f"site lists {dev!r} twice"
+        parent = str(e.get("parent", MAIN))
+        if parent != MAIN and parent not in nodes:
+            return empty, f"site: the parent of {dev!r}, {parent!r}, is no node"
+        parent_of[dev] = parent
+        for lim in e.get("limits") or []:
+            if lim not in limit_ids:
+                return empty, f"site: {dev!r} is tagged with {lim!r}, which is no limit"
+            tags.setdefault(lim, []).append(dev)
+        if dev == "pv":
+            if any(k in e for k in ("solver", "group", "config")):
+                return empty, "site: the PV is a forecast, planned by no solver"
             continue
-        if node not in placed:
-            return empty, f"electrical_topology places {dev!r} on {node!r}, which is no node"
-        placed[node].append(dev)
-    for node, devs in placed.items():
-        plain = [d for d in devs if d != "pv"]
-        keys, reason = keys_of(plain, f"electrical_topology node {node!r}")
+        solver = e.get("solver", "emhass")
+        if solver not in ("emhass", PACKAGE):
+            return empty, f"site: {dev!r} has the unknown solver {solver!r}"
+        if solver == "emhass" and dev not in devices:
+            return empty, f"site lists {dev!r}, which EMHASS does not plan here"
+        if solver == PACKAGE and dev.startswith("deferrable"):
+            return empty, f"site: {PACKAGE} has no solver for {dev!r}"
+        if e.get("config") and solver != PACKAGE:
+            return empty, f"site: {dev!r} has a config, which only {PACKAGE} reads"
+        key = str(e.get("group") or dev)
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {"key": key, "devices": [dev], "solver": solver,
+                           "config": dict(e.get("config") or {}), "parent": parent}
+        elif g["solver"] != solver or solver != "emhass":
+            # this package plans each of its devices on its own, with its own config
+            return empty, f"site: the group {key!r} is planned by EMHASS's model only, one solver for all"
+        elif g["parent"] != parent:
+            return empty, f"site: the group {key!r} sits on {g['parent']!r} and {parent!r} (one parent per group)"
+        else:
+            g["devices"].append(dev)
+    for key, g in groups.items():
+        if key not in g["devices"] and (key in nodes or key in limit_ids or key == MAIN or SITE_DEVICE.match(key)):
+            return empty, f"site: the group {key!r} has the name of an element"
+    for d in devices:                            # a device site leaves out stays EMHASS's
+        if d not in parent_of:
+            groups[d] = {"key": d, "devices": [d], "solver": "emhass", "config": {}, "parent": MAIN}
+            parent_of[d] = MAIN
+
+    key_of = {d: g["key"] for g in groups.values() for d in g["devices"]}
+    whole = {g["key"]: set(g["devices"]) for g in groups.values() if g["solver"] == "emhass"}
+
+    def keys_of(devs: list[str], what: str) -> tuple[tuple[str, ...], str | None]:
+        missing = [d for d in devs if d not in key_of]
+        if missing:
+            return (), f"{what} names {missing}, which nothing plans"
+        keys = {key_of[d] for d in devs}
+        split = sorted(k for k in keys if k in whole and not whole[k] <= set(devs))
+        if split:
+            return (), f"{what} splits the group {split[0]!r} (it must hold all of its devices or none)"
+        return tuple(sorted(keys)), None
+
+    own: dict[str, list[dict[str, Any]]] = {}
+    sets: list[SetLimit] = []
+    for e in kinds["limit"]:
+        lid = str(e["id"])
+        if not tags.get(lid):
+            notes.append(f"the limit {lid!r} has no device tagged with it")
+            continue
+        keys, reason = keys_of(tags[lid], f"site: the limit {lid!r}")
         if reason:
             return empty, reason
-        placed[node] = list(keys) + (["pv"] if "pv" in devs else [])
-    for k, members in whole.items():              # a participant sits on one node
-        homes = {(topo.get("devices") or {}).get(d, MAIN) for d in members}
-        if len(homes) > 1:
-            return empty, f"electrical_topology splits the participant {k!r} across {sorted(homes)}"
-    nodes_out = []
+        sets.append(SetLimit(lid, keys, max_import_kw=kw(e.get("max_import")), max_export_kw=kw(e.get("max_export"))))
+    for dg in optim_conf.get("deferrable_load_groups") or []:
+        names = list(dg.get("names") or [])
+        inside = [k for k, devs in whole.items() if names and set(names) <= devs]
+        if inside:
+            own.setdefault(inside[0], []).append(dg)
+            continue
+        if dg.get("mutual_exclusion"):
+            return empty, "deferrable_load_groups: mutual exclusion across participants"
+        if dg.get("max_power") is None:
+            continue
+        keys, reason = keys_of(names, f"deferrable_load_groups {names}")
+        if reason:
+            return empty, reason
+        sets.append(SetLimit("+".join(names), keys, max_import_kw=float(dg["max_power"]) / 1000.0))
+    if len({s.name for s in sets}) < len(sets):
+        return empty, "two limits have the same name"
+
+    grid_w = None
+    if kinds["grid"]:
+        g0 = kinds["grid"][0]
+        grid_w = (None if g0.get("max_import") is None else float(g0["max_import"]),
+                  None if g0.get("max_export") is None else float(g0["max_export"]))
+    layout_groups = [{k: v for k, v in g.items() if k != "parent"} for g in groups.values()]
+    if not nodes:
+        subs: tuple[SubMeter, ...] = ()
+        if plant_conf.get("inverter_is_hybrid"):
+            # its DC bus: the PV and EMHASS's battery, when the coordinator holds it
+            if "battery" in key_of and key_of["battery"] != "battery":
+                return empty, "a hybrid inverter with the battery in an EMHASS group"
+            out_w = plant_conf.get("inverter_ac_output_max")
+            out_w = float(plant_conf["pv_inverter_model"] if out_w is None else out_w)
+            in_w = plant_conf.get("inverter_ac_input_max")
+            subs = (hybrid_inverter(("battery",) if "battery" in key_of else (),
+                                    out_w / 1000.0, (out_w if in_w is None else float(in_w)) / 1000.0,
+                                    float(plant_conf.get("inverter_efficiency_dc_ac", 1.0)),
+                                    float(plant_conf.get("inverter_efficiency_ac_dc", 1.0))),)
+        return Layout(layout_groups, subs, tuple(sets), own, "inverter" if subs else None, grid_w,
+                      tuple(notes)), None
+
+    on: dict[str, list[str]] = {n: [] for n in nodes}
+    for g in groups.values():
+        if g["parent"] != MAIN:
+            on[g["parent"]].append(g["key"])
+    if parent_of.get("pv", MAIN) != MAIN:
+        on[parent_of["pv"]].append("pv")
+    has_child = {str(e.get("parent", MAIN)) for e in kinds["node"]}
+    subs_out = []
     inverter = None
-    for nd in topo.get("nodes") or []:
-        nid = str(nd["id"])
-        if nd.get("type") == "hybrid_inverter" and inverter is None:
+    for nid, e in nodes.items():
+        if not on[nid] and nid not in has_child:
+            notes.append(f"the node {nid!r} holds nothing")
+        if e.get("type") == "hybrid_inverter" and inverter is None:
             inverter = nid
-        nodes_out.append(SubMeter(nid, tuple(placed[nid]), max_export_kw=kw(nd.get("max_export")),
-                                  max_import_kw=kw(nd.get("max_import")),
-                                  eta_export=float(nd.get("efficiency_to_parent", 1.0)),
-                                  eta_import=float(nd.get("efficiency_from_parent", 1.0)),
-                                  parent=None if nd.get("parent", MAIN) == MAIN else str(nd["parent"])))
-    for c in topo.get("constraints") or []:
-        name = str(c.get("name", ""))
-        keys, reason = keys_of(list(c.get("devices") or []), f"electrical_topology constraint {name!r}")
-        if reason:
-            return empty, reason
-        sets.append(SetLimit(name, keys, max_import_kw=kw(c.get("max_import")), max_export_kw=kw(c.get("max_export"))))
-    seen: dict[str, str] = {}
-    for lim in sets:
-        if lim.name in seen:
-            return empty, f"two limits are named {lim.name!r}"
-        seen[lim.name] = lim.name
-    return Tree(tuple(nodes_out), tuple(sets), own, inverter), None
+        parent = str(e.get("parent", MAIN))
+        subs_out.append(SubMeter(nid, tuple(sorted(on[nid])), max_export_kw=kw(e.get("max_export")),
+                                 max_import_kw=kw(e.get("max_import")),
+                                 eta_export=float(e.get("efficiency_export", 1.0)),
+                                 eta_import=float(e.get("efficiency_import", 1.0)),
+                                 parent=None if parent == MAIN else parent))
+    return Layout(layout_groups, tuple(subs_out), tuple(sets), own, inverter, grid_w, tuple(notes)), None
 
 
 def _config(cls: type[_CfgT], overrides: dict[str, Any]) -> _CfgT:
@@ -663,12 +735,14 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     battery_cfg: BatteryConfig | None = None
     tank_cfg: WaterHeaterConfig | None = None
     hvac_cfg: HvacConfig | None = None
-    groups = _groups(oc, devices)
-    tree, reason = _tree(oc, pc, groups)
+    layout, reason = _site(oc, pc, devices)
     if reason:
         _decline(opt, reason)
         return None
-    own_groups = tree.own_groups
+    for note in layout.notes:
+        log.warning(f"site: {note}")
+    groups = layout.groups
+    own_groups = layout.own_groups
     for g in groups:
         if g["solver"] == "emhass" and g["devices"] == ["battery"] and _linear_battery(oc, pc):
             # EMHASS's battery, as its linear model in the master: the same
@@ -689,7 +763,7 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
             if unknown:
                 _decline(opt, f"EMHASS has no device {unknown}")
                 return None
-            key = "+".join(g["devices"])
+            key = g["key"]
             participants.append(EmhassParticipant(opt, key, "battery" in g["devices"], loads, data_opt,
                                                   soc_init, soc_final, runtime, buy, reach_w,
                                                   load_groups=own_groups.get(key)))
@@ -716,18 +790,20 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     fc = Forecasts(buy=buy, sell=sell, load=load_w / 1000.0, solar=pv_w / 1000.0,
                    outdoor_temp=col("outdoor_temperature_forecast", 20.0),
                    hot_water_demand=col("hot_water_demand_kw", 0.0))
-    grid = GridLimits(max_import_kw=float(pc.get("maximum_power_from_grid", 9000)) / 1000.0,
-                      max_export_kw=float(pc.get("maximum_power_to_grid", 9000)) / 1000.0,
+    imp_w, exp_w = layout.grid_w or (None, None)    # the main meter's, from site, else EMHASS's keys
+    grid = GridLimits(max_import_kw=float(pc.get("maximum_power_from_grid", 9000) if imp_w is None else imp_w) / 1000.0,
+                      max_export_kw=float(pc.get("maximum_power_to_grid", 9000) if exp_w is None else exp_w) / 1000.0,
                       allow_curtailment=bool(pc.get("compute_curtailment", False)))
-    if pc.get("inverter_is_hybrid") and not oc.get("electrical_topology") and any(p.battery for p in participants):
+    if layout.inverter == "inverter" and not any(_kind(e) == "node" for e in oc.get("site") or []) \
+            and any(p.battery for p in participants):
         _decline(opt, "a hybrid inverter with the battery in an EMHASS participant group")
         return None
     site = SiteConfig(horizon=horizon, battery=battery_cfg, water_heater=tank_cfg, hvac=hvac_cfg, grid=grid,
-                      submeters=tree.submeters, set_limits=tree.set_limits)
+                      submeters=layout.submeters, set_limits=layout.set_limits)
     try:
         site.validate()
     except ValueError as exc:                   # a loop, a device twice, a bad rating
-        _decline(opt, f"electrical_topology: {exc}")
+        _decline(opt, f"site: {exc}")
         return None
     ceiling = np.maximum(pv_w - load_w, 0.0) / 1000.0 if oc.get("set_nodischarge_to_grid") else None
     wh = site.water_heater
@@ -742,7 +818,7 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
         return None
 
     res = _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site,
-                   tree.inverter)
+                   layout.inverter)
     try:
         # The saving split needs one more plan, the same devices with no PV
         # (the export ceiling, PV surplus, is then zero).

@@ -11,7 +11,7 @@ Home Assistant.
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_hybrid.json
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 
-    # four DERs on two solvers, on an electrical topology (an inverter, a garage
+    # four DERs on two solvers, wired in one site list (an inverter, a garage
     # panel with no backfeed, a 3.5 kW breaker under it):
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_four_der.json
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
@@ -21,7 +21,7 @@ coordinated backend is not in a released EMHASS yet), adds
 home-energy-optimizer, writes EMHASS's secrets from Home Assistant's own
 settings, and starts the container with `config.json` (next to this script)
 mounted as EMHASS's configuration. That file is where the coordination is
-switched on: `optimization_backend` and `participants`.
+switched on: `optimization_backend` and `site`.
 
 `run` asks EMHASS for a 24 h plan (naive MPC), with the forecasts passed in
 the request, so it needs no sensor history: a demo day aligned to Home
@@ -55,7 +55,7 @@ HERE = Path(__file__).resolve().parent
 BUILD, RUN = HERE / ".build", HERE / ".run"
 EMHASS_REPO = "https://github.com/ameetdesh/emhass.git"
 EMHASS_BRANCH = "federated-all"            # davidusb-geek/emhass#1158
-PACKAGE = "home-energy-optimizer>=0.2.7"
+PACKAGE = "home-energy-optimizer>=0.2.8"
 IMAGE, CONTAINER = "emhass-coordinated", "emhass-coordinated"
 # EMHASS listens on 5000 inside the container. On the host, 5000 is taken by
 # macOS (AirPlay Receiver), so it is published on 5050 by default.
