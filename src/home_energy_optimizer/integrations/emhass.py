@@ -48,6 +48,7 @@ import numpy.typing as npt
 from home_energy_optimizer.dw.attribution import ledger
 from home_energy_optimizer.dw.coordinator import Column, DWCoordinator, DWResult, RunOptions
 from home_energy_optimizer.interface import Answer, Query
+from home_energy_optimizer.remote import PlanWindow, RemoteError, RemoteParticipant
 from home_energy_optimizer.types import (
     BatteryConfig,
     Forecasts,
@@ -110,6 +111,8 @@ OK_STATUSES = ("Optimal", "Optimal (Relaxed)")
 # EMHASS's OK statuses), but not a certified optimum - the coordinator stopped
 # on a stall, its iteration cap, or no new proposals with the bound still open.
 GAP_TOL = 1e-3
+# Seconds a remote solver has for each call before its last plan stands in
+REMOTE_TIMEOUT_S = 30.0
 
 
 def plan_status(upper: float, lower: float) -> str:
@@ -236,12 +239,13 @@ class EmhassParticipant:
     perform_optimization's other keyword arguments; the per-load lists are cut
     to `loads`. `buy`: the import tariff per slot (currency/kWh), for its
     baseline. `reach_w`: grid limits (W) for its own model, sized above every
-    flow the house can make.
+    flow the house can make; None keeps the configured ones (an EMHASS serving
+    its devices to a coordinator elsewhere: they are its own connection's).
     """
 
     def __init__(self, opt: EmhassOptimization, key: str, battery: bool, loads: list[int],
                  data_opt: pd.DataFrame, soc_init: float | None, soc_final: float | None,
-                 runtime: dict[str, Any], buy: np.ndarray, reach_w: float = 1e5,
+                 runtime: dict[str, Any], buy: np.ndarray, reach_w: float | None = 1e5,
                  load_groups: list[dict[str, Any]] | None = None) -> None:
         """Build the participant's own EMHASS model: a copy of `opt`'s
         configuration with only this participant's devices enabled (the
@@ -268,8 +272,9 @@ class EmhassParticipant:
         # The coordinator holds the meter, so the view's own limits must never
         # bind: `reach_w` exceeds every flow the house can make. Not 'infinite':
         # EMHASS uses these as big-M bounds, and a huge one breaks HiGHS.
-        pc["maximum_power_from_grid"] = float(reach_w)
-        pc["maximum_power_to_grid"] = float(reach_w)
+        if reach_w is not None:
+            pc["maximum_power_from_grid"] = float(reach_w)
+            pc["maximum_power_to_grid"] = float(reach_w)
         pc["compute_curtailment"] = False
         # A hybrid inverter is the coordinator's too (a sub-meter in its master):
         # the participant's own model plans its devices on the house's AC bus.
@@ -403,6 +408,44 @@ class EmhassParticipant:
         return self.respond(Query("price_response", self.buy, self.buy))
 
 
+def emhass_participant(opt: EmhassOptimization, data_opt: pd.DataFrame, soc_init: float | None,
+                       soc_final: float | None, key: str = "emhass") -> EmhassParticipant:
+    """All of an EMHASS's own devices as one participant: what an EMHASS
+    serving the participant API answers for (remote.ParticipantService). Its
+    battery (with set_use_battery) and every deferrable load, planned
+    together by its own model, its deferrable_load_groups held there.
+
+    `opt`: that EMHASS's Optimization. `data_opt`: its input DataFrame for
+    the horizon asked about (its index, the tariff its baseline plans at,
+    thermal forecasts). `soc_init`, `soc_final`: its battery's start and
+    end-of-day state of charge (fractions).
+
+    Its own grid limits (maximum_power_from_grid / maximum_power_to_grid) are
+    kept: they are its connection's - a panel's rating, no backfeed - which
+    its model holds in every plan it offers, however big its own devices are.
+    The coordinator holds only what it shares with the rest of the house.
+    """
+    oc = opt.optim_conf
+    loads = list(range(int(oc.get("number_of_deferrable_loads", 0) or 0)))
+    runtime = {"def_total_hours": oc.get("operating_hours_of_each_deferrable_load"),
+               "def_total_timestep": oc.get("operating_timesteps_of_each_deferrable_load"),
+               "def_start_timestep": oc.get("start_timesteps_of_each_deferrable_load"),
+               "def_end_timestep": oc.get("end_timesteps_of_each_deferrable_load")}
+    n = len(data_opt)
+    buy = (np.asarray(data_opt[opt.var_load_cost].values, dtype=float) if opt.var_load_cost in data_opt
+           else np.full(n, 0.2))
+    return EmhassParticipant(opt, key, bool(oc.get("set_use_battery")), loads, data_opt, soc_init, soc_final,
+                             runtime, buy, reach_w=None, load_groups=list(oc.get("deferrable_load_groups") or []))
+
+
+def emhass_description(p: EmhassParticipant) -> dict[str, Any]:
+    """The participant API's Description of `p` (remote.ParticipantService):
+    it answers price responses only, so no household load is sent to it."""
+    devices = (["battery"] if p.battery else []) + [f"deferrable{k}" for k in p.loads]
+    return {"key": p.key, "devices": devices, "max_power_kw": float(p.max_power_kw),
+            "modulating": False, "onoff": bool(p.onoff), "kinds": ["price_response"], "solver": "emhass"}
+
+
 # ------------------------------------------------------------------ the call
 OLD_KEYS = ("participants", "electrical_topology", "group_limits")
 SITE_DEVICE = re.compile(r"^(pv|battery|water_heater|hvac|deferrable[0-9]{1,3})$")
@@ -477,9 +520,7 @@ def _site(optim_conf: dict[str, Any], plant_conf: dict[str, Any], devices: list[
     empty = Layout([], (), (), {}, None, None, ())
     elements = [e for e in optim_conf.get("site") or [] if isinstance(e, dict)]
     kinds = {k: [e for e in elements if _kind(e) == k] for k in ("grid", "node", "limit", "remote", "device")}
-    if kinds["remote"]:
-        return empty, f"site: {kinds['remote'][0].get('id')!r} is a remote solver, which this version does not plan"
-    for e in kinds["node"] + kinds["device"]:
+    for e in kinds["node"] + kinds["device"] + kinds["remote"]:
         if "parent" not in e:
             # one tariff, one meter: every row but the meter and the limits
             # says where it is wired, so the list reads as the tree it is
@@ -531,6 +572,22 @@ def _site(optim_conf: dict[str, Any], plant_conf: dict[str, Any], devices: list[
             return empty, f"site: the group {key!r} sits on {g['parent']!r} and {parent!r} (one parent per group)"
         else:
             g["devices"].append(dev)
+    for e in kinds["remote"]:
+        # a solver on the network: one participant, its devices its own business
+        rid = str(e["id"])
+        parent = str(e.get("parent", MAIN))
+        if parent != MAIN and parent not in nodes:
+            return empty, f"site: the parent of {rid!r}, {parent!r}, is no node"
+        if rid in groups or rid in parent_of:
+            return empty, f"site: {rid!r} names two elements"
+        solver = e["solver"]
+        groups[rid] = {"key": rid, "devices": [rid], "solver": "remote", "parent": parent,
+                       "config": {"url": str(solver.get("url", "")), "token_secret": solver.get("token_secret")}}
+        parent_of[rid] = parent
+        for lim in e.get("limits") or []:
+            if lim not in limit_ids:
+                return empty, f"site: {rid!r} is tagged with {lim!r}, which is no limit"
+            tags.setdefault(lim, []).append(rid)
     for key, g in groups.items():
         if key not in g["devices"] and (key in nodes or key in limit_ids or key == MAIN or SITE_DEVICE.match(key)):
             return empty, f"site: the group {key!r} has the name of an element"
@@ -730,7 +787,9 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     if oc.get("set_use_battery"):
         device_w += max(float(pc["battery_charge_power_max"]), float(pc["battery_discharge_power_max"]))
     reach_w = 2.0 * (float(np.max(np.abs(load_w))) + float(np.max(np.abs(pv_w))) + device_w) + 1000.0
-    participants: list[EmhassParticipant] = []
+    participants: list[EmhassParticipant | RemoteParticipant] = []
+    remotes: list[RemoteParticipant] = []
+    remote_status: dict[str, str] = {}
     targets: dict[str, float] = {}
     battery_cfg: BatteryConfig | None = None
     tank_cfg: WaterHeaterConfig | None = None
@@ -779,10 +838,34 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
                 else:
                     _decline(opt, f"{PACKAGE} has no solver for {d!r}")
                     return None
+        elif g["solver"] == "remote":
+            # a solver on the network: asked to describe itself and plan with no
+            # price now, so one that cannot is left out of this plan, said so
+            key = g["key"]
+            tokens = (getattr(opt, "retrieve_hass_conf", None) or {}).get("remote_tokens") or {}
+            secret = g["config"].get("token_secret")
+            first = getattr(data_opt, "index", [None])[0]
+            window = PlanWindow(dt * 60.0, n, first.isoformat() if hasattr(first, "isoformat") else None)
+            try:
+                rp = RemoteParticipant(key, g["config"]["url"], window, token=tokens.get(secret) if secret else None,
+                                       timeout=REMOTE_TIMEOUT_S)
+                rp.baseline()
+            except (RemoteError, ValueError) as exc:
+                log.warning(f"site: the remote solver {key!r} did not answer ({exc}); planned without it")
+                refused = getattr(exc, "status", 0) in (401, 403)
+                remote_status[key] = "unauthorized" if refused else "unreachable"
+                continue
+            participants.append(rp)
+            remotes.append(rp)
         else:
             _decline(opt, f"unknown solver {g['solver']!r}")
             return None
 
+    gone = set(remote_status)                       # remotes this plan goes without
+    submeters = tuple(replace(sm, members=tuple(m for m in sm.members if m not in gone))
+                      for sm in layout.submeters)
+    set_limits = tuple(sl for sl in (replace(sl, members=tuple(m for m in sl.members if m not in gone))
+                                     for sl in layout.set_limits) if sl.members)
     horizon = Horizon(dt=dt, hours=n * dt)
     def col(name: str, default: float) -> np.ndarray:
         return np.asarray(data_opt[name].values, dtype=float) if name in data_opt else np.full(n, default)
@@ -795,11 +878,11 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
                       max_export_kw=float(pc.get("maximum_power_to_grid", 9000) if exp_w is None else exp_w) / 1000.0,
                       allow_curtailment=bool(pc.get("compute_curtailment", False)))
     if layout.inverter == "inverter" and not any(_kind(e) == "node" for e in oc.get("site") or []) \
-            and any(p.battery for p in participants):
+            and any(isinstance(p, EmhassParticipant) and p.battery for p in participants):
         _decline(opt, "a hybrid inverter with the battery in an EMHASS participant group")
         return None
     site = SiteConfig(horizon=horizon, battery=battery_cfg, water_heater=tank_cfg, hvac=hvac_cfg, grid=grid,
-                      submeters=layout.submeters, set_limits=layout.set_limits)
+                      submeters=submeters, set_limits=set_limits)
     try:
         site.validate()
     except ValueError as exc:                   # a loop, a device twice, a bad rating
@@ -819,6 +902,18 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
 
     res = _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site,
                    layout.inverter)
+    # Each remote runs its part of a live plan; a dry run asks nothing of anyone
+    for rp in remotes:
+        if getattr(opt, "fed_dry_run", False):
+            remote_status[rp.key] = "planned (dry run)"
+            continue
+        chosen = r.plan[rp.key]
+        ok, why = rp.commit(chosen.detail, chosen.power)
+        remote_status[rp.key] = "committed" if ok else f"refused: {why}"[:200]
+        if not ok:
+            log.warning(f"site: the remote solver {rp.key!r} did not take its plan ({why})")
+    for key, status in remote_status.items():
+        res[f"fed_remote_status_{key}"] = status
     try:
         # The saving split needs one more plan, the same devices with no PV
         # (the export ceiling, PV surplus, is then zero).
@@ -850,7 +945,8 @@ def shares(co: DWCoordinator, plan: Mapping[str, Column], co_dark: DWCoordinator
 
 def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
              pv_w: np.ndarray, load_w: np.ndarray, buy: np.ndarray, sell_in: np.ndarray,
-             soc_init: float | None, devices: list[str], participants: list[EmhassParticipant],
+             soc_init: float | None, devices: list[str],
+             participants: Sequence[EmhassParticipant | RemoteParticipant],
              site: SiteConfig, inverter: str | None = None) -> pd.DataFrame:
     """The coordinator's result `r` as EMHASS's opt_res: the same columns and
     units as perform_optimization returns, plus fed_* columns.
@@ -888,6 +984,10 @@ def _results(opt: Any, co: DWCoordinator, r: DWResult, data_opt: pd.DataFrame,
 
     by_load, batt_detail, extra = {}, None, {}
     for p in participants:
+        if isinstance(p, RemoteParticipant):
+            # its devices are its own business: their total, W (+ = drawn)
+            out[f"fed_remote_power_{p.key}"] = plan[p.key].power * 1000.0
+            continue
         res = plan[p.key].detail
         for local, k in enumerate(p.loads):
             by_load[k] = res[f"P_deferrable{local}"].values

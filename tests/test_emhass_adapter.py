@@ -183,13 +183,32 @@ def test_without_a_node_the_inverter_keys_still_describe_it():
     ([{"id": "deferrable5", "parent": "grid"}], {}, "which EMHASS does not plan here"),
     ([{"id": "deferrable0"}], {}, "'deferrable0' needs a parent"),
     ([{"id": "garage", "type": "panel", "max_import": 7400}], {}, "'garage' needs a parent"),
-    ([{"id": "garage_emhass", "parent": "grid", "solver": {"url": "http://emhass-garage:5000/participant"}}], {},
-     "is a remote solver"),
+    ([{"id": "garage_emhass", "solver": {"url": "http://h:5000/participant"}}], {}, "'garage_emhass' needs a parent"),
+    ([{"id": "garage_emhass", "parent": "shed", "solver": {"url": "http://h:5000/participant"}}], {},
+     "is no node"),
+    ([{"id": "deferrable0", "parent": "grid", "group": "r"},
+      {"id": "r", "parent": "grid", "solver": {"url": "http://h:5000/participant"}}], {},
+     "names two elements"),
 ])
 def test_a_site_the_coordinator_cannot_hold_is_refused_by_name(site, oc, problem):
     """Each refusal names its reason, and EMHASS's own solver plans instead."""
     _, reason = _layout(site, oc)
     assert reason is not None and problem in reason
+
+
+def test_a_remote_solver_is_one_participant_where_it_is_wired():
+    """A solver on the network is one participant, keyed by its id, on its
+    parent, counted in the limits it is tagged with; its devices are its own."""
+    remote = {"id": "garage_emhass", "parent": "garage", "limits": ["l1"],
+              "solver": {"url": "http://emhass-garage:5000/participant", "token_secret": "garage_token"}}
+    layout, reason = _layout(FOUR_DER + [remote])
+    assert reason is None
+    g = next(g for g in layout.groups if g["key"] == "garage_emhass")
+    assert g["solver"] == "remote" and g["devices"] == ["garage_emhass"]
+    assert g["config"] == {"url": "http://emhass-garage:5000/participant", "token_secret": "garage_token"}
+    garage = next(sm for sm in layout.submeters if sm.name == "garage")
+    assert set(garage.members) == {"loads", "garage_emhass"}
+    assert layout.set_limits == (SetLimit("l1", ("battery", "garage_emhass", "hvac"), max_import_kw=5.0),)
 
 
 def test_what_does_not_stop_the_plan_is_noted():

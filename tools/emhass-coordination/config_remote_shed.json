@@ -1,0 +1,18 @@
+{
+  "participant_api": {"publish_prefix": "shed_", "key": "shed"},
+  "costfun": "profit",
+  "optimization_time_step": 30,
+  "set_use_pv": false,
+  "set_use_battery": false,
+  "number_of_deferrable_loads": 1,
+  "nominal_power_of_deferrable_loads": [1100],
+  "operating_hours_of_each_deferrable_load": [6],
+  "treat_deferrable_load_as_semi_cont": [true],
+  "set_deferrable_load_single_constant": [false],
+  "start_timesteps_of_each_deferrable_load": [0],
+  "end_timesteps_of_each_deferrable_load": [0],
+  "minimum_power_of_deferrable_loads": [0],
+  "set_deferrable_startup_penalty": [0],
+  "set_deferrable_max_startups": [0],
+  "deferrable_load_max_cost": [0]
+}

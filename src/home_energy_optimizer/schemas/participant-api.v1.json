@@ -5,7 +5,7 @@
     "version": "1.0.0-draft",
     "x-status": "draft",
     "summary": "What a black-box solver serves so a coordinator can plan its device(s) with the rest of the house.",
-    "description": "A participant is one device, or a group of devices its own solver plans together (a vendor's EV charger optimiser, EMHASS in another container, a heat pump's controller). The coordinator never sees its model: it asks what-if questions - 'your cheapest plan if your energy cost these prices' - and, once it has chosen, commits one plan. Queries are side-effect free; only a commit changes what the device does. The bodies are the package's JSON Schemas: device-query.v1.json and device-answer.v1.json (interface.query_to_dict / answer_from_dict). Status: draft - the in-process Python interface (home_energy_optimizer.interface.Participant) is stable; this HTTP transport is on the roadmap (README, 'Roadmap')."
+    "description": "A participant is one device, or a group of devices its own solver plans together (a vendor's EV charger optimiser, EMHASS in another container, a heat pump's controller). The coordinator never sees its model: it asks what-if questions - 'your cheapest plan if your energy cost these prices' - and, once it has chosen, commits one plan. Queries are side-effect free; only a commit changes what the device does. The bodies are the package's JSON Schemas: device-query.v1.json and device-answer.v1.json (interface.query_to_dict / answer_from_dict). The server URL is the API's base, below which /v1/describe and the rest live (an EMHASS serving its devices: http://host:5000/participant). Implemented by home_energy_optimizer.remote: RemoteParticipant (the coordinator's side) and ParticipantService (the solver's, for any HTTP host). Status: draft."
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "servers": [
@@ -29,13 +29,15 @@
       "post": {
         "operationId": "baseline",
         "summary": "A feasible plan with no price given: what it would do uncoordinated (its thermostat, its plan at the import tariff).",
+        "parameters": [{"$ref": "#/components/parameters/QueryId"}],
         "requestBody": {"required": true,
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Horizon"}}}},
         "responses": {
           "200": {"description": "Its baseline plan.",
                   "content": {"application/json": {"schema": {"$ref": "device-answer.v1.json"}}}},
           "400": {"$ref": "#/components/responses/Problem"},
-          "401": {"$ref": "#/components/responses/Problem"}
+          "401": {"$ref": "#/components/responses/Problem"},
+          "409": {"$ref": "#/components/responses/Problem"}
         }
       }
     },
@@ -43,12 +45,8 @@
       "post": {
         "operationId": "query",
         "summary": "Answer one what-if question. MUST NOT change what the device does or will do.",
-        "description": "price_response is the question Dantzig-Wolfe asks - typically a few dozen per plan, so answer in well under a second. best_response carries the rest of the house's load (residual_kw); a participant run by a third party SHOULD NOT be sent it, as it reveals the household's behaviour. proximal is ADMM's step. A participant that cannot solve answers with a plan it can run and status 'fallback' (the coordinator then proves no bound from it), never with an error.",
-        "parameters": [
-          {"name": "Query-Id", "in": "header", "required": false,
-           "description": "The coordinator's id for this query, so a later commit can name the plan it chose.",
-           "schema": {"type": "string", "maxLength": 64}}
-        ],
+        "description": "price_response is the question Dantzig-Wolfe asks - typically a few dozen per plan, so answer in well under a second; its price_draw and price_supply may differ (what drawing costs and supplying is worth at the participant's connection). best_response carries the rest of the house's load (residual_kw): it is sent only to a participant that lists it among its kinds, as it reveals the household's behaviour. proximal is ADMM's step. A horizon the participant cannot plan (another slot length) is 409. A participant that cannot solve answers with a plan it can run and status 'fallback' (the coordinator then proves no bound from it), never with an error.",
+        "parameters": [{"$ref": "#/components/parameters/QueryId"}],
         "requestBody": {"required": true,
                         "content": {"application/json": {"schema": {"$ref": "device-query.v1.json"}}}},
         "responses": {
@@ -56,6 +54,7 @@
                   "content": {"application/json": {"schema": {"$ref": "device-answer.v1.json"}}}},
           "400": {"$ref": "#/components/responses/Problem"},
           "401": {"$ref": "#/components/responses/Problem"},
+          "409": {"$ref": "#/components/responses/Problem"},
           "422": {"$ref": "#/components/responses/Problem"}
         }
       }
@@ -77,18 +76,25 @@
       "post": {
         "operationId": "commit",
         "summary": "The plan the coordinator chose: run it. The only call with an effect.",
+        "description": "Names the answer chosen by its Query-Id (query_id) and repeats its plan; the participant runs that answer as it gave it, and refuses (409) a query_id it did not answer on this horizon or a plan_kw that is not that answer's.",
         "requestBody": {"required": true,
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Commit"}}}},
         "responses": {
           "200": {"description": "Accepted, or refused with a reason (the coordinator then re-plans without it).",
                   "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommitResult"}}}},
           "400": {"$ref": "#/components/responses/Problem"},
-          "401": {"$ref": "#/components/responses/Problem"}
+          "401": {"$ref": "#/components/responses/Problem"},
+          "409": {"$ref": "#/components/responses/Problem"}
         }
       }
     }
   },
   "components": {
+    "parameters": {
+      "QueryId": {"name": "Query-Id", "in": "header", "required": false,
+                  "description": "The coordinator's id for this answer, so a later commit can name the plan it chose.",
+                  "schema": {"type": "string", "maxLength": 64}}
+    },
     "securitySchemes": {
       "mutualTLS": {"type": "mutualTLS",
                     "description": "Preferred on a local network: both ends present certificates (a Matter fabric or EEBus SHIP pairing can issue them)."},
@@ -122,7 +128,7 @@
                     "description": "Its plans are on/off schedules: fix it to one plan before re-pricing the others."},
           "kinds": {"type": "array", "uniqueItems": true, "minItems": 1,
                     "items": {"enum": ["price_response", "best_response", "proximal"]},
-                    "description": "The query kinds it answers; price_response is required for Dantzig-Wolfe."},
+                    "description": "The query kinds it answers; price_response is required for Dantzig-Wolfe. Listing best_response agrees to be sent the rest of the house's load."},
           "max_slots": {"type": "integer", "minimum": 1},
           "step_minutes": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0},
                            "description": "Slot lengths it supports."},

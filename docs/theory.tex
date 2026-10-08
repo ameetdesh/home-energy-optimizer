@@ -617,8 +617,11 @@ energy concave in power, the store ends with at least the blended energy. An
 on/off element cannot run a blend, nor can an HVAC (a blend could mix heating
 with cooling) or an EV whose charger has a minimum power. For those, the last
 step picks one offer per device from the pool by re-solving \eqref{eq:master}
-with $w_{kj} \in \{0,1\}$: a small MILP over a few dozen offers, solved by the
-package's own branch and bound.
+with $w_{kj} \in \{0,1\}$: a small MILP over a few dozen offers, solved by
+HiGHS when scipy is installed and by the package's own branch and bound
+otherwise. The branch and bound stops at a node limit, and with several on/off
+devices sharing a rating that matters: it stopped on a pick that breached a
+panel's rating while a feasible one, cheaper by the breach, was in the pool.
 
 \subsection{The algorithm}
 
@@ -1185,6 +1188,27 @@ recovered again. The bound is untouched (the master stays a relaxation); on the
 test sites the fixed plan cost the same as the relaxed one, the loop having
 been one of several optima.
 
+\paragraph{Black boxes behind a rating.} A participant answered by a model the
+coordinator cannot see --- EMHASS's, or a remote solver's --- prices its own
+plan; it cannot be told a rating. The master's prices are right for a mix of
+its plans, and recovery must pick one, so a pool of plans each of which is
+right only for some mix of the others can leave every pick breaching the
+rating. Three things give recovery a pick that holds. A participant behind a
+node is also asked at its connection's marginal prices given the others' plans
+(the cost $\partial^+ C$ of drawing and the value $\partial^- C$ of supplying
+there, every rating on its way and the meter's tariff in them, the household's
+load never sent), and, behind a node that caps what it sends up, for a plan
+that never sends power up (supplying priced the breach price below drawing):
+that plan fits whatever the others do. A recovered plan that still breaches is
+repaired: each device behind a rated node is asked again against the plans the
+others will actually run, a participant at the secant price of its whole power
+$\bar p$, $(C(\bar p) - C(0))/\bar p$ --- the derivative at zero cannot tell a
+7~kW charger that a slot with 3~kW of headroom costs it the breach --- and the
+plan is recovered again, kept only if it scores better. A participant's own
+connection's limits (a panel's rating, no backfeed) are best held in its own
+model, where every plan it offers holds them. All of this adds columns only:
+the bound is untouched.
+
 \subsection{In ADMM and in the fast tier}
 
 In proximal message passing the house is a network \cite{kraning2014}: each bus is
@@ -1240,15 +1264,17 @@ evening.
 rating & DW cost & bound & ADMM & PV clipped & solar & battery & water heater \\
 \midrule
 none  & $-3.555$ & $-3.574$ & $-3.495$ & $0.00$  & $10.726$ & $2.482$ & $2.964$ \\
-5~kW  & $-2.952$ & $-2.964$ & $-2.946$ & $1.68$  & $9.533$  & $3.130$ & $2.907$ \\
-4~kW  & $-1.812$ & $-1.864$ & $-1.790$ & $7.53$  & $8.541$  & $3.066$ & $2.823$ \\
-3~kW  & $-0.142$ & $-0.532$ & $-0.127$ & $14.78$ & $7.179$  & $2.784$ & $2.797$ \\
-2.5~kW & $0.865$ & $0.210$  & $0.887$  & $18.91$ & $6.312$  & $2.622$ & $2.820$ \\
+5~kW  & $-2.952$ & $-2.964$ & $-2.946$ & $2.55$  & $9.533$  & $3.130$ & $2.907$ \\
+4~kW  & $-1.812$ & $-1.864$ & $-1.790$ & $9.20$  & $8.541$  & $3.066$ & $2.823$ \\
+3~kW  & $-0.142$ & $-0.532$ & $-0.127$ & $17.09$ & $7.179$  & $2.784$ & $2.797$ \\
+2.5~kW & $0.865$ & $0.210$  & $0.887$  & $21.57$ & $6.312$  & $2.622$ & $2.820$ \\
 \bottomrule
 \end{tabular}
 \caption{A hybrid inverter's rating swept (\texttt{bench/hybrid\_inverter.py}):
 cost (cur/day) of the Dantzig--Wolfe plan and its bound, of ADMM's plan, PV
-clipped (kWh), and the net gains of the saving split. Wherever PV is clipped the
+clipped (kWh) --- one of several plans of the same cost: PV the battery would
+not need is clipped or stored first, at no difference --- and the net gains of
+the saving split. Wherever PV is clipped the
 inverter bus's price is $0$. The gap that opens at tight ratings is the on/off
 water heater's: the relaxed master runs it at part power on exactly the spare
 AC capacity, which no on/off plan can; with a modulating element it closes.}

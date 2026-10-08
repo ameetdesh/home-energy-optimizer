@@ -5448,14 +5448,91 @@ class DWCoordinator:
         buy = np.maximum(view.buy, price_kwh)          # its grid connection's tariff
         sell = np.minimum(view.sell, price_kwh)
         if dev.kind == "participant":
-            if bus is not None or view.root != MAIN:
-                # a participant answers a residual at the meter, not a bus:
-                # its bus's price (price_kwh, from price_of) says it all
-                return replace(self.price_oracle(dev, price_kwh), source="load_aware")
+            if bus is not None or view.root != MAIN or not getattr(dev.participant, "takes_residual", True):
+                # Told no household load, it is asked at its connection's
+                # marginal prices given everyone else's plans: what one more kWh
+                # drawn there costs, what one more supplied is worth - the
+                # meter's tariff and every rating on its way in them. Behind a
+                # panel that cannot export, supplying is then worth the breach
+                # price wherever the panel is full, and it plans accordingly.
+                draw, supply = self._marginal_prices(bus, residual, buy, sell)
+                return self._ask(dev, Query("price_response", draw, supply), "load_aware")
             return self._ask(dev, Query("best_response", buy, sell, residual_kw=residual), "load_aware")
         sol = self._solve(dev, buy, sell, dp_load=residual, bus=bus)
         return Column(sol.power.copy(), sol.trajectory.copy(),
                       self.private_cost(dev, sol.trajectory), "load_aware")
+
+    def _capped(self, key: str) -> bool:
+        """Whether device `key` sits behind a rated node or counts in a set limit."""
+        chain = self.topo.chain(self.cfg.bus_of(key))
+        return (any(self.topo.sm[n].max_export_kw is not None or self.topo.sm[n].max_import_kw is not None
+                    for n in chain)
+                or any(key in lim.members for lim in self.cfg.set_limits))
+
+    def _repair(self, plan: dict[str, Column], integer: str, rounds: int = 3) -> dict[str, Column]:
+        """A recovered plan that still breaches a rating, repaired: each device
+        behind a rated node is asked again against the plans the others will
+        actually run (not a mix of them) - a participant at the secant prices
+        of its whole power, so an EV of 7 kW sees that a slot with 3 kW of
+        headroom costs it the breach - and the plan is recovered again from
+        the larger pool, kept only if it scores better. Up to `rounds` times."""
+        for _ in range(rounds):
+            if self.parts(plan)["breach_kwh"] <= 1e-6:
+                break
+            added = 0
+            for dev in self.devices:
+                if not self._capped(dev.key):
+                    continue
+                others = {k: c.power for k, c in plan.items() if k != dev.key}
+                added += dev.add(self.load_aware_oracle(dev, others, self.fc.buy))
+                if dev.kind == "participant":
+                    view = device_bus(self.cfg, self.fc, dev.key, others)
+                    q = max(float(dev.participant.max_power_kw), 1e-3)
+                    draw, supply = self._marginal_prices(view.bus, view.dp_load, view.buy, view.sell, eps=q)
+                    added += dev.add(self._ask(dev, Query("price_response", draw, supply), "repair"))
+            if not added:
+                break
+            _, lam, _, _, bp = self.solve_master()
+            new = self.recover(integer, self.split_weights(lam), bp)
+            if self.score(new) >= self.score(plan) - 1e-9:
+                break
+            plan = new
+        return plan
+
+    def _add_contained(self, dev: Device, price_kwh: np.ndarray) -> int:
+        """For a participant behind a node that caps what it may send up: its
+        plan at `price_kwh` when supplying is worth the breach price less than
+        drawing - one that never sends power up. A plan whose discharge fits
+        the others' current mix may not fit the plans recovery picks for them
+        (two on/off devices behind a panel that cannot feed back); this one
+        fits any. Returns how many columns were added (0 or 1)."""
+        if dev.kind != "participant":
+            return 0
+        capped = any(self.topo.sm[node].max_export_kw is not None
+                     for node in self.topo.chain(self.cfg.bus_of(dev.key)))
+        if not capped:
+            return 0
+        penalty = breach_price(self.cfg.grid, self.fc.buy, self.fc.sell)
+        return dev.add(self._ask(dev, Query("price_response", price_kwh, price_kwh - penalty), "contained"))
+
+    def _marginal_prices(self, bus: Bus | None, residual: np.ndarray, buy: np.ndarray, sell: np.ndarray,
+                         eps: float = 1e-3) -> tuple[np.ndarray, np.ndarray]:
+        """Per slot, currency/kWh: what one more kWh drawn by a device on
+        `bus` (None: at the meter) costs, and what one more kWh it supplies
+        is worth, with `residual` the rest of its meter and `buy` / `sell`
+        that meter's prices; breach of any rating on the way included."""
+        draw, supply = np.empty(self.n), np.empty(self.n)
+        for t in range(self.n):
+            q = np.array([0.0, eps, -eps])
+            if bus is None:
+                at_meter, over = q, np.zeros(3)
+            else:
+                at_meter, over = bus_cost(q, t, bus)
+            imp = at_meter + residual[t]
+            cost = buy[t] * np.maximum(imp, 0.0) - sell[t] * np.maximum(-imp, 0.0) + over
+            draw[t] = (cost[1] - cost[0]) / eps
+            supply[t] = (cost[0] - cost[2]) / eps
+        return draw, supply
 
     def _add_variants(self, dev: Device, sol: DeviceSolution, col: Column,
                       price_kwh: np.ndarray, keep: int, flex_out: dict | None) -> int:
@@ -5655,8 +5732,9 @@ class DWCoordinator:
     def _choose(self, c: np.ndarray, A: Triplets, b: np.ndarray, lb: np.ndarray,
                 ub: np.ndarray, groups: list[np.ndarray], time_limit: float,
                 node_limit: int = 150, border: int = 0) -> tuple[np.ndarray, float]:
-        """The recovery MILP: one plan per group. -> (x, fun)."""
-        if self.solver == "highs":
+        """The recovery MILP: one plan per group. -> (x, fun). HiGHS, exact,
+        when scipy is there; else the numpy branch and bound, to `node_limit`."""
+        if self.solver == "highs" or _have_scipy():
             from scipy import sparse
             from scipy.optimize import Bounds, LinearConstraint, milp
             r, k, v = A.coo()
@@ -6295,6 +6373,7 @@ class DWCoordinator:
                     if heuristic_columns:
                         others = {k: v for k, v in powers.items() if k != d.key}
                         added += d.add(self.load_aware_oracle(d, others, self.price_of(pi, d) / dt))
+                        added += self._add_contained(d, self.price_of(pi, d) / dt)
             history.append({"iter": f"dive {k + 1}", "rmp": rmp, "lb": history[-1]["lb"] if history else -np.inf,
                             "gap": np.nan, "columns": sum(len(d.columns) for d in self.devices), "added": added,
                             "ms": (time.perf_counter() - t0) * 1000})
@@ -6472,6 +6551,7 @@ class DWCoordinator:
                 for dev in self.devices:
                     others = {k: v for k, v in powers.items() if k != dev.key}
                     added += dev.add(self.load_aware_oracle(dev, others, self.price_of(pi, dev) / dt))
+                    added += self._add_contained(dev, self.price_of(pi, dev) / dt)
 
             gap = rmp - best_lb
             if snap is not None and flex:
@@ -6541,6 +6621,7 @@ class DWCoordinator:
             _, lam_f, _, _, bplans_f = self.solve_master()
             plan = self.recover(integer, self.split_weights(lam_f), bplans_f)
         self.link_fix = {}
+        plan = self._repair(plan, integer)
         upper = self.score(plan)
         if polish:
             plan, upper = self.polish(plan)
@@ -6567,6 +6648,12 @@ class DWCoordinator:
             local_prices=self.local_prices(shown),
             limit_prices=self.limit_prices(shown),
         )
+
+
+def _have_scipy() -> bool:
+    """Whether scipy (HiGHS) can be imported: the recovery MILP's exact solver."""
+    import importlib.util
+    return importlib.util.find_spec("scipy") is not None
 
 
 def site_battery_extras(cfg: SiteConfig, trajs: dict[str, np.ndarray]) -> float:
