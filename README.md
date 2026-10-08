@@ -457,6 +457,9 @@ solver, its group and its settings in one entry:
   `solver` (`emhass`, the default, or `home_energy_optimizer`), its `group`
   (devices with the same group are planned together by EMHASS's model), its
   `config` and its `limits`. The PV has a parent and nothing else.
+- **a remote solver** — any id, with `"solver": {"url": ..., "token_secret": ...}`:
+  another EMHASS, or any solver on the network, one participant at its
+  `parent` ("Remote solvers", below).
 
 The adapter builds the package's tree (`types.SubMeter`, `SetLimit`) from it:
 
@@ -535,6 +538,7 @@ so existing automations and charts keep working. Plus:
 | `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
 | `fed_local_price_<id>`, `fed_node_power_<id>` | each node's own price per slot, and its power to its parent (W, + = up the tree) |
 | `fed_limit_price_<id>` | each limit's premium per slot while it binds |
+| `fed_remote_power_<id>`, `fed_remote_status_<id>` | each remote solver's power (W, + = drawn) and what became of it: `committed`, `refused: …`, `unreachable`, `unauthorized`, `planned (dry run)` |
 
 `optim_status` is `Optimal` only when the plan is proven within 0.1% of its
 lower bound; otherwise `Optimal_Inaccurate` — a runnable plan, which EMHASS
@@ -558,8 +562,7 @@ than raising. `unsupported()` lists the cases: a `costfun` other than `profit` o
 `set_battery_first_priority`, more than one battery,
 `heat_topology`, shared thermal tanks, `deferrable_load_groups` with
 `mutual_exclusion` across groups, a group on two parents, a limit that holds
-part of a group, a group of `home_energy_optimizer` devices, a remote solver
-(0.2.9), and `participants`, `electrical_topology` and `group_limits` (read by
+part of a group, a group of `home_energy_optimizer` devices, and `participants`, `electrical_topology` and `group_limits` (read by
 0.2.6 and 0.2.7 from drafts of EMHASS's backend; now said with `site`),
 `cost_forecast_per_deferrable_load`, `set_deferrable_startup_penalty`,
 `deferrable_load_max_cost`, capacity charges, and the `soc_target` family of
@@ -573,6 +576,83 @@ still falls back with `set_nodischarge_to_grid` (EMHASS ties the battery to the
 meter's direction then; likewise the battery and the PV on one node),
 `inverter_stress_cost`, an inverter rated only by `pv_inverter_model` name, or
 the battery inside an EMHASS group with other devices.
+
+### Remote solvers: another EMHASS, or any solver on the network
+
+A participant need not run in the coordinator's process. A solver in another
+container or device — another EMHASS planning the garage's EV and battery, a
+vendor's EV-charging optimiser, a heat pump's controller — joins as one element
+of `site`, without sharing its model:
+
+```json
+{"id": "garage_emhass", "parent": "garage",
+ "solver": {"url": "http://emhass-garage:5000/participant", "token_secret": "garage_token"}}
+```
+
+It is one participant, wired at its `parent`, counted in the `limits` it is
+tagged with; its devices are its own business (it answers with their total).
+`token_secret` names the secret in this EMHASS's `secrets_emhass.yaml` that
+holds its token. A remote is accepted from the configuration only: a `site`
+sent with a request may not name one, so no request makes EMHASS call a host of
+its choosing.
+
+**Serving an EMHASS's devices** to a coordinator elsewhere: set
+`participant_api` in its configuration (`{"publish_prefix": "garage_"}`: the
+sensors a committed plan is published to, so two EMHASS on one Home Assistant
+do not collide) and `participant_token` in its secrets. It then answers at
+`/participant/v1/…` from its own model: its battery (its state of charge read
+from its `sensor_battery_state_of_charge`) and its deferrable loads, planned
+together, within its own connection's limits (`maximum_power_from_grid` /
+`maximum_power_to_grid` — a panel's rating, no backfeed — which its every plan
+holds, however big its EV). The coordinator holds what it shares with the rest
+of the house. Only a commit has an effect: the plan chosen is published as a
+run of its own would be; a dry run commits nothing.
+
+**The API** (`home_energy_optimizer.remote`; `schemas/participant-api.v1.json`,
+OpenAPI 3.1, draft): `GET /v1/describe` (its key, its devices, its most power,
+on/off or modulating, which query kinds it answers), `POST /v1/baseline` (a
+plan with no price), `POST /v1/query` (one what-if: a price response, the
+packaged `device-query.v1` / `device-answer.v1` bodies) and `POST /v1/commit`
+(the answer chosen, by its `Query-Id`). `RemoteParticipant` is the
+coordinator's side; `ParticipantService` the solver's, for any HTTP host
+(EMHASS serves it from its own web server); `serve` runs it on the standard
+library's server, for this package's own models and for tests.
+
+What a remote solver must promise:
+
+- **Queries are what-ifs.** Answering never changes what the device does; only
+  a commit does.
+- **Always answer.** If its solve fails it answers with a plan it can run and
+  status `fallback`; the coordinator uses the plan but proves no bound from it.
+  A timeout is treated the same way, with its last good plan.
+- **Answer price responses quickly** — a plan takes a few dozen of them — and
+  the same question the same way.
+- **Report its private cost honestly** (comfort, wear, energy left in store, a
+  missed goal), in currency; the coordinator's bound and the saving split rely
+  on it.
+
+And what the coordinator promises it: prices only. A remote is sent the rest of
+the house's load (a best response) only if it lists `best_response` among the
+kinds it answers; otherwise it is asked at its connection's marginal prices —
+what drawing costs and supplying is worth there, given everyone else's plans —
+which carry the tariff and every rating without the household's behaviour.
+
+**When one does not answer**, the house is planned without it, the log says so,
+and the plan says `fed_remote_status_<id>` = `unreachable` (`unauthorized` for a
+refused token); its own last plan keeps running, which this plan does not count.
+The plan carries each remote's power (`fed_remote_power_<id>`, W) and its
+status (`committed`, `refused: …`, `planned (dry run)`).
+
+**Several on/off devices behind one rating** — two remotes and a water heater
+behind a panel — are where coordinating black boxes is hardest: the master's
+prices are right for a mix of their plans, and recovery must pick one plan
+each. Three things keep the pick within the rating: participants behind a node
+are also asked at its marginal prices and for a plan that never sends power up;
+a recovered plan that still breaches is repaired against the others' fixed
+plans (a participant asked at the secant price of its whole power); and the
+recovery MILP is solved exactly (HiGHS, when scipy is installed).
+`tools/emhass-coordination` runs it with two remote EMHASS on one Home
+Assistant (`--remote`).
 
 ---
 
@@ -680,44 +760,8 @@ first forecast slot to what was just measured and decaying back over four slots.
 
 ## Roadmap
 
-### Remote participants: black-box solvers over the network
-
-Today every participant runs in the coordinator's process, as Python
-(`interface.Participant`: EMHASS's model, this package's DPs). Next, a solver
-in another process, container or device — a vendor's EV-charging optimiser, a
-heat pump's controller, EMHASS in its own container — should join without
-sharing its model. The contract is the one the coordinator already speaks:
-
-- **JSON Schemas** (stable, packaged): `schemas/device-query.v1.json` (a
-  price response, a best response, or ADMM's proximal step: prices per slot,
-  the horizon) and `schemas/device-answer.v1.json` (the plan in kW per slot, its
-  private cost, its state trajectory, a status). `interface.query_to_dict` /
-  `answer_from_dict` convert.
-- **OpenAPI 3.1** (draft): `schemas/participant-api.v1.json` puts them on HTTP —
-  `GET /v1/describe` (its key, its devices, its most power, whether it
-  modulates or is on/off, which query kinds it answers, its slot lengths),
-  `POST /v1/baseline` (a plan with no price), `POST /v1/query` (one what-if
-  question), optional `POST /v1/blend` (a weighted mix of its plans, for a
-  modulating participant) and `POST /v1/commit` (the plan chosen: the only call
-  with an effect). `interface.schema("participant-api")` loads it.
-
-What a remote solver must promise:
-
-- **Queries are what-ifs.** Answering never changes what the device does; only
-  a commit does. EMHASS's `dry_run` is this for EMHASS.
-- **Always answer.** If its solve fails it answers with a plan it can run and
-  status `fallback`; the coordinator uses the plan but proves no bound from it.
-  A timeout is treated the same way, with its last good plan.
-- **Answer price responses quickly** — a plan takes a few dozen of them — and
-  the same question the same way.
-- **Report its private cost honestly** (comfort, wear, energy left in store, a
-  missed goal), in currency; the coordinator's bound and the saving split rely
-  on it.
-
-And what the coordinator promises it: prices only. A third-party participant
-is never sent `best_response` (it carries the rest of the house's load); the
-transport is local (mutual TLS on the LAN, or a paired token), and the
-coordinator keeps no more than its answers.
+Remote solvers - a participant in another process, container or device, over
+the participant API - are no longer on it: see "Remote solvers" above.
 
 ### Which standards make sense to connect, and how
 
@@ -779,6 +823,7 @@ src/home_energy_optimizer/     the package (import home_energy_optimizer)
   feeds.py         real forecast inputs
   ha.py            Home Assistant publishing
   integrations/    emhass.py: EMHASS's devices as coordinated participants
+  remote.py        participants over HTTP: RemoteParticipant, ParticipantService, serve
   battery/         webapi.py: the single-battery page's backend
   evcc.py          evcc optimizer wire contract
   profiles.py      synthetic forecasts for tests and demos

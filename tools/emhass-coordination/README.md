@@ -167,6 +167,40 @@ device's `"limits": ["l1"]`), and deeper nesting work the same way; EMHASS's
 [`coordinated_backend.md`](https://github.com/ameetdesh/emhass/blob/federated-all/docs/coordinated_backend.md)
 has the full schema.
 
+## Remote solvers: more EMHASS, one Home Assistant
+
+Two more EMHASS serve their devices to this one over the participant API: the
+garage's (an EV charger, 7 kW for 2 h, and a 5 kWh battery) and the shed's (a
+pool pump, 1.1 kW for 6 h). This EMHASS plans the house with them - its own
+battery, loads and tank - behind a 7.4 kW garage panel with no backfeed and a
+7 kW limit shared by the tank and the garage:
+
+```bash
+python tools/emhass-coordination/coordinate.py up --config config_remote_two.json \
+    --remote garage=config_remote_garage.json --remote shed=config_remote_shed.json
+python tools/emhass-coordination/coordinate.py run --pv-peak 8000
+```
+
+`up --remote NAME=CONFIG` (repeatable) starts each remote from the same image
+on a Docker network of its own (`emhass-coord`), so this EMHASS reaches it by
+name (`http://emhass-coordinated-garage:5000/participant`); each gets its own
+data folder, a token of its own in its secrets (`participant_token`), and this
+EMHASS gets that token as `<name>_token`, which its `site` names
+(`token_secret`). A remote's configuration switches the API on
+(`participant_api`, with the prefix its sensors are published under) and holds
+its own connection's limits (`maximum_power_from_grid` / `_to_grid`). A demo
+battery's state of charge is written to Home Assistant as the sensor the remote
+reads (`sensor_battery_state_of_charge`).
+
+`run` then adds each remote's status, energy and peak power, and reads back the
+sensors each one published for the plan it was asked to run
+(`sensor.garage_p_deferrable0`, `sensor.garage_soc_batt_forecast`, ...).
+[`config_remote_one.json`](config_remote_one.json) is the same house with the
+garage only. To see a remote refused, `up ... --bad-token garage` gives this
+EMHASS a wrong token for it; `docker stop emhass-coordinated-shed` takes one
+away - the house is planned without it either way, and the plan says so
+(`fed_remote_status_<id>`). `down` removes them all.
+
 ## What the script handles for you
 
 - **The EMHASS image.** EMHASS's Dockerfile installs no optional extras, so
@@ -181,6 +215,10 @@ has the full schema.
 - **Port 5000** is taken on macOS (AirPlay Receiver), so EMHASS is on 5050.
 - **A silent fallback.** If EMHASS planned without the coordinator, `run` says
   so and names the option that caused it.
+- **A dependency without a wheel.** EMHASS's image locks its dependencies at
+  build time and syncs to that lock on every start, so a release missing a
+  wheel breaks a fresh image (orjson 3.13.0 has none for Linux arm64 yet); `up`
+  locks orjson at 3.12.0.
 
 ## Where the coordination is switched on
 

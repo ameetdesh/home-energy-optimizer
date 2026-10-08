@@ -16,6 +16,12 @@ Home Assistant.
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_four_der.json
     HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
 
+    # remote solvers: two more EMHASS, each serving its devices to this one
+    # (the garage's EV and battery, the shed's pool pump), on one Home Assistant:
+    HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up --config config_remote_two.json \
+        --remote garage=config_remote_garage.json --remote shed=config_remote_shed.json
+    HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --pv-peak 8000
+
 `up` builds EMHASS from the branch of davidusb-geek/emhass#1158 (the
 coordinated backend is not in a released EMHASS yet), adds
 home-energy-optimizer, writes EMHASS's secrets from Home Assistant's own
@@ -41,6 +47,7 @@ import json
 import math
 import os
 import platform
+import secrets as secrets_mod
 import subprocess
 import sys
 import time
@@ -55,12 +62,18 @@ HERE = Path(__file__).resolve().parent
 BUILD, RUN = HERE / ".build", HERE / ".run"
 EMHASS_REPO = "https://github.com/ameetdesh/emhass.git"
 EMHASS_BRANCH = "federated-all"            # davidusb-geek/emhass#1158
-PACKAGE = "home-energy-optimizer>=0.2.8"
+PACKAGE = "home-energy-optimizer>=0.2.9"
 IMAGE, CONTAINER = "emhass-coordinated", "emhass-coordinated"
 # EMHASS listens on 5000 inside the container. On the host, 5000 is taken by
 # macOS (AirPlay Receiver), so it is published on 5050 by default.
 PORT = 5050
 STEP_MIN, HORIZON = 30, 48                 # EMHASS's optimization_time_step; 24 h
+# EMHASS's image locks its dependencies at build time (`uv lock`) and syncs to
+# that lock on every start, so a release with a missing wheel breaks a fresh
+# image: orjson 3.13.0 has no Linux arm64 wheel yet. Lock it one release back.
+PIN = "RUN uv lock --upgrade-package orjson==3.12.0\n"
+# Remote solvers: more EMHASS containers on one Docker network, reached by name
+NETWORK, REMOTE_PORT = "emhass-coord", 5051
 
 
 # ---------------------------------------------------------------- plumbing
@@ -128,55 +141,93 @@ def up(args: argparse.Namespace) -> None:
     if args.package_src:
         sh(sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "-w", str(BUILD), args.package_src)
         wheel = next(BUILD.glob("home_energy_optimizer-*.whl")).name
-        (BUILD / "Dockerfile").write_text(f"FROM {IMAGE}-base\nCOPY {wheel} /tmp/\nRUN uv pip install /tmp/{wheel}\n")
+        (BUILD / "Dockerfile").write_text(f"FROM {IMAGE}-base\nCOPY {wheel} /tmp/\nRUN uv pip install /tmp/{wheel}\n{PIN}")
     else:
-        (BUILD / "Dockerfile").write_text(f'FROM {IMAGE}-base\nRUN uv pip install "{PACKAGE}"\n')
+        (BUILD / "Dockerfile").write_text(f'FROM {IMAGE}-base\nRUN uv pip install "{PACKAGE}"\n{PIN}')
     sh("docker", "build", "-q", "-t", IMAGE, str(BUILD))
 
-    # 3. EMHASS's secrets, from Home Assistant's own settings. Inside the
-    #    container, the host's 127.0.0.1 is host.docker.internal.
-    RUN.mkdir(exist_ok=True)
-    (RUN / "data").mkdir(exist_ok=True)
+    # 3. one Docker network, so the containers reach each other by name
+    sh("docker", "network", "create", NETWORK, check=False, capture=True)
     hass_url = ha.replace("127.0.0.1", "host.docker.internal").replace("localhost", "host.docker.internal")
-    secrets = RUN / "secrets_emhass.yaml"
-    secrets.touch(mode=0o600)
-    secrets.write_text(
-        f"server_ip: 0.0.0.0\nhass_url: {hass_url}/\nlong_lived_token: {token}\n"
-        f"time_zone: {conf['time_zone']}\nLatitude: {conf['latitude']}\n"
-        f"Longitude: {conf['longitude']}\nAltitude: {conf.get('elevation', 0)}\n")
-    secrets.chmod(0o600)
+    common = (f"server_ip: 0.0.0.0\nhass_url: {hass_url}/\nlong_lived_token: {token}\n"
+              f"time_zone: {conf['time_zone']}\nLatitude: {conf['latitude']}\n"
+              f"Longitude: {conf['longitude']}\nAltitude: {conf.get('elevation', 0)}\n")
 
-    # 4. start it, with a copy of config.json as EMHASS's configuration. A copy,
-    #    because saving in EMHASS's web UI rewrites the mounted file; the one
-    #    next to this script stays the source of truth, re-copied on every `up`.
-    config = Path(args.config) if Path(args.config).is_absolute() else HERE / args.config
-    (RUN / "config.json").write_text(config.read_text())
+    # 4. the remote solvers first, each serving its devices with a token of its own
+    for old in sh("docker", "ps", "-a", "--filter", f"name=^{CONTAINER}-", "--format", "{{.Names}}",
+                  capture=True).split():
+        sh("docker", "rm", "-f", old, check=False, capture=True)
+    tokens: dict[str, str] = {}
+    for i, spec in enumerate(args.remote or []):
+        name, _, cfg = spec.partition("=")
+        if not name.isidentifier() or not cfg:
+            sys.exit(f"--remote NAME=CONFIG, not {spec!r}")
+        tokens[name] = secrets_mod.token_hex(16)
+        rconf = json.loads(_config_path(cfg).read_text())
+        sensor = rconf.get("sensor_battery_state_of_charge")
+        if sensor:          # a demo battery's state of charge, as its EMHASS reads it
+            http("POST", f"{ha}/api/states/{sensor}", token=token, body={
+                "state": "60", "attributes": {"unit_of_measurement": "%", "friendly_name": f"{name} battery"}})
+        _start(f"{CONTAINER}-{name}", RUN / name, _config_path(cfg), REMOTE_PORT + i,
+               common + f"participant_token: {tokens[name]}\n")
+
+    # 5. this EMHASS, with the tokens it reaches the remotes with
+    bad = set(args.bad_token or [])
+    main_secrets = common + "".join(f"{n}_token: {'wrong' if n in bad else t}\n" for n, t in tokens.items())
+    config = _config_path(args.config)
     print(f"EMHASS's configuration: {config.name}")
-    sh("docker", "rm", "-f", CONTAINER, check=False, capture=True)
-    sh("docker", "run", "-d", "--name", CONTAINER, "--restart", "unless-stopped",
-       "-p", f"{args.port}:5000", "--add-host", "host.docker.internal:host-gateway",
-       "-v", f"{RUN / 'config.json'}:/share/config.json",
-       "-v", f"{secrets}:/app/secrets_emhass.yaml:ro",
-       "-v", f"{RUN / 'data'}:/data", IMAGE, capture=True)   # fails with Docker's message, e.g. a busy port
-    # The first start syncs EMHASS's environment (uv run --frozen), a minute or two.
-    print("waiting for EMHASS to start (the first start takes a minute or two)")
-    for _ in range(300):
-        try:
-            http("GET", f"http://127.0.0.1:{args.port}/healthz", timeout=2)
-            break
-        except (urllib.error.URLError, OSError):
-            time.sleep(1)
-    else:
-        sys.exit(f"EMHASS did not start; see: docker logs {CONTAINER}")
+    _start(CONTAINER, RUN, config, args.port, main_secrets)
     have = sh("docker", "exec", CONTAINER, "/app/.venv/bin/python", "-c",
               "import home_energy_optimizer as h; print(h.__version__)", check=False, capture=True).strip()
     print(f"EMHASS is up on http://127.0.0.1:{args.port} (home-energy-optimizer {have}), "
           f"talking to Home Assistant at {hass_url} ({conf['time_zone']})")
+    for i, name in enumerate(tokens):
+        print(f"  remote solver {name!r}: {CONTAINER}-{name} on http://127.0.0.1:{REMOTE_PORT + i}"
+              + (" (this EMHASS has a wrong token for it)" if name in bad else ""))
+
+
+def _config_path(name: str) -> Path:
+    return Path(name) if Path(name).is_absolute() else HERE / name
+
+
+def _start(container: str, run_dir: Path, config: Path, port: int, secrets_text: str) -> None:
+    """Start one EMHASS container: a copy of `config` as its configuration
+    (saving in its web UI rewrites the mounted file; the one next to this
+    script stays the source of truth, re-copied on every `up`), `secrets_text`
+    as its secrets, its own data folder, on `port`."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "data").mkdir(exist_ok=True)
+    secrets = run_dir / "secrets_emhass.yaml"
+    secrets.touch(mode=0o600)
+    secrets.write_text(secrets_text)
+    secrets.chmod(0o600)
+    (run_dir / "config.json").write_text(config.read_text())
+    sh("docker", "rm", "-f", container, check=False, capture=True)
+    sh("docker", "run", "-d", "--name", container, "--restart", "unless-stopped", "--network", NETWORK,
+       "-p", f"{port}:5000", "--add-host", "host.docker.internal:host-gateway",
+       "-v", f"{run_dir / 'config.json'}:/share/config.json",
+       "-v", f"{secrets}:/app/secrets_emhass.yaml:ro",
+       "-v", f"{run_dir / 'data'}:/data", IMAGE, capture=True)   # fails with Docker's message, e.g. a busy port
+    # The first start syncs EMHASS's environment (uv run --frozen), a minute or two.
+    print(f"waiting for {container} to start (the first start takes a minute or two)")
+    for _ in range(300):
+        try:
+            http("GET", f"http://127.0.0.1:{port}/healthz", timeout=2)
+            return
+        except urllib.error.HTTPError:          # 503 before its first run: it is serving
+            return
+        except (urllib.error.URLError, OSError):
+            time.sleep(1)
+    sys.exit(f"{container} did not start; see: docker logs {container}")
 
 
 def down(_args: argparse.Namespace) -> None:
-    sh("docker", "rm", "-f", CONTAINER, check=False, capture=True)
-    print(f"stopped {CONTAINER}")
+    names = [CONTAINER] + sh("docker", "ps", "-a", "--filter", f"name=^{CONTAINER}-", "--format",
+                             "{{.Names}}", capture=True).split()
+    for name in names:
+        sh("docker", "rm", "-f", name, check=False, capture=True)
+    sh("docker", "network", "rm", NETWORK, check=False, capture=True)
+    print(f"stopped {', '.join(names)}")
 
 
 # ---------------------------------------------------------------- run
@@ -274,6 +325,19 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
         for player, v in shares.items():
             print(f"  {player:<28} {v:>8.3f}")
 
+    remote_cols = {k[len("fed_remote_status_"):]: k for k in first if k.startswith("fed_remote_status_")}
+    if remote_cols:
+        print("\nremote solvers (each another EMHASS, serving its devices to this one):")
+        for name, col in remote_cols.items():
+            pcol = f"fed_remote_power_{name}"
+            if pcol in first:
+                vals = [float(r[pcol]) for r in plan]
+                print(f"  {name:<20} {str(first[col]):<10} {sum(vals) * STEP_MIN / 60 / 1000:5.1f} kWh, "
+                      f"at most {max(vals):.0f} W")
+            else:
+                print(f"  {name:<20} {first[col]}")
+        _remote_sensors(ha, token)
+
     # The coordination's own sensors, beside EMHASS's
     unit = "$"
     for player, v in shares.items():
@@ -306,6 +370,27 @@ def run_once(args: argparse.Namespace, ha: str, token: str) -> None:
           + "".join(f", sensor.coordination_limit_price_{n.replace('+', '_')}" for n in limit_cols))
 
 
+def _remote_sensors(ha: str, token: str) -> None:
+    """What each remote EMHASS published for the plan it was asked to run,
+    read back from Home Assistant: its sensors, under its publish_prefix."""
+    for rdir in sorted(d for d in RUN.iterdir() if d.is_dir() and (d / "config.json").exists()):
+        rconf = json.loads((rdir / "config.json").read_text())
+        prefix = (rconf.get("participant_api") or {}).get("publish_prefix", "")
+        names = [f"p_deferrable{k}" for k in range(int(rconf.get("number_of_deferrable_loads", 0)))]
+        if rconf.get("set_use_battery"):
+            names += ["p_batt_forecast", "soc_batt_forecast"]
+        shown = []
+        for n in names:
+            try:
+                st = http("GET", f"{ha}/api/states/sensor.{prefix}{n}", token=token, timeout=10)
+            except urllib.error.HTTPError:
+                shown.append(f"sensor.{prefix}{n}: missing")
+                continue
+            fc = next((v for v in st.get("attributes", {}).values() if isinstance(v, list)), [])
+            shown.append(f"sensor.{prefix}{n} = {st['state']} ({len(fc)} points, {st['last_updated'][11:19]})")
+        print(f"  {rdir.name} published: " + "; ".join(shown))
+
+
 def run(args: argparse.Namespace) -> None:
     ha, token = ha_settings()
     while True:
@@ -328,6 +413,11 @@ def main() -> None:
                         "(config_hybrid.json: a hybrid inverter)")
     u.add_argument("--package-src", help="install home-energy-optimizer from this local checkout "
                    f"instead of PyPI ({PACKAGE})")
+    u.add_argument("--remote", action="append", metavar="NAME=CONFIG",
+                   help="also start an EMHASS serving its devices to this one (participant_api), "
+                        "with that configuration; repeatable (see config_remote_two.json)")
+    u.add_argument("--bad-token", action="append", metavar="NAME",
+                   help="give this EMHASS a wrong token for that remote (to see it refused)")
     u.set_defaults(fn=up)
     r = sub.add_parser("run", help="plan, publish to Home Assistant, report the coordination")
     r.add_argument("--forecasts", help="JSON with pv_power_forecast, load_power_forecast (W), "
@@ -338,7 +428,7 @@ def main() -> None:
     r.add_argument("--every", type=float, default=0, help="re-plan every N minutes (MPC)")
     r.add_argument("--pv-peak", type=float, default=5000.0, help="the demo day's PV peak, W (default 5000)")
     r.set_defaults(fn=run)
-    d = sub.add_parser("down", help="stop and remove the EMHASS container")
+    d = sub.add_parser("down", help="stop and remove the EMHASS containers")
     d.set_defaults(fn=down)
     args = ap.parse_args()
     args.fn(args)
