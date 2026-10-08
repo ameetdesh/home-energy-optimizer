@@ -407,9 +407,9 @@ the coordination's own keys are:
   "nominal_power_of_deferrable_loads": [3000, 750],
 
   "site": [
-    {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+    {"id": "inverter", "parent": "grid", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
      "efficiency_import": 0.97, "efficiency_export": 0.97},
-    {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "garage", "parent": "grid", "type": "panel", "max_import": 7400, "max_export": 0},
     {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
 
     {"id": "pv", "parent": "inverter"},
@@ -440,9 +440,10 @@ garage never feeds back, the tank and the heat pump never run together (their
 4.5 kW would trip the 3.5 kW breaker), and the loads keep within 3 kW.
 
 **How the site enters.** `site` is the house in one list. Every element has an
-`id`, and all but the main meter and limits a `parent` (`grid` by default), so
-the list draws the tree; each device carries its wiring, its solver, its group
-and its settings in one entry:
+`id`, and every row but the main meter and the limits a `parent` (`grid`, the
+main meter, or a node's id) - with one tariff, everything is wired behind the
+one meter, and the list draws that tree; each device carries its wiring, its
+solver, its group and its settings in one entry:
 
 - **the main meter**, `id: "grid"`: `max_import` / `max_export` (W).
 - **a node**, any other id — a hybrid inverter, a panel, a breaker, a meter:

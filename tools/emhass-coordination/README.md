@@ -123,9 +123,9 @@ everything is wired in its `site` list:
 
 ```json
 "site": [
-  {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+  {"id": "inverter", "parent": "grid", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
    "efficiency_import": 0.97, "efficiency_export": 0.97},
-  {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+  {"id": "garage", "parent": "grid", "type": "panel", "max_import": 7400, "max_export": 0},
   {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
   {"id": "pv", "parent": "inverter"},
   {"id": "battery", "parent": "inverter"},
@@ -191,9 +191,9 @@ script, which `up` copies into `.run/config.json` and mounts. Two keys do it:
 ```json
 "optimization_backend": "dantzig_wolfe",
 "site": [
-  {"id": "battery", "solver": "home_energy_optimizer"},
-  {"id": "deferrable0", "group": "loads"},
-  {"id": "deferrable1", "group": "loads"}
+  {"id": "battery", "parent": "grid", "solver": "home_energy_optimizer"},
+  {"id": "deferrable0", "parent": "grid", "group": "loads"},
+  {"id": "deferrable1", "parent": "grid", "group": "loads"}
 ]
 ```
 

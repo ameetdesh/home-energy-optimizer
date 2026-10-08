@@ -19,11 +19,13 @@ settings (`_site`):
 
     "optimization_backend": "dantzig_wolfe",
     "site": [
-      {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000},
+      {"id": "inverter", "parent": "grid", "type": "hybrid_inverter",
+       "max_import": 4000, "max_export": 4000},
       {"id": "pv", "parent": "inverter"},
       {"id": "battery", "parent": "inverter"},
-      {"id": "deferrable0", "group": "loads"}, {"id": "deferrable1", "group": "loads"},
-      {"id": "water_heater", "solver": "home_energy_optimizer", "config": {...}}
+      {"id": "deferrable0", "parent": "grid", "group": "loads"},
+      {"id": "deferrable1", "parent": "grid", "group": "loads"},
+      {"id": "water_heater", "parent": "grid", "solver": "home_energy_optimizer", "config": {...}}
     ]
 
 EMHASS works in W, this package in kW; EMHASS's P_batt is + when discharging,
@@ -447,7 +449,7 @@ def _site(optim_conf: dict[str, Any], plant_conf: dict[str, Any], devices: list[
     (or None).
 
     Each element has an `id` and, but the main meter and limits, a `parent`
-    ("grid" by default):
+    ("grid", the main meter, or a node's id):
 
     - "grid": the main meter's `max_import` / `max_export` (W).
     - a node (any other id): `type` (hybrid_inverter, inverter, panel,
@@ -477,6 +479,11 @@ def _site(optim_conf: dict[str, Any], plant_conf: dict[str, Any], devices: list[
     kinds = {k: [e for e in elements if _kind(e) == k] for k in ("grid", "node", "limit", "remote", "device")}
     if kinds["remote"]:
         return empty, f"site: {kinds['remote'][0].get('id')!r} is a remote solver, which this version does not plan"
+    for e in kinds["node"] + kinds["device"]:
+        if "parent" not in e:
+            # one tariff, one meter: every row but the meter and the limits
+            # says where it is wired, so the list reads as the tree it is
+            return empty, f"site: {e.get('id')!r} needs a parent ('grid', the main meter, or a node's id)"
 
     def kw(v: Any) -> float | None:
         return None if v is None else float(v) / 1000.0

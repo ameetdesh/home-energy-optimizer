@@ -1,9 +1,9 @@
 {
   "optimization_backend": "dantzig_wolfe",
   "site": [
-    {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+    {"id": "inverter", "parent": "grid", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
      "efficiency_import": 0.97, "efficiency_export": 0.97},
-    {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "garage", "parent": "grid", "type": "panel", "max_import": 7400, "max_export": 0},
     {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
     {"id": "pv", "parent": "inverter"},
     {"id": "battery", "parent": "inverter"},

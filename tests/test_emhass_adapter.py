@@ -41,7 +41,7 @@ def test_a_battery_participant_without_an_emhass_battery_falls_back():
     class Opt:                    # what optimize() reads before it plans
         optim_conf = {"optimization_backend": "dantzig_wolfe", "set_use_battery": False,
                       "number_of_deferrable_loads": 0,
-                      "site": [{"id": "battery", "solver": "home_energy_optimizer"}]}
+                      "site": [{"id": "battery", "parent": "grid", "solver": "home_energy_optimizer"}]}
         plant_conf: dict = {}
         costfun = "profit"
         time_step = 0.5
@@ -94,9 +94,9 @@ DEVICES = ["battery", "deferrable0", "deferrable1"]          # what EMHASS plans
 HEO = "home_energy_optimizer"
 FOUR_DER = [
     {"id": "grid", "max_import": 9000, "max_export": 5000},
-    {"id": "inverter", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
+    {"id": "inverter", "parent": "grid", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000,
      "efficiency_import": 0.97, "efficiency_export": 0.97},
-    {"id": "garage", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "garage", "parent": "grid", "type": "panel", "max_import": 7400, "max_export": 0},
     {"id": "heat", "type": "breaker", "parent": "garage", "max_import": 3500},
     {"id": "l1", "type": "limit", "max_import": 5000},
     {"id": "pv", "parent": "inverter"},
@@ -131,7 +131,7 @@ def test_the_site_becomes_groups_nodes_and_set_limits():
 
 
 def test_devices_site_leaves_out_are_emhass_s_alone_on_the_meter():
-    layout, reason = _layout([{"id": "battery", "solver": HEO}])
+    layout, reason = _layout([{"id": "battery", "parent": "grid", "solver": HEO}])
     assert reason is None and layout.submeters == ()
     assert {g["key"]: (g["solver"], g["devices"]) for g in layout.groups} == {
         "battery": (HEO, ["battery"]), "deferrable0": ("emhass", ["deferrable0"]),
@@ -157,7 +157,7 @@ def test_a_load_group_across_groups_is_a_set_limit():
 
 def test_without_a_node_the_inverter_keys_still_describe_it():
     pc = {"inverter_is_hybrid": True, "inverter_ac_output_max": 5000, "inverter_efficiency_dc_ac": 0.96}
-    layout, reason = _layout([{"id": "battery", "solver": HEO}], pc=pc)
+    layout, reason = _layout([{"id": "battery", "parent": "grid", "solver": HEO}], pc=pc)
     assert reason is None and layout.inverter == "inverter"
     (inv,) = layout.submeters
     assert inv.keys == ("battery", "pv") and inv.max_import_kw == 5.0 and inv.eta_export == 0.96
@@ -166,22 +166,24 @@ def test_without_a_node_the_inverter_keys_still_describe_it():
 @pytest.mark.parametrize("site, oc, problem", [
     ([], {"deferrable_load_groups": [{"names": ["deferrable0", "deferrable1"], "mutual_exclusion": True}]},
      "mutual exclusion across participants"),
-    ([{"id": "a"}, {"id": "deferrable0", "parent": "a", "group": "g"}, {"id": "deferrable1", "group": "g"}],
+    ([{"id": "a", "parent": "grid"}, {"id": "deferrable0", "parent": "a", "group": "g"}, {"id": "deferrable1", "parent": "grid", "group": "g"}],
      {}, "sits on 'a' and 'grid'"),
-    ([{"id": "l", "type": "limit", "max_import": 1}, {"id": "deferrable0", "group": "g", "limits": ["l"]},
-      {"id": "deferrable1", "group": "g"}], {}, "splits the group 'g'"),
+    ([{"id": "l", "type": "limit", "max_import": 1}, {"id": "deferrable0", "parent": "grid", "group": "g", "limits": ["l"]},
+      {"id": "deferrable1", "parent": "grid", "group": "g"}], {}, "splits the group 'g'"),
     ([{"id": "hvac", "parent": "b", "solver": HEO}], {}, "is no node"),
-    ([{"id": "hvac", "solver": HEO, "limits": ["nope"]}], {}, "which is no limit"),
-    ([{"id": "pv", "solver": "emhass"}], {}, "planned by no solver"),
-    ([{"id": "hvac", "solver": "cbc"}], {}, "unknown solver"),
-    ([{"id": "deferrable0", "solver": HEO}], {}, "has no solver for 'deferrable0'"),
-    ([{"id": "deferrable0", "config": {"power_kw": 1}}], {}, "only home_energy_optimizer reads"),
-    ([{"id": "water_heater", "solver": HEO, "group": "heat"}, {"id": "hvac", "solver": HEO, "group": "heat"}],
+    ([{"id": "hvac", "parent": "grid", "solver": HEO, "limits": ["nope"]}], {}, "which is no limit"),
+    ([{"id": "pv", "parent": "grid", "solver": "emhass"}], {}, "planned by no solver"),
+    ([{"id": "hvac", "parent": "grid", "solver": "cbc"}], {}, "unknown solver"),
+    ([{"id": "deferrable0", "parent": "grid", "solver": HEO}], {}, "has no solver for 'deferrable0'"),
+    ([{"id": "deferrable0", "parent": "grid", "config": {"power_kw": 1}}], {}, "only home_energy_optimizer reads"),
+    ([{"id": "water_heater", "parent": "grid", "solver": HEO, "group": "heat"}, {"id": "hvac", "parent": "grid", "solver": HEO, "group": "heat"}],
      {}, "one solver for all"),
-    ([{"id": "deferrable0", "group": "battery"}], {}, "has the name of an element"),
-    ([{"id": "hvac", "solver": HEO}, {"id": "hvac", "solver": HEO}], {}, "lists 'hvac' twice"),
-    ([{"id": "deferrable5"}], {}, "which EMHASS does not plan here"),
-    ([{"id": "garage_emhass", "solver": {"url": "http://emhass-garage:5000/participant"}}], {},
+    ([{"id": "deferrable0", "parent": "grid", "group": "battery"}], {}, "has the name of an element"),
+    ([{"id": "hvac", "parent": "grid", "solver": HEO}, {"id": "hvac", "parent": "grid", "solver": HEO}], {}, "lists 'hvac' twice"),
+    ([{"id": "deferrable5", "parent": "grid"}], {}, "which EMHASS does not plan here"),
+    ([{"id": "deferrable0"}], {}, "'deferrable0' needs a parent"),
+    ([{"id": "garage", "type": "panel", "max_import": 7400}], {}, "'garage' needs a parent"),
+    ([{"id": "garage_emhass", "parent": "grid", "solver": {"url": "http://emhass-garage:5000/participant"}}], {},
      "is a remote solver"),
 ])
 def test_a_site_the_coordinator_cannot_hold_is_refused_by_name(site, oc, problem):
@@ -191,7 +193,7 @@ def test_a_site_the_coordinator_cannot_hold_is_refused_by_name(site, oc, problem
 
 
 def test_what_does_not_stop_the_plan_is_noted():
-    layout, reason = _layout([{"id": "spare", "type": "breaker", "max_import": 2000},
+    layout, reason = _layout([{"id": "spare", "parent": "grid", "type": "breaker", "max_import": 2000},
                               {"id": "l9", "type": "limit", "max_import": 1}])
     assert reason is None
     assert layout.notes == ("the limit 'l9' has no device tagged with it", "the node 'spare' holds nothing")
@@ -199,25 +201,25 @@ def test_what_does_not_stop_the_plan_is_noted():
 
 @pytest.mark.parametrize("site, nodes", [
     # a hybrid inverter on another's backup port
-    ([{"id": "inv1", "type": "hybrid_inverter", "max_import": 5000, "max_export": 5000},
+    ([{"id": "inv1", "parent": "grid", "type": "hybrid_inverter", "max_import": 5000, "max_export": 5000},
       {"id": "backup", "type": "panel", "parent": "inv1", "max_import": 7000, "max_export": 7000},
       {"id": "inv2", "type": "inverter", "parent": "backup", "max_import": 3000, "max_export": 3000,
        "efficiency_export": 0.96},
       {"id": "pv", "parent": "inv1"}, {"id": "battery", "parent": "inv2"}],
      {"inv1": ((), ["pv"]), "backup": ("inv1", []), "inv2": ("backup", ["battery"])}),
     # AC-coupled: a string PV inverter and a battery inverter
-    ([{"id": "pv_inv", "type": "inverter", "max_import": 0, "max_export": 6000},
-      {"id": "bat_inv", "type": "inverter", "max_import": 5000, "max_export": 5000},
+    ([{"id": "pv_inv", "parent": "grid", "type": "inverter", "max_import": 0, "max_export": 6000},
+      {"id": "bat_inv", "parent": "grid", "type": "inverter", "max_import": 5000, "max_export": 5000},
       {"id": "pv", "parent": "pv_inv"}, {"id": "battery", "parent": "bat_inv"}],
      {"pv_inv": ((), ["pv"]), "bat_inv": ((), ["battery"])}),
     # an islanded backup subpanel under a hybrid inverter
-    ([{"id": "inv", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000},
+    ([{"id": "inv", "parent": "grid", "type": "hybrid_inverter", "max_import": 4000, "max_export": 4000},
       {"id": "island", "type": "panel", "parent": "inv", "max_import": 0, "max_export": 0},
       {"id": "pv", "parent": "inv"}, {"id": "battery", "parent": "inv"},
       {"id": "deferrable0", "parent": "island"}],
      {"inv": ((), ["battery", "pv"]), "island": ("inv", ["deferrable0"])}),
     # a device on the main meter, said explicitly; a sub-meter with no rating
-    ([{"id": "ev_meter", "type": "meter"}, {"id": "deferrable0", "parent": "ev_meter"},
+    ([{"id": "ev_meter", "parent": "grid", "type": "meter"}, {"id": "deferrable0", "parent": "ev_meter"},
       {"id": "deferrable1", "parent": "grid"}],
      {"ev_meter": ((), ["deferrable0"])}),
 ])
