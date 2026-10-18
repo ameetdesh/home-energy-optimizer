@@ -30,6 +30,9 @@ device uses whichever answers its questions best. A dynamic programme, for
 instance, suits a device with one state variable and also gives a policy for
 every state; a linear programme solves a battery exactly.
 
+<details>
+<summary><b>How the two coordinators work (diagrams)</b></summary>
+
 ```mermaid
 flowchart LR
   M["Dantzig–Wolfe coordinator<br/>an LP over the meter, the grid limits and the batteries<br/>picks the cheapest blend of offers"]
@@ -48,12 +51,30 @@ flowchart LR
   H -.-> R(["the best runnable plan, polished"])
 ```
 
+</details>
+
 It feeds [Home Assistant](https://www.home-assistant.io) and
 [evcc](https://evcc.io). Try it in your browser:
 [Smart Home Energy Optimizer](https://ameetdesh.github.io/multi_device_optimizer_standalone.html).
 The theory, with the evidence behind every number, is in
 [docs/theory.pdf](https://github.com/ameetdesh/home-energy-optimizer/blob/main/docs/theory.pdf). The Python package is
 `home-energy-optimizer` (import `home_energy_optimizer`).
+
+## Contents
+
+- [Install](#install)
+- [Theory notes](#theory-notes)
+- [Three ways to use it](#three-ways-to-use-it)
+- [Home Assistant, from scratch](#home-assistant-from-scratch)
+- [EMHASS: a whole house, two solvers at once](#emhass-a-whole-house-two-solvers-at-once)
+- [Federated planning: each planner keeps its data](#federated-planning-each-planner-keeps-its-data)
+- [The electrical tree: inverters, panels, breakers, several meters](#the-electrical-tree-inverters-panels-breakers-several-meters)
+- [Prices from a battery's dynamic programme](#prices-from-a-batterys-dynamic-programme)
+- [Also supported](#also-supported)
+- [Roadmap](#roadmap)
+- [Layout](#layout)
+- [Evidence](#evidence)
+- [Licence](#licence)
 
 ---
 
@@ -78,6 +99,9 @@ python3 -m venv .venv
 and both coordinators, with the evidence behind every number. It is built from
 `docs/theory.tex`:
 
+<details>
+<summary><b>Build the PDF</b></summary>
+
 ```bash
 tools/build-theory          # -> docs/theory.pdf
 tools/build-theory --figs   # regenerate docs/figs/ first (needs the bench extras)
@@ -92,6 +116,8 @@ The single-file browser pages rebuild with `admm/wasm/build.sh` and
 if one has been built (`wasm/build_wheel.sh`, needs Docker), the compiled-kernel
 wheel. The embedded Python is obfuscated; that is kept as a proof of concept,
 since the source is here.
+
+</details>
 
 ---
 
@@ -136,7 +162,8 @@ safe, bound_by = clamp(action(snap, t, soe), other_load_kw=3.1,
                        limits=HardLimits(max_import_kw=17.25))
 ```
 
-### 2. Local GUIs: ADMM or Dantzig–Wolfe
+<details>
+<summary><b>2. Local GUIs: ADMM or Dantzig–Wolfe</b></summary>
 
 There are two testbed UIs, one per coordinator. They use different ports, so
 both can run at once and be compared on the same settings.
@@ -201,14 +228,20 @@ battery/wasm/build.sh                     # or as one self-contained page
 
 `battery/README.md` has the build steps and what each part of the page shows.
 
-### 3. Home Assistant
+</details>
+
+<details>
+<summary><b>3. Home Assistant</b></summary>
 
 Publishes the plan and the price signals as HA sensors. Walkthrough below. To
 plan a real house's devices instead of publishing a simulated one, the
 EMHASS adapter — **EMHASS: a whole house, two solvers at once**,
 below — coordinates EMHASS's own solver and this package's, device by device.
 
-### Which coordinator plans
+</details>
+
+<details>
+<summary><b>Which coordinator plans</b></summary>
 
 ```python
 from home_energy_optimizer import plan
@@ -228,6 +261,8 @@ they share (section 2), each coordinator as a problem and an algorithm (sections
 3-4) - and compares them (section 8); `bench/run_planners.py` reproduces the
 comparison.
 
+</details>
+
 ---
 
 ## Home Assistant, from scratch
@@ -239,7 +274,10 @@ needs one dependency beyond the core install:
 .venv/bin/pip install -e ".[ha]"    # adds websockets
 ```
 
-### Step 1 — run Home Assistant
+<details>
+<summary><b>Steps 1–5: run Home Assistant, get a token, make the dashboard, stream data</b></summary>
+
+#### Step 1 — run Home Assistant
 
 ```bash
 docker run -d --name ha -p 8123:8123 -v "$PWD/ha-config:/config" \
@@ -248,18 +286,18 @@ docker run -d --name ha -p 8123:8123 -v "$PWD/ha-config:/config" \
 
 Give it a minute, then open <http://localhost:8123>.
 
-### Step 2 — create an account
+#### Step 2 — create an account
 
 Complete the onboarding wizard: create a user, set a location, skip device
 discovery. Any username and password will do for a local trial.
 
-### Step 3 — get a long-lived access token
+#### Step 3 — get a long-lived access token
 
 In Home Assistant: click your **user avatar** (bottom left) → **Security** tab →
 scroll to **Long-lived access tokens** → **Create token**. Copy it; it is shown
 only once.
 
-### Step 4 — create the dashboard
+#### Step 4 — create the dashboard
 
 ```bash
 HA_TOKEN=<your token> .venv/bin/python tools/ha-lambda-demo/setup_dashboard.py
@@ -272,7 +310,7 @@ auto-generated Overview dashboard may not list them. The script creates a
 dashboard with three views — Trade, Power flows, Thermal — over the websocket
 API.
 
-### Step 5 — stream data into it
+#### Step 5 — stream data into it
 
 ```bash
 HA_TOKEN=<your token> .venv/bin/python tools/ha-lambda-demo/run.py --speed 2
@@ -283,7 +321,10 @@ The slow tier plans with Dantzig–Wolfe; add `--method admm` for ADMM (each re-
 history graphs to draw curves. `--speed 400` is a day in 4 seconds, useful as a
 smoke test. Then open <http://localhost:8123/home-energy-optimizer>.
 
-### What lands in Home Assistant
+</details>
+
+<details>
+<summary><b>What lands in Home Assistant</b></summary>
 
 | entity | meaning |
 |---|---|
@@ -301,7 +342,10 @@ smoke test. Then open <http://localhost:8123/home-energy-optimizer>.
 | `sensor.hems_hvac_temp`, `_power` | room temperature and HVAC draw |
 | `sensor.hems_outdoor_temp` | outdoor temperature |
 
-### Using it in an automation
+</details>
+
+<details>
+<summary><b>Using it in an automation</b></summary>
 
 A load worth about 0.25/kWh to run:
 
@@ -333,7 +377,10 @@ For a battery you control directly, gate on the band instead:
              < states('sensor.hems_import_below')|float }}
 ```
 
-### Charting the forecast
+</details>
+
+<details>
+<summary><b>Charting the forecast</b></summary>
 
 `sensor.hems_lambda` carries a `forecast` attribute, so ApexCharts works:
 
@@ -347,13 +394,18 @@ series:
         [Date.now() + p.hours_ahead * 3600000, p.lambda]);
 ```
 
-### Caveats for the Home Assistant path
+</details>
+
+<details>
+<summary><b>Caveats for the Home Assistant path</b></summary>
 
 - The demo uses synthetic forecasts. Point it at real data with
   `home_energy_optimizer.feeds` (keyless Open-Meteo PV, CSV, or a list from any tariff
   integration).
 - States are pushed over the REST API, so they disappear when Home Assistant
   restarts. A durable deployment wants MQTT discovery or a custom component.
+
+</details>
 
 ---
 
@@ -372,18 +424,17 @@ or a heat pump goes to this package's dynamic programme, which prices comfort an
 returns a value function rather than one trajectory. The coordinator only makes
 the plans agree on the meter, and reports what each device is worth.
 
-> **Status.** The EMHASS side is a draft PR —
-> [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158)
-> — which adds the `optimization_backend` dispatch and the `site` option.
-> Released EMHASS has no `optimization_backend` key, so on stock EMHASS this
-> config does nothing. The adapter in this package is complete and tested
-> (`tests/test_emhass_adapter.py`); it imports EMHASS only when it plans, so it
-> costs nothing if you never use it.
+> **Status.** The EMHASS side is a draft PR,
+> [davidusb-geek/emhass#1158](https://github.com/davidusb-geek/emhass/pull/1158).
+> Released EMHASS does not have `optimization_backend` yet.
 
-**To run it** next to your own Home Assistant, `tools/emhass-coordination/`
-builds EMHASS from that branch with this package, starts it in Docker, plans,
-and publishes to Home Assistant: a battery planned here, two deferrable loads
-planned by EMHASS, and each one's share of the saving as a sensor.
+<details>
+<summary><b>Run it next to your Home Assistant</b></summary>
+
+`tools/emhass-coordination/` builds EMHASS from that branch with this package,
+starts it in Docker, plans, and publishes to Home Assistant: a battery planned
+here, two deferrable loads planned by EMHASS, and each one's share of the saving
+as a sensor.
 
 ```bash
 HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py up
@@ -391,8 +442,13 @@ HA_TOKEN=<token> python tools/emhass-coordination/coordinate.py run --every 30
 ```
 
 Its README walks through each step, and where EMHASS's configuration is changed.
+The adapter in this package is complete and tested (`tests/test_emhass_adapter.py`);
+it imports EMHASS only when it plans, so it costs nothing if you never use it.
 
-### A four-DER house
+</details>
+
+<details>
+<summary><b>A four-DER house: the configuration, how the site enters, the devices</b></summary>
 
 Solar, a battery, two deferrable loads, a hot water tank and a heat pump — split
 across both solvers, and wired as they are in the house: the PV and the battery
@@ -527,7 +583,10 @@ Three details that are easy to get wrong:
 Any EMHASS device you leave out of `site` is planned on its own by EMHASS, on
 the main meter, so a partial list is fine.
 
-### What comes back
+</details>
+
+<details>
+<summary><b>What comes back: the plan's columns and the saving shares</b></summary>
 
 EMHASS's usual `opt_res` columns — `P_PV`, `P_Load`, `P_grid`, `P_deferrable0`,
 `P_batt`, `SOC_opt`, `unit_load_cost`, `cost_fun_profit` — in EMHASS's own units,
@@ -558,7 +617,10 @@ then the surplus is split — an Owen value between solar and the devices,
 Aumann–Shapley among the devices — so the shares and reimbursements add up to the
 saving exactly. `src/home_energy_optimizer/dw/attribution.py` has the derivation.
 
-### When it declines
+</details>
+
+<details>
+<summary><b>When it declines: the options that make EMHASS plan alone</b></summary>
 
 A home automation loop must always get a plan, so the adapter returns `None` and
 lets EMHASS run its default solver — logging the option responsible — rather
@@ -581,6 +643,8 @@ still falls back with `set_nodischarge_to_grid` (EMHASS ties the battery to the
 meter's direction then; likewise the battery and the PV on one node),
 `inverter_stress_cost`, an inverter rated only by `pv_inverter_model` name, or
 the battery inside an EMHASS group with other devices.
+
+</details>
 
 ---
 
@@ -858,6 +922,9 @@ a sub-panel behind another, a second hybrid inverter on the first one's backup
 port, a heat pump on a meter of its own with its own tariff. The site carries
 that tree:
 
+<details>
+<summary><b>The example, and how each planner holds the tree</b></summary>
+
 ```python
 from dataclasses import replace
 from home_energy_optimizer import (BatteryConfig, HvacConfig, Horizon, SiteConfig, SubMeter,
@@ -908,6 +975,8 @@ an independent LP of the same tree exactly (`tests/test_topology.py`).
 sweeps an inverter's rating. The DW page (Advanced → Site) has a **Hybrid
 inverter** switch and an **Inverter limit** slider, and draws the bus price μ.
 
+</details>
+
 ---
 
 ## Prices from a battery's dynamic programme
@@ -917,6 +986,9 @@ battery is solved by a dynamic programme, its value function gives three prices
 at whatever state the battery is in, which the Home Assistant path publishes
 between plans (a battery solved as an LP gives its plan, and λ only along it).
 They are easy to conflate, and not interchangeable.
+
+<details>
+<summary><b>The three prices, and which one to use</b></summary>
 
 | | formula | answers |
 |---|---|---|
@@ -932,11 +1004,16 @@ Compare the band against the price actually faced — the import tariff while
 importing, the export price while exporting. A discharge that displaces
 household load realises the *import* price, not the export price.
 
+</details>
+
 ---
 
 ## Also supported
 
-**evcc.** `src/home_energy_optimizer/evcc.py` implements the optimizer HTTP contract used
+<details>
+<summary><b>evcc: a server for its optimizer API</b></summary>
+
+`src/home_energy_optimizer/evcc.py` implements the optimizer HTTP contract used
 by [evcc](https://evcc.io) (`POST /optimize/charge-schedule`), so a local server
 can serve its `OPTIMIZER_URI` endpoint. Handles multiple batteries, loadpoints
 modelled as charge-only batteries, per-slot charge demands and state-of-charge
@@ -946,9 +1023,16 @@ EV bids charging plans from its DP, evcc's grid limits are enforced in the
 plan, and the response carries an extra `_hems_policy_certificate`. Start the
 server with `HEMS_METHOD=admm` for ADMM.
 
-**Real forecasts.** `home_energy_optimizer.feeds` provides keyless Open-Meteo PV and
+</details>
+
+<details>
+<summary><b>Real forecasts: Open-Meteo, CSV, measured values</b></summary>
+
+`home_energy_optimizer.feeds` provides keyless Open-Meteo PV and
 temperature, CSV and list ingestion, and measured-value blending — anchoring the
 first forecast slot to what was just measured and decaying back over four slots.
+
+</details>
 
 ---
 
@@ -957,7 +1041,8 @@ first forecast slot to what was just measured and decaying back over four slots.
 Remote solvers - a participant in another process, container or device, over
 the participant API - are no longer on it: see "Federated planning" above.
 
-### Which standards make sense to connect, and how
+<details>
+<summary><b>Which standards make sense to connect, and how</b></summary>
 
 None of these is implemented yet; this is where the coordinator would meet
 each, and why. The coordinator's question (a price response) and its answer
@@ -982,7 +1067,10 @@ Not planned: building-automation and charger protocols such as KNX and OCPP.
 They execute a plan on one device, which Home Assistant's own integrations
 already do; they do not carry the coordinator's question.
 
-### Further
+</details>
+
+<details>
+<summary><b>Further work</b></summary>
 
 - **The tree through EMHASS**: several PV arrays and several meters (the
   library has them; EMHASS carries one PV forecast and one meter).
@@ -999,9 +1087,14 @@ already do; they do not carry the coordinator's question.
   close to Dantzig-Wolfe's; the recovered one is not). Dantzig-Wolfe, the
   default, recovers jointly and is unaffected.
 
+</details>
+
 ---
 
 ## Layout
+
+<details>
+<summary><b>The modules of the package</b></summary>
 
 ```
 src/home_energy_optimizer/     the package (import home_energy_optimizer)
@@ -1036,6 +1129,8 @@ docs/NOTES.md      measured findings
 docs/PLAN.md       state and next steps
 ```
 
+</details>
+
 ---
 
 ## Evidence
@@ -1050,6 +1145,9 @@ and ADMM 97.3–99.1% in 4–8 s. On the Home Assistant demo site (battery, wate
 heater, HVAC) Dantzig–Wolfe captures 98–99% and ADMM 97–98%, and every
 Dantzig–Wolfe plan carries its certified gap.
 
+<details>
+<summary><b>All the measurements</b></summary>
+
 **Grid limits hold.** Dantzig–Wolfe meets a limit exactly or prices and reports
 the breach; ADMM left at most 5 W over on 72 test sites.
 
@@ -1060,6 +1158,8 @@ on six test cases, from one extra plan.
 **The device solvers are accurate.** A battery's dynamic programme captures
 98.4–99.2% of what its exact LP does; its λ lies within 0.007–0.032/kWh of the
 LP's dual, and is published with a ±0.04/kWh band.
+
+</details>
 
 ---
 
