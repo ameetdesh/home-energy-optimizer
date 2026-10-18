@@ -18,6 +18,11 @@ around solar output, tariffs and grid limits:
   programme and bounds how far the result can be from the best possible plan.
 - **ADMM** steers the devices with one shared price, and needs no LP solver.
 
+A planner can also run on a different machine, for example a second EMHASS in
+the garage. Each planner keeps its configuration and its data. Only prices and
+plans go across the network:
+[Federated planning](https://github.com/ameetdesh/home-energy-optimizer#federated-planning-each-planner-keeps-its-data).
+
 The house reaches a better outcome than its devices would alone, and the saving
 is split among the solar and each device by what it contributed, so every
 device is fairly rewarded for cooperating. No single solver is the point: each
@@ -459,7 +464,7 @@ solver, its group and its settings in one entry:
   `config` and its `limits`. The PV has a parent and nothing else.
 - **a remote solver** — any id, with `"solver": {"url": ..., "token_secret": ...}`:
   another EMHASS, or any solver on the network, one participant at its
-  `parent` ("Remote solvers", below).
+  `parent` ("Federated planning", below).
 
 The adapter builds the package's tree (`types.SubMeter`, `SetLimit`) from it:
 
@@ -577,82 +582,271 @@ meter's direction then; likewise the battery and the PV on one node),
 `inverter_stress_cost`, an inverter rated only by `pv_inverter_model` name, or
 the battery inside an EMHASS group with other devices.
 
-### Remote solvers: another EMHASS, or any solver on the network
+---
 
-A participant need not run in the coordinator's process. A solver in another
-container or device — another EMHASS planning the garage's EV and battery, a
-vendor's EV-charging optimiser, a heat pump's controller — joins as one element
-of `site`, without sharing its model:
+## Federated planning: each planner keeps its data
 
-```json
-{"id": "garage_emhass", "parent": "garage",
- "solver": {"url": "http://emhass-garage:5000/participant", "token_secret": "garage_token"}}
+Two EMHASS can plan one house together. Each EMHASS runs on its own machine.
+Each EMHASS keeps its configuration, its data and its model. Only prices and
+plans go across the network.
+
+```text
+A: the house (coordinator)               B: the garage (remote solver)
+loads, PV, tariff, wiring   --prices-->  battery, EV, state of charge
+                            <--plans---
+                            --commit-->  B runs its part and publishes it
 ```
 
-It is one participant, wired at its `parent`, counted in the `limits` it is
-tagged with; its devices are its own business (it answers with their total).
-`token_secret` names the secret in this EMHASS's `secrets_emhass.yaml` that
-holds its token. A remote is accepted from the configuration only: a `site`
-sent with a request may not name one, so no request makes EMHASS call a host of
-its choosing.
+| | A | B |
+|---|---|---|
+| **Keeps private** | its `config.json`, the house load and PV, the tariff, the wiring and the limits, its Home Assistant token | its `config.json`, the battery and EV settings, the state of charge, its Home Assistant token |
+| **Sends** | the horizon, a price for each slot, the plan that it selects | its device names and maximum power; for each question: its total plan, its cost (one number), its state over the horizon |
 
-**Serving an EMHASS's devices** to a coordinator elsewhere: set
-`participant_api` in its configuration (`{"publish_prefix": "garage_"}`: the
-sensors a committed plan is published to, so two EMHASS on one Home Assistant
-do not collide) and `participant_token` in its secrets. It then answers at
-`/participant/v1/…` from its own model: its battery (its state of charge read
-from its `sensor_battery_state_of_charge`) and its deferrable loads, planned
-together, within its own connection's limits (`maximum_power_from_grid` /
-`maximum_power_to_grid` — a panel's rating, no backfeed — which its every plan
-holds, however big its EV). The coordinator holds what it shares with the rest
-of the house. Only a commit has an effect: the plan chosen is published as a
-run of its own would be; a dry run commits nothing.
+- A does not send the house load to B. B gets only prices.
+- A gets the total power of B. A needs it to keep the limits of the garage panel.
+- The state over the horizon shows the energy in the battery of B. A future
+  version will make it optional.
 
-**The API** (`home_energy_optimizer.remote`; `schemas/participant-api.v1.json`,
-OpenAPI 3.1, draft): `GET /v1/describe` (its key, its devices, its most power,
-on/off or modulating, which query kinds it answers), `POST /v1/baseline` (a
-plan with no price), `POST /v1/query` (one what-if: a price response, the
-packaged `device-query.v1` / `device-answer.v1` bodies) and `POST /v1/commit`
-(the answer chosen, by its `Query-Id`). `RemoteParticipant` is the
-coordinator's side; `ParticipantService` the solver's, for any HTTP host
-(EMHASS serves it from its own web server); `serve` runs it on the standard
-library's server, for this package's own models and for tests.
+### Example: two EMHASS on one LAN
 
-What a remote solver must promise:
+B is in the garage, at `192.168.1.20`. B plans an EV charger and a battery.
+A plans the house and coordinates B.
 
-- **Queries are what-ifs.** Answering never changes what the device does; only
-  a commit does.
-- **Always answer.** If its solve fails it answers with a plan it can run and
-  status `fallback`; the coordinator uses the plan but proves no bound from it.
-  A timeout is treated the same way, with its last good plan.
-- **Answer price responses quickly** — a plan takes a few dozen of them — and
-  the same question the same way.
-- **Report its private cost honestly** (comfort, wear, energy left in store, a
-  missed goal), in currency; the coordinator's bound and the saving split rely
-  on it.
+1. Install EMHASS from the branch of
+   [#1158](https://github.com/davidusb-geek/emhass/pull/1158) on the two machines.
+2. Install the optional extra on the two machines: `pip install emhass[federated]`.
+3. Make a token: `python -c "import secrets; print(secrets.token_hex(16))"`.
+4. On B, add `participant_api` to `config.json` (see "B" below).
+5. On B, add the token to `secrets_emhass.yaml` as `participant_token`.
+6. On B, make port 5000 available on the LAN.
+7. On A, add B to `site` in `config.json` (see "A" below).
+8. On A, add the token to `secrets_emhass.yaml` as `garage_token`.
+9. On A, make sure that B replies:
+   `curl -H "Authorization: Bearer <token>" http://192.168.1.20:5000/participant/v1/describe`.
+10. On A, run `naive-mpc-optim` as usual.
 
-And what the coordinator promises it: prices only. A remote is sent the rest of
-the house's load (a best response) only if it lists `best_response` among the
-kinds it answers; otherwise it is asked at its connection's marginal prices —
-what drawing costs and supplying is worth there, given everyone else's plans —
-which carry the tariff and every rating without the household's behaviour.
+Result:
 
-**When one does not answer**, the house is planned without it, the log says so,
-and the plan says `fed_remote_status_<id>` = `unreachable` (`unauthorized` for a
-refused token); its own last plan keeps running, which this plan does not count.
-The plan carries each remote's power (`fed_remote_power_<id>`, W) and its
-status (`committed`, `refused: …`, `planned (dry run)`).
+- A asks B approximately 30 questions. Then A tells B the plan to run.
+- B publishes its plan as `sensor.garage_p_deferrable0`, `sensor.garage_soc_batt_forecast`, ...
+- The plan of A has `fed_remote_power_garage_emhass` (W) and
+  `fed_remote_status_garage_emhass` (`committed`).
 
-**Several on/off devices behind one rating** — two remotes and a water heater
-behind a panel — are where coordinating black boxes is hardest: the master's
-prices are right for a mix of their plans, and recovery must pick one plan
-each. Three things keep the pick within the rating: participants behind a node
-are also asked at its marginal prices and for a plan that never sends power up;
-a recovered plan that still breaches is repaired against the others' fixed
-plans (a participant asked at the secant price of its whole power); and the
-recovery MILP is solved exactly (HiGHS, when scipy is installed).
-`tools/emhass-coordination` runs it with two remote EMHASS on one Home
-Assistant (`--remote`).
+This example was tested with two EMHASS in Docker. A connected to B through a
+LAN address.
+
+<details>
+<summary><b>B: <code>config.json</code> and <code>secrets_emhass.yaml</code></b></summary>
+
+```json
+{
+  "participant_api": {"publish_prefix": "garage_", "key": "garage"},
+  "costfun": "profit",
+  "optimization_time_step": 30,
+  "set_use_pv": false,
+  "set_use_battery": true,
+  "sensor_battery_state_of_charge": "sensor.garage_battery_soc",
+  "maximum_power_from_grid": 7000,
+  "maximum_power_to_grid": 0,
+  "battery_nominal_energy_capacity": 5000,
+  "battery_charge_power_max": 3000,
+  "battery_discharge_power_max": 3000,
+  "battery_charge_efficiency": 0.95,
+  "battery_discharge_efficiency": 0.95,
+  "battery_minimum_state_of_charge": 0.1,
+  "battery_maximum_state_of_charge": 0.95,
+  "battery_target_state_of_charge": 0.5,
+  "number_of_deferrable_loads": 1,
+  "nominal_power_of_deferrable_loads": [7000],
+  "operating_hours_of_each_deferrable_load": [2],
+  "treat_deferrable_load_as_semi_cont": [true],
+  "set_deferrable_load_single_constant": [false],
+  "start_timesteps_of_each_deferrable_load": [0],
+  "end_timesteps_of_each_deferrable_load": [0],
+  "minimum_power_of_deferrable_loads": [0],
+  "set_deferrable_startup_penalty": [0],
+  "set_deferrable_max_startups": [0],
+  "deferrable_load_max_cost": [0]
+}
+```
+
+```yaml
+server_ip: 0.0.0.0
+hass_url: http://<Home Assistant of B>:8123/
+long_lived_token: <Home Assistant token of B>
+time_zone: America/Los_Angeles
+Latitude: 37.4
+Longitude: -122.1
+Altitude: 10
+participant_token: <the token>
+```
+
+- `participant_api` makes B a remote solver. `publish_prefix` keeps the sensors
+  of B separate from the sensors of A.
+- `set_use_pv` is `false`. The PV belongs to A.
+- B reads the state of charge of its battery from `sensor_battery_state_of_charge`.
+- `maximum_power_from_grid` and `maximum_power_to_grid` are the limits of the
+  connection of B: 7 kW in, no backfeed. Each plan of B obeys them.
+- B does not run its own optimizations while A coordinates it.
+  Keep `continual_publish` off.
+- Keys that are not in this file use the EMHASS defaults. `optimization_backend`
+  stays `cvxpy` on B.
+
+</details>
+
+<details>
+<summary><b>A: <code>config.json</code> and <code>secrets_emhass.yaml</code></b></summary>
+
+```json
+{
+  "optimization_backend": "dantzig_wolfe",
+  "site": [
+    {"id": "grid", "max_import": 12000, "max_export": 6000},
+    {"id": "garage", "parent": "grid", "type": "panel", "max_import": 7400, "max_export": 0},
+    {"id": "l1", "type": "limit", "max_import": 7000},
+    {"id": "battery", "parent": "grid", "solver": "home_energy_optimizer"},
+    {"id": "deferrable0", "parent": "grid", "group": "loads"},
+    {"id": "deferrable1", "parent": "grid", "group": "loads"},
+    {"id": "water_heater", "parent": "garage", "solver": "home_energy_optimizer", "limits": ["l1"],
+     "config": {"power_kw": 3.0, "liters": 180.0, "t_comfort": 55.0, "n_duty_levels": 2, "comfort_weight": 10.0}},
+    {"id": "garage_emhass", "parent": "garage", "limits": ["l1"],
+     "solver": {"url": "http://192.168.1.20:5000/participant", "token_secret": "garage_token"}}
+  ],
+  "costfun": "profit",
+  "optimization_time_step": 30,
+  "set_use_pv": true,
+  "set_use_battery": true,
+  "battery_nominal_energy_capacity": 10000,
+  "battery_charge_power_max": 5000,
+  "battery_discharge_power_max": 5000,
+  "battery_charge_efficiency": 0.95,
+  "battery_discharge_efficiency": 0.95,
+  "battery_minimum_state_of_charge": 0.1,
+  "battery_maximum_state_of_charge": 0.95,
+  "battery_target_state_of_charge": 0.5,
+  "number_of_deferrable_loads": 2,
+  "nominal_power_of_deferrable_loads": [3000, 750],
+  "operating_hours_of_each_deferrable_load": [3, 4],
+  "treat_deferrable_load_as_semi_cont": [true, true],
+  "set_deferrable_load_single_constant": [false, false],
+  "start_timesteps_of_each_deferrable_load": [0, 0],
+  "end_timesteps_of_each_deferrable_load": [0, 0],
+  "minimum_power_of_deferrable_loads": [0, 0],
+  "set_deferrable_startup_penalty": [0, 0],
+  "set_deferrable_max_startups": [0, 0],
+  "deferrable_load_max_cost": [0, 0]
+}
+```
+
+```yaml
+server_ip: 0.0.0.0
+hass_url: http://<Home Assistant of A>:8123/
+long_lived_token: <Home Assistant token of A>
+time_zone: America/Los_Angeles
+Latitude: 37.4
+Longitude: -122.1
+Altitude: 10
+garage_token: <the token>
+```
+
+- `grid` is the main meter. `garage` is a panel on the main meter: 7.4 kW in,
+  no backfeed.
+- `l1` is a 7 kW limit for the water heater and B, for example their phase.
+- `garage_emhass` is B. A sees only the total power of B, not its devices.
+- A accepts a remote solver only from `config.json`. A `site` in a request
+  cannot add one.
+
+</details>
+
+<details>
+<summary><b>If B does not reply</b></summary>
+
+- A plans the house without B. A writes the cause in its log.
+- The plan of A shows `fed_remote_status_garage_emhass`: `unreachable`, or
+  `unauthorized` if the token is wrong.
+- B continues with its last plan. The plan of A does not include it.
+- A dry run of A sends no plan to B.
+
+</details>
+
+<details>
+<summary><b>Security</b></summary>
+
+- The connection is HTTP with a token. Use it only on a LAN that you trust.
+- Each call to B must have the token. Without it, B sends 401.
+- B gets a request that includes the load of the house only if B asks for it
+  (`best_response` in its description). EMHASS does not ask for it.
+- Mutual TLS is not available yet.
+
+</details>
+
+<details>
+<summary><b>Clocks and slots</b></summary>
+
+- Use the same `optimization_time_step` on A and B.
+- Synchronize the clocks of A and B (NTP). Use the same `time_zone`.
+- B refuses a horizon that starts more than one slot from its own (HTTP 409).
+
+</details>
+
+<details>
+<summary><b>Other solvers: the participant API</b></summary>
+
+Any solver can be a remote solver. It must reply to four calls
+(`schemas/participant-api.v1.json`, OpenAPI 3.1, draft):
+
+| Call | Purpose |
+|---|---|
+| `GET /v1/describe` | its key, its devices, its maximum power, on/off or modulating, the questions it accepts |
+| `POST /v1/baseline` | its plan with no price |
+| `POST /v1/query` | its plan at given prices (`device-query.v1`, `device-answer.v1`) |
+| `POST /v1/commit` | run the plan with this `Query-Id` |
+
+In Python: `home_energy_optimizer.remote.RemoteParticipant` is the side of A.
+`ParticipantService` is the side of B, for any HTTP server. `serve` runs it on
+the HTTP server of the Python standard library.
+
+A remote solver must:
+
+- Not change its devices when it replies to a question. Only a commit changes them.
+- Always send a plan. If its solve fails, it sends a plan that it can run, with
+  status `fallback`.
+- Reply quickly. One plan of A can need some dozens of questions.
+- Send the same reply to the same question.
+- Send its true private cost: comfort, wear, energy left in store.
+
+</details>
+
+<details>
+<summary><b>On/off devices behind one limit</b></summary>
+
+Two remote solvers and a water heater can share one panel. A must then select
+one plan for each, and the plans must obey the limit of the panel together.
+Four features give A such plans:
+
+- A also asks each remote solver at the marginal prices of its connection.
+- If the connection cannot export, A also asks for a plan that never exports.
+- If the selected plans exceed a limit, A asks again with the plans of the
+  others fixed. Then A selects again.
+- A selects the plans with an exact MILP (HiGHS, if scipy is installed).
+
+</details>
+
+<details>
+<summary><b>Try it on one machine</b></summary>
+
+`tools/emhass-coordination` runs A and two remote solvers (a garage and a shed)
+in Docker, with one Home Assistant:
+
+```bash
+python tools/emhass-coordination/coordinate.py up --config config_remote_two.json \
+    --remote garage=config_remote_garage.json --remote shed=config_remote_shed.json
+python tools/emhass-coordination/coordinate.py run --pv-peak 8000
+```
+
+Its README shows how to stop a remote solver or give A a wrong token.
+
+</details>
 
 ---
 
@@ -761,7 +955,7 @@ first forecast slot to what was just measured and decaying back over four slots.
 ## Roadmap
 
 Remote solvers - a participant in another process, container or device, over
-the participant API - are no longer on it: see "Remote solvers" above.
+the participant API - are no longer on it: see "Federated planning" above.
 
 ### Which standards make sense to connect, and how
 
