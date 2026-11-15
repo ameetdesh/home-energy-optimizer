@@ -602,7 +602,7 @@ so existing automations and charts keep working. Plus:
 | `fed_share_<player>` | each player's share of the saving over the horizon, in currency |
 | `fed_local_price_<id>`, `fed_node_power_<id>` | each node's own price per slot, and its power to its parent (W, + = up the tree) |
 | `fed_limit_price_<id>` | each limit's premium per slot while it binds |
-| `fed_remote_power_<id>`, `fed_remote_status_<id>` | each remote solver's power (W, + = drawn) and what became of it: `committed`, `refused: …`, `unreachable`, `unauthorized`, `planned (dry run)` |
+| `fed_remote_power_<id>`, `fed_remote_status_<id>` | each remote solver's power (W, + = drawn) and what became of it: `committed`, `refused: …`, `unreachable`, `unauthorized`, `declined: …` (it cannot plan this horizon), `planned (dry run)` |
 
 `optim_status` is `Optimal` only when the plan is proven within 0.1% of its
 lower bound; otherwise `Optimal_Inaccurate` — a runnable plan, which EMHASS

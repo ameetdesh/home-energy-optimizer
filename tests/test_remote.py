@@ -186,3 +186,22 @@ def test_a_remote_is_not_sent_the_house_s_load_unless_it_asks(remote):
     p = RemoteParticipant("water_heater", server.url, WINDOW)
     p.respond(Query("best_response", FC.buy, FC.sell, residual_kw=FC.load))
     assert rec.kinds == ["price_response"]
+
+
+def test_a_commit_cut_short_is_a_refusal_not_an_error(remote):
+    """http.client's errors are not OSErrors (a body cut short is
+    IncompleteRead): a commit that meets one is refused, said why."""
+    import http.client
+
+    server, rec = remote
+    send = urllib_transport(10)
+
+    def cut_short(method, url, headers, body):
+        if url.endswith("/v1/commit"):
+            raise http.client.IncompleteRead(b"{", 10)
+        return send(method, url, headers, body)
+
+    p = RemoteParticipant("water_heater", server.url, WINDOW, transport=cut_short)
+    chosen = p.respond(Query("price_response", FC.buy, FC.buy))
+    ok, why = p.commit(chosen.detail, chosen.plan_kw)
+    assert not ok and "IncompleteRead" in why and rec.committed == []
