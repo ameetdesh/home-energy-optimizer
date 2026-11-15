@@ -20,6 +20,7 @@ otherwise the same prices are asked as a price response.
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import time
@@ -165,7 +166,7 @@ class RemoteParticipant:
         data = None if body is None else json.dumps(body).encode()
         try:
             status, raw = self._send(method, self.url + path, headers, data)
-        except OSError as exc:                     # refused, unreachable, timed out
+        except (OSError, http.client.HTTPException) as exc:  # refused, unreachable, timed out, cut short
             raise RemoteError(f"{self.key}: {exc}") from exc
         try:
             out = json.loads(raw or b"{}")

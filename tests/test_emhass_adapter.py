@@ -6,7 +6,14 @@ import logging
 import numpy as np
 import pytest
 
-from home_energy_optimizer.integrations.emhass import _battery, _site, optimize, plan_status, unsupported
+from home_energy_optimizer.integrations.emhass import (
+    _battery,
+    _linear_battery,
+    _site,
+    optimize,
+    plan_status,
+    unsupported,
+)
 from home_energy_optimizer.types import SetLimit
 
 PLANT = {"battery_nominal_energy_capacity": 10000, "battery_minimum_state_of_charge": 0.3,
@@ -267,3 +274,114 @@ def test_keys_from_earlier_drafts_fall_back_by_name(old):
     """0.2.6 / 0.2.7 read these; planning without what they said would be worse."""
     reason = unsupported({"set_use_battery": False, old: [{"x": 1}]}, {}, "profit", {})
     assert reason is not None and old in reason and "site" in reason
+
+
+def _remotes_only(urls: list[str]):
+    """What optimize() reads from EMHASS for a house of remote solvers alone."""
+    class Opt:
+        optim_conf = {"optimization_backend": "dantzig_wolfe", "set_use_battery": False,
+                      "number_of_deferrable_loads": 0,
+                      "site": [{"id": f"r{i}", "parent": "grid", "solver": {"url": u}} for i, u in enumerate(urls)]}
+        plant_conf: dict = {}
+        retrieve_hass_conf: dict = {}
+        costfun = "profit"
+        time_step = 0.25
+        logger = logging.getLogger("emhass-test")
+
+        @staticmethod
+        def _prepare_power_limit_array(value, name, n):
+            return np.full(n, float(value))
+    return Opt()
+
+
+def _plan_with_remotes(monkeypatch, events: list, raise_for: str | None = None):
+    """Plan a house of two remote tanks; record when the saving is split and
+    when each remote is asked to commit, `raise_for`'s commit raising.
+    Needs pandas, as EMHASS does (the adapter's results are a DataFrame)."""
+    pd = pytest.importorskip("pandas")
+
+    import home_energy_optimizer.integrations.emhass as adapter
+    from home_energy_optimizer.remote import RemoteParticipant, serve
+    from test_remote import FC, H, Recorder, _service
+
+    recs = [Recorder(), Recorder()]
+    servers = [serve(_service(rec)) for rec in recs]
+    real_commit, real_shares = RemoteParticipant.commit, adapter.shares
+
+    def commit(self, detail, plan_kw):
+        events.append(f"commit {self.key}")
+        if self.key == raise_for:
+            raise RuntimeError("the remote's reply made no sense")
+        return real_commit(self, detail, plan_kw)
+
+    def split(*args, **kwargs):
+        events.append("shares")
+        return real_shares(*args, **kwargs)
+
+    monkeypatch.setattr(RemoteParticipant, "commit", commit)
+    monkeypatch.setattr(adapter, "shares", split)
+    try:
+        opt = _remotes_only([s.url for s in servers])
+        idx = pd.date_range("2026-10-07", periods=H.steps, freq="15min", tz="UTC")
+        res = optimize(opt, pd.DataFrame(index=idx), np.zeros(H.steps), np.full(H.steps, 500.0),
+                       FC.buy, np.minimum(FC.sell, FC.buy))
+    finally:
+        for s in servers:
+            s.shutdown()
+    return res, recs
+
+
+def test_remotes_commit_only_once_the_whole_plan_is_made(monkeypatch):
+    """Once a remote runs its part, nothing may send EMHASS to its default
+    solver: that would plan the house again around a remote already running
+    this plan. So the remotes commit last, after the saving's split."""
+    events: list[str] = []
+    res, recs = _plan_with_remotes(monkeypatch, events)
+    assert res is not None
+    assert events == ["shares", "commit r0", "commit r1"]
+    assert [len(rec.committed) for rec in recs] == [1, 1]
+    assert set(res["fed_remote_status_r0"]) == set(res["fed_remote_status_r1"]) == {"committed"}
+
+
+def test_a_commit_that_raises_is_a_refusal_and_the_plan_stands(monkeypatch):
+    """A commit that fails in any way is that remote's refusal: the plan is
+    still published (not handed to the default solver), and the others commit."""
+    events: list[str] = []
+    res, recs = _plan_with_remotes(monkeypatch, events, raise_for="r0")
+    assert res is not None
+    assert events == ["shares", "commit r0", "commit r1"]
+    assert [len(rec.committed) for rec in recs] == [0, 1]
+    (r0,) = set(res["fed_remote_status_r0"])
+    assert r0.startswith("refused: RuntimeError") and set(res["fed_remote_status_r1"]) == {"committed"}
+
+
+@pytest.mark.parametrize("conf", ["optim_conf", "plant_conf"])
+@pytest.mark.parametrize("key", ["battery_soc_deficit_cost", "battery_soc_surplus_cost"])
+def test_a_soc_penalty_keeps_the_battery_in_emhass_s_own_model(conf, key):
+    """EMHASS reads the SoC penalties from optim_conf: a positive one means
+    its own battery model, which prices them; the linear one would drop them."""
+    oc: dict = {"weight_battery_discharge": 0, "weight_battery_charge": 0}
+    pc: dict = {}
+    assert _linear_battery(oc, pc)
+    (oc if conf == "optim_conf" else pc)[key] = 0.05
+    assert not _linear_battery(oc, pc)
+
+
+def test_a_remote_that_cannot_plan_the_horizon_is_said_to_decline(monkeypatch):
+    """A remote that answers, but cannot plan this horizon (409: another slot
+    length, another first slot), is planned without, and the plan says why:
+    not "unreachable", which would send someone to check the network."""
+    pd = pytest.importorskip("pandas")
+    from home_energy_optimizer.remote import serve
+    from test_remote import FC, H, _service
+
+    server = serve(_service(steps=H.steps // 2))          # it plans half a day only
+    try:
+        idx = pd.date_range("2026-10-07", periods=H.steps, freq="15min", tz="UTC")
+        res = optimize(_remotes_only([server.url]), pd.DataFrame(index=idx), np.zeros(H.steps),
+                       np.full(H.steps, 500.0), FC.buy, np.minimum(FC.sell, FC.buy))
+    finally:
+        server.shutdown()
+    assert res is not None and "fed_remote_power_r0" not in res
+    (status,) = set(res["fed_remote_status_r0"])
+    assert status.startswith("declined: ") and "409" in status and "48 slots" in status

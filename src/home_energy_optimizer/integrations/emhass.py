@@ -725,9 +725,11 @@ def _linear_battery(oc: dict[str, Any], pc: dict[str, Any]) -> bool:
     def zero(v: Any) -> bool:
         return all(float(x or 0) == 0 for x in (v if isinstance(v, list) else [v]))
 
+    # EMHASS reads the SoC penalties from optim_conf; plant_conf too, as before
+    penalties = ("battery_soc_deficit_cost", "battery_soc_surplus_cost")
     return (not oc.get("set_battery_dynamic") and zero(oc.get("weight_battery_discharge", 0))
             and zero(oc.get("weight_battery_charge", 0)) and zero(pc.get("battery_stress_cost", 0))
-            and zero(pc.get("battery_soc_deficit_cost", 0)) and zero(pc.get("battery_soc_surplus_cost", 0))
+            and all(zero(conf.get(k, 0)) for conf in (oc, pc) for k in penalties)
             and not pc.get("battery_charge_power_derating"))
 
 
@@ -852,8 +854,13 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
                 rp.baseline()
             except (RemoteError, ValueError) as exc:
                 log.warning(f"site: the remote solver {key!r} did not answer ({exc}); planned without it")
-                refused = getattr(exc, "status", 0) in (401, 403)
-                remote_status[key] = "unauthorized" if refused else "unreachable"
+                status = getattr(exc, "status", 0)
+                if status in (401, 403):
+                    remote_status[key] = "unauthorized"
+                elif status == 409:                 # it answered: it cannot plan this horizon
+                    remote_status[key] = f"declined: {exc}"[:200]
+                else:
+                    remote_status[key] = "unreachable"
                 continue
             participants.append(rp)
             remotes.append(rp)
@@ -902,18 +909,6 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
 
     res = _results(opt, co, r, data_opt, pv_w, load_w, buy, sell_in, soc_init, devices, participants, site,
                    layout.inverter)
-    # Each remote runs its part of a live plan; a dry run asks nothing of anyone
-    for rp in remotes:
-        if getattr(opt, "fed_dry_run", False):
-            remote_status[rp.key] = "planned (dry run)"
-            continue
-        chosen = r.plan[rp.key]
-        ok, why = rp.commit(chosen.detail, chosen.power)
-        remote_status[rp.key] = "committed" if ok else f"refused: {why}"[:200]
-        if not ok:
-            log.warning(f"site: the remote solver {rp.key!r} did not take its plan ({why})")
-    for key, status in remote_status.items():
-        res[f"fed_remote_status_{key}"] = status
     try:
         # The saving split needs one more plan, the same devices with no PV
         # (the export ceiling, PV surplus, is then zero).
@@ -928,6 +923,24 @@ def optimize(opt: EmhassOptimization, data_opt: pd.DataFrame, p_pv: npt.ArrayLik
     solves = sum(p.solves for p in participants)
     log.info(f"optimization_backend=dantzig_wolfe: {r.iterations} iterations, gap {r.upper - r.lower:.4f}, "
              f"{solves} participant solves, {time.perf_counter() - t0:.2f} s")
+    # Each remote runs its part of a live plan, last: once one has committed,
+    # nothing here may fail and send EMHASS to its default solver, which would
+    # plan the house again around a remote already running this plan.
+    # A dry run asks nothing of anyone.
+    for rp in remotes:
+        if getattr(opt, "fed_dry_run", False):
+            remote_status[rp.key] = "planned (dry run)"
+            continue
+        chosen = r.plan[rp.key]
+        try:
+            ok, why = rp.commit(chosen.detail, chosen.power)
+        except Exception as exc:                        # a commit that fails, however, is a refusal
+            ok, why = False, f"{type(exc).__name__}: {exc}"
+        remote_status[rp.key] = "committed" if ok else f"refused: {why}"[:200]
+        if not ok:
+            log.warning(f"site: the remote solver {rp.key!r} did not take its plan ({why})")
+    for key, status in remote_status.items():
+        res[f"fed_remote_status_{key}"] = status
     return res
 
 
